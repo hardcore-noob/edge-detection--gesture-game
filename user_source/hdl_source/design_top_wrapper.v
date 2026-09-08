@@ -196,6 +196,7 @@ module design_top_wrapper (
     wire[23:0]  S_debug_status_bus;
     reg [15:0]  S_frame_cnt_dbg;
     reg         S_hdmi_user_1d;
+    reg         S_dbg_alg_prev;
     wire        S_lane_error_any;
     wire        S_alg_sel_24m;
     reg         S_alg_sel_csi_1d;
@@ -373,8 +374,12 @@ module design_top_wrapper (
             S_dbg_mc_app_rdy_seen_sync <= 2'b00;
             S_dbg_mc_wdf_rdy_seen_sync <= 2'b00;
             S_dbg_mc_cmd_pop_seen_sync <= 2'b00;
+            S_dbg_alg_prev <= 1'b0;
         end
         else begin
+            S_dbg_alg_prev <= S_alg_status_hdmi_3d;
+            if(S_alg_status_hdmi_3d != S_dbg_alg_prev)
+                S_dbg_video_nonzero_seen <= 1'b0;
             S_dbg_cam_cfg_seen_sync <= {S_dbg_cam_cfg_seen_sync[0], S_dbg_cam_cfg_seen};
             S_dbg_hs_seen_sync      <= {S_dbg_hs_seen_sync[0],      S_dbg_hs_seen};
             S_dbg_csi_seen_sync     <= {S_dbg_csi_seen_sync[0],     S_dbg_csi_seen};

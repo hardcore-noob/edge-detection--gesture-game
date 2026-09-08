@@ -260,8 +260,11 @@ module debug_uart_logger #(
                 end
                 TX_START: begin
                     O_tx <= 1'b0;
-                    if (S_tx_div == CLK_PER_BIT - 1)
+                    if (S_tx_div == CLK_PER_BIT - 1) begin
                         S_tx_state <= TX_DATA;
+                        // 进入数据位前先右移一次，避免把起始位再次当作数据位发送
+                        S_tx_shift <= {1'b0, S_tx_shift[9:1]};
+                    end
                 end
                 TX_DATA: begin
                     O_tx <= S_tx_shift[0];

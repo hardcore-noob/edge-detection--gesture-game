@@ -6,6 +6,40 @@ param(
 
 Add-Type -AssemblyName System.IO.Ports
 
+function Convert-RotateRight1 {
+    param([byte]$Byte)
+    $v = [int]$Byte
+    return [byte]((($v -shr 1) -bor (($v -band 1) -shl 7)) -band 255)
+}
+
+function Read-OneLine {
+    param($SerialPort)
+    $bytes = New-Object System.Collections.Generic.List[byte]
+    while ($true) {
+        try {
+            $next = $SerialPort.ReadByte()
+        }
+        catch [System.TimeoutException] {
+            if ($bytes.Count -eq 0) {
+                return $null
+            }
+            continue
+        }
+        if ($next -eq 0x0A) {
+            if ($bytes.Count -gt 1 -and $bytes[$bytes.Count - 1] -eq 0x0D) {
+                $bytes.RemoveAt($bytes.Count - 1)
+            }
+            break
+        }
+        $bytes.Add([byte]$next)
+    }
+    $text = -join ($bytes | ForEach-Object { [char]$_ })
+    if (-not $text.StartsWith("DBG:")) {
+        $text = -join ($bytes | ForEach-Object { [char](Convert-RotateRight1 $_) })
+    }
+    return $text
+}
+
 if (-not $Port) {
     $ports = Get-CimInstance Win32_SerialPort |
         Select-Object DeviceID, Name, Description
@@ -25,13 +59,10 @@ Write-Host "Opening $Port @ $Baud baud...  Ctrl+C to stop."
 try {
     $portObj.Open()
     while ($true) {
-        try {
-            $line = $portObj.ReadLine()
+        $line = Read-OneLine $portObj
+        if ($line) {
             Write-Host $line
             Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
-        }
-        catch [System.TimeoutException] {
-            # No data received within the timeout; keep waiting.
         }
     }
 }
