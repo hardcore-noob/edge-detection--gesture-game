@@ -9,7 +9,7 @@ module design_top_wrapper (
     output wire       O_cam_24m,
     output wire       O_cam_rst,
       
-    input wire [1:0]  I_button,
+    input wire [2:0]  I_button,
 
     output wire       O_screen_pwm,
     output wire       O_tmds_ch0_p,
@@ -461,7 +461,8 @@ module design_top_wrapper (
   ae_set u_ae_set (
       .I_clk(S_24m_clk),
       .I_rst(~S_rst_n),
-      .I_btn({3'b111, I_button[0]}),
+      // 曝光调节：KEY2(A9) 降低曝光，KEY3(B9) 提高曝光
+      .I_btn({2'b11, I_button[2], I_button[0]}),
       .I_cam_cfg_done(S_cam_cfg_done),
       .I_ae_cfg_done(S_ae_cfg_done),
       .O_ae_req(S_ae_req),
