@@ -22,3 +22,4 @@ Thumbs.db
 *.ts
 *.timing
 *.area
+debug_uart.log

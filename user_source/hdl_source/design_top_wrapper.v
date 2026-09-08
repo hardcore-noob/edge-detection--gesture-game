@@ -22,6 +22,7 @@ module design_top_wrapper (
     inout wire[3:0]   IO_rx_data_pad_n,
     inout wire[3:0]   IO_rx_data_pad_p,
 
+    output wire       O_debug_tx,
     output wire[12:0] ddr_addr,
     output wire[ 1:0] ddr_ba,
     output wire[ 0:0] ddr_cke,
@@ -192,6 +193,9 @@ module design_top_wrapper (
     reg [1:0]   S_dbg_mc_wdf_rdy_seen_sync;
     reg [1:0]   S_dbg_mc_cmd_pop_seen_sync;
     wire[3:0]   S_hdmi_debug_status;
+    wire[23:0]  S_debug_status_bus;
+    reg [15:0]  S_frame_cnt_dbg;
+    reg         S_hdmi_user_1d;
     wire        S_lane_error_any;
     wire        S_alg_sel_24m;
     reg         S_alg_sel_csi_1d;
@@ -433,6 +437,45 @@ module design_top_wrapper (
     assign S_mc_dbg_cmd_pop = 1'b0;
 
     assign S_hdmi_debug_status = {3'b000, S_alg_status_hdmi_3d};
+
+    assign S_debug_status_bus = {
+        S_dbg_mc_init_seen_sync[1],
+        S_dbg_mc_app_rdy_seen_sync[1],
+        S_dbg_mc_wdf_rdy_seen_sync[1],
+        S_dbg_mc_cmd_pop_seen_sync[1],
+        S_dbg_ddr_rd_seen_sync[1],
+        S_dbg_ddr_wr_seen_sync[1],
+        S_dbg_ddr_ready_seen_sync[1],
+        S_dbg_ddr_req_seen_sync[1],
+        S_dbg_isp_valid_seen_sync[1],
+        S_dbg_isp_fs_seen_sync[1],
+        S_dbg_isp_seen_sync[1],
+        S_dbg_raw_seen_sync[1],
+        S_dbg_raw10_seen_sync[1],
+        S_dbg_csi_seen_sync[1],
+        S_dbg_hs_seen_sync[1],
+        S_dbg_cam_cfg_seen_sync[1],
+        S_dbg_rd_req_seen_sync[1],
+        S_dbg_rd_valid_seen_sync[1],
+        S_dbg_rd_nonzero_seen_sync[1],
+        S_dbg_video_nonzero_seen,
+        S_alg_status_hdmi_3d,
+        S_hdmi_out_de,
+        S_hdmi_de,
+        S_hdmi_window_rd_en
+    };
+
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_hdmi_user_1d <= 1'b0;
+            S_frame_cnt_dbg <= 16'd0;
+        end
+        else begin
+            S_hdmi_user_1d <= S_hdmi_user;
+            if(S_hdmi_user && !S_hdmi_user_1d)
+                S_frame_cnt_dbg <= S_frame_cnt_dbg + 1'b1;
+        end
+    end
 	
 	assign O_cam_rst 	= 1'b1;
     assign O_cam_24m 	= S_24m_clk;
@@ -838,6 +881,20 @@ isp_top u_isp_top (
         .O_tmds_ch1_p       ( O_tmds_ch1_p      ),
         .O_tmds_ch2_p       ( O_tmds_ch2_p      ),
         .O_tmds_clk_p       ( O_tmds_clk_p      )
+    );
+
+    debug_uart_logger #(
+        .CLK_HZ         ( 52000000 ),
+        .BAUD           ( 115200   ),
+        .LOG_PERIOD_MS  ( 1000     )
+    ) u_debug_uart_logger (
+        .I_clk          ( S_hdmi_pixel_clk   ),
+        .I_rst_n        ( S_hdmi_rst_n       ),
+        .I_status       ( S_debug_status_bus ),
+        .I_ae           ( S_ae               ),
+        .I_ag           ( S_ag               ),
+        .I_frame_cnt    ( S_frame_cnt_dbg    ),
+        .O_tx           ( O_debug_tx         )
     );
 
 
