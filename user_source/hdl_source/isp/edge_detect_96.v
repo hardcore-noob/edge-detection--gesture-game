@@ -28,6 +28,7 @@ localparam IMG_WIDTH_GRP = (IMG_WIDTH >> 2);
 reg [95:0] in_data_r;
 reg        in_valid_r;
 reg        in_user_r;
+reg        in_user_raw;
 reg        in_last_r;
 reg        fs_armed;
 reg [10:0] x_cur;
@@ -40,6 +41,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         in_data_r  <= 96'd0;
         in_valid_r <= 1'b0;
         in_user_r  <= 1'b0;
+        in_user_raw <= 1'b0;
         in_last_r  <= 1'b0;
         fs_armed   <= 1'b0;
         x_cur      <= 11'd0;
@@ -48,6 +50,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
     else begin
         in_data_r  <= I_tdata;
         in_valid_r <= I_tvalid;
+        in_user_raw <= I_tuser;
         in_last_r  <= I_tlast;
 
         // The AWB output data is delayed by its divider pipeline while I_tuser
@@ -103,6 +106,7 @@ wire [7:0] gray3 = rgb_sum3 / 10'd3;
 reg [7:0]  grp_gray_r;
 reg        g_valid_r;
 reg        g_user_r;
+reg        g_user_raw;
 reg        g_last_r;
 reg [10:0] x1;
 reg [10:0] y1;
@@ -112,6 +116,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         grp_gray_r <= 8'd0;
         g_valid_r  <= 1'b0;
         g_user_r   <= 1'b0;
+        g_user_raw <= 1'b0;
         g_last_r   <= 1'b0;
         x1         <= 11'd0;
         y1         <= 11'd0;
@@ -121,6 +126,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
                        {2'd0, gray2} + {2'd0, gray3}) >> 2;
         g_valid_r  <= in_valid_r;
         g_user_r   <= in_user_r;
+        g_user_raw <= in_user_raw;
         g_last_r   <= in_last_r;
         x1         <= x_cur;
         y1         <= y_cur;
@@ -131,6 +137,7 @@ end
 reg [7:0]  smooth_r;
 reg        s_valid_r;
 reg        s_user_r;
+reg        s_user_raw;
 reg        s_last_r;
 reg [10:0] x2;
 reg [10:0] y2;
@@ -151,6 +158,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         smooth_r            <= 8'd0;
         s_valid_r           <= 1'b0;
         s_user_r            <= 1'b0;
+        s_user_raw          <= 1'b0;
         s_last_r            <= 1'b0;
         x2                  <= 11'd0;
         y2                  <= 11'd0;
@@ -167,6 +175,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         smooth_r <= smooth_next;
         s_valid_r <= g_valid_r;
         s_user_r  <= g_user_r;
+        s_user_raw <= g_user_raw;
         s_last_r  <= g_last_r;
         x2        <= x1;
         y2        <= y1;
@@ -192,6 +201,7 @@ reg [7:0]  win_mid0, win_mid1, win_mid2;
 reg [7:0]  win_cur0, win_cur1, win_cur2;
 reg        w_valid_r;
 reg        w_user_r;
+reg        w_user_raw;
 reg        w_last_r;
 reg [10:0] x3;
 reg [10:0] y3;
@@ -206,6 +216,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         win_cur0 <= 8'd0; win_cur1 <= 8'd0; win_cur2 <= 8'd0;
         w_valid_r <= 1'b0;
         w_user_r  <= 1'b0;
+        w_user_raw <= 1'b0;
         w_last_r  <= 1'b0;
         x3        <= 11'd0;
         y3        <= 11'd0;
@@ -244,6 +255,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
 
         w_valid_r <= s_valid_r;
         w_user_r  <= s_user_r;
+        w_user_raw <= s_user_raw;
         w_last_r  <= s_last_r;
         x3        <= x2;
         y3        <= y2;
@@ -255,6 +267,7 @@ reg signed [12:0] gx_r;
 reg signed [12:0] gy_r;
 reg        q_valid_r;
 reg        q_user_r;
+reg        q_user_raw;
 reg        q_last_r;
 reg [10:0] x4;
 reg [10:0] y4;
@@ -265,6 +278,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         gy_r       <= 13'sd0;
         q_valid_r  <= 1'b0;
         q_user_r   <= 1'b0;
+        q_user_raw <= 1'b0;
         q_last_r   <= 1'b0;
         x4         <= 11'd0;
         y4         <= 11'd0;
@@ -281,6 +295,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
 
         q_valid_r <= w_valid_r;
         q_user_r  <= w_user_r;
+        q_user_raw <= w_user_raw;
         q_last_r  <= w_last_r;
         x4        <= x3;
         y4        <= y3;
@@ -297,6 +312,7 @@ wire        edge_next   = (x4 >= 11'd2) && (y4 >= 11'd2) &&
 reg        edge_r;
 reg        e_valid_r;
 reg        e_user_r;
+reg        e_user_raw;
 reg        e_last_r;
 
 always @(posedge I_clk or negedge I_rst_n) begin
@@ -304,12 +320,14 @@ always @(posedge I_clk or negedge I_rst_n) begin
         edge_r     <= 1'b0;
         e_valid_r  <= 1'b0;
         e_user_r   <= 1'b0;
+        e_user_raw <= 1'b0;
         e_last_r   <= 1'b0;
     end
     else begin
         edge_r     <= edge_next;
         e_valid_r  <= q_valid_r;
         e_user_r   <= q_user_r;
+        e_user_raw <= q_user_raw;
         e_last_r   <= q_last_r;
     end
 end
@@ -335,7 +353,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
                         ? {24'hFFFFFF, 24'hFFFFFF, 24'hFFFFFF, 24'hFFFFFF}
                         : 96'd0;
             O_tvalid <= 1'b1;
-            O_tuser  <= e_user_r;
+            O_tuser  <= e_user_raw;
             O_tlast  <= e_last_r;
 
             if (e_user_r || e_last_r || (x4 == IMG_WIDTH_GRP - 1)) begin
@@ -350,7 +368,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
         else begin
             O_tdata   <= 96'd0;
             O_tvalid  <= 1'b0;
-            O_tuser   <= 1'b0;
+            O_tuser   <= e_user_raw;
             O_tlast   <= 1'b0;
         end
     end
