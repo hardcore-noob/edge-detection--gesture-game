@@ -868,6 +868,7 @@ module hdmi_mixer #(
                     S_st_scale_y = S_st_local_y * 10'd16;
                     S_st_col = S_st_scale_x / 10'd24;
                     S_st_row = S_st_scale_y / 10'd24;
+                    S_pf_row = S_st_scale_y / 10'd24;
                     case(S_st_col)
                         4'd0:  S_st_on = S_pf_row_bits[15];
                         4'd1:  S_st_on = S_pf_row_bits[14];

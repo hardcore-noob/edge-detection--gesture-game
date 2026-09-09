@@ -146,6 +146,8 @@ module design_top_wrapper (
     wire        S_hdmi_user;
     wire        S_hdmi_last;
     wire        S_video_out_vsync;
+    reg         S_video_out_vsync_ddr_1d;
+    reg         S_video_out_vsync_ddr_2d;
     wire        S_hdmi_window_rd_en;
     wire        S_hdmi_out_vsync;
     wire        S_hdmi_out_hsync;
@@ -219,6 +221,17 @@ module design_top_wrapper (
 	
     assign S_rst_n 		= S_pll_lock;
     assign S_hdmi_rst_n = S_pll_lock;
+
+    always @(posedge S_ddr_clk or negedge S_rst_n) begin
+        if(!S_rst_n) begin
+            S_video_out_vsync_ddr_1d <= 1'b0;
+            S_video_out_vsync_ddr_2d <= 1'b0;
+        end
+        else begin
+            S_video_out_vsync_ddr_1d <= S_video_out_vsync;
+            S_video_out_vsync_ddr_2d <= S_video_out_vsync_ddr_1d;
+        end
+    end
 
     always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
         if(!S_rst_n)
@@ -307,7 +320,7 @@ module design_top_wrapper (
     always @(posedge S_ddr_clk or negedge S_video_out_rst_n) begin
         if(!S_video_out_rst_n)
             S_dbg_rd_req_seen <= 1'b0;
-        else if(S_video_out_vsync)
+        else if(S_video_out_vsync_ddr_2d)
             S_dbg_rd_req_seen <= 1'b0;
         else if(S_vo_ddr_rd_en)
             S_dbg_rd_req_seen <= 1'b1;
@@ -316,7 +329,7 @@ module design_top_wrapper (
     always @(posedge S_ddr_clk or negedge S_video_out_rst_n) begin
         if(!S_video_out_rst_n)
             S_dbg_rd_valid_seen <= 1'b0;
-        else if(S_video_out_vsync)
+        else if(S_video_out_vsync_ddr_2d)
             S_dbg_rd_valid_seen <= 1'b0;
         else if(S_ddr_user_rd_valid)
             S_dbg_rd_valid_seen <= 1'b1;
@@ -460,10 +473,10 @@ module design_top_wrapper (
     assign S_vo_dbg_ddr_rd_valid = 1'b0;
     assign S_vo_dbg_fifo_rd_en = 1'b0;
     assign S_vo_dbg_fifo_empty = 1'b0;
-    assign S_mc_dbg_fifo_afull = 1'b0;
-    assign S_mc_dbg_app_rdy = 1'b0;
-    assign S_mc_dbg_wdf_rdy = 1'b0;
-    assign S_mc_dbg_cmd_pop = 1'b0;
+    assign S_mc_dbg_fifo_afull = ~S_ddr_user_ready;
+    assign S_mc_dbg_app_rdy = S_mc_app_rdy;
+    assign S_mc_dbg_wdf_rdy = S_mc_app_wdf_rdy;
+    assign S_mc_dbg_cmd_pop = S_mc_app_en;
 
     assign S_hdmi_debug_status = {3'b000, S_alg_status_hdmi_3d};
 

@@ -37,6 +37,7 @@ module isp_top (
     wire         awb_O_tuser_128;  //synthesis keep
     wire         awb_O_tvalid_128;  //synthesis keep
     wire [127:0] awb_O_tdata_128;  //synthesis keep
+    wire         awb_O_tlast_128;  //synthesis keep
 
     wire         edge_O_tlast;  //synthesis keep
     wire         edge_O_tuser;  //synthesis keep
@@ -57,7 +58,7 @@ module isp_top (
     // 下游 data_96bit_to_128bit 无反压，awb/edge 的输入 ready 直接接 1；
     // 它们的输出 ready（模块内部为直通）悬空不接，避免组合环路。
     assign O_tdata  = awb_O_tdata_128;
-    assign O_tlast  = awb_O_tlast;
+    assign O_tlast  = awb_O_tlast_128;
     assign O_tuser  = awb_O_tuser_128;
     assign O_tvalid = awb_O_tvalid_128;
     assign O_edge_dbg_valid = edge_O_tvalid;
@@ -141,10 +142,12 @@ module isp_top (
         .I_96b_frame_start  ( sel_tuser         ),
         .I_96b_valid        ( sel_tvalid        ),
         .I_96b_data         ( sel_tdata         ),
+        .I_96b_tlast        ( sel_tlast         ),
 
         .O_128b_frame_start ( awb_O_tuser_128   ),
         .O_128b_valid       ( awb_O_tvalid_128  ),
-        .O_128b_data        ( awb_O_tdata_128   )
+        .O_128b_data        ( awb_O_tdata_128   ),
+        .O_128b_tlast       ( awb_O_tlast_128   )
     );
 
     //data96_128 u_data96_128 (

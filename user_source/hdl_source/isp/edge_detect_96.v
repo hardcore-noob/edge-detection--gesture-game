@@ -90,10 +90,15 @@ wire [23:0] pix1 = in_data_r[71:48];
 wire [23:0] pix2 = in_data_r[47:24];
 wire [23:0] pix3 = in_data_r[23:0];
 
-wire [7:0] gray0 = (pix0[23:16] + pix0[15:8] + pix0[7:0]) / 8'd3;
-wire [7:0] gray1 = (pix1[23:16] + pix1[15:8] + pix1[7:0]) / 8'd3;
-wire [7:0] gray2 = (pix2[23:16] + pix2[15:8] + pix2[7:0]) / 8'd3;
-wire [7:0] gray3 = (pix3[23:16] + pix3[15:8] + pix3[7:0]) / 8'd3;
+wire [9:0] rgb_sum0 = {2'd0, pix0[23:16]} + {2'd0, pix0[15:8]} + {2'd0, pix0[7:0]};
+wire [9:0] rgb_sum1 = {2'd0, pix1[23:16]} + {2'd0, pix1[15:8]} + {2'd0, pix1[7:0]};
+wire [9:0] rgb_sum2 = {2'd0, pix2[23:16]} + {2'd0, pix2[15:8]} + {2'd0, pix2[7:0]};
+wire [9:0] rgb_sum3 = {2'd0, pix3[23:16]} + {2'd0, pix3[15:8]} + {2'd0, pix3[7:0]};
+
+wire [7:0] gray0 = rgb_sum0 / 10'd3;
+wire [7:0] gray1 = rgb_sum1 / 10'd3;
+wire [7:0] gray2 = rgb_sum2 / 10'd3;
+wire [7:0] gray3 = rgb_sum3 / 10'd3;
 
 reg [7:0]  grp_gray_r;
 reg        g_valid_r;
@@ -112,7 +117,8 @@ always @(posedge I_clk or negedge I_rst_n) begin
         y1         <= 11'd0;
     end
     else begin
-        grp_gray_r <= (gray0 + gray1 + gray2 + gray3) >> 2;
+        grp_gray_r <= ({2'd0, gray0} + {2'd0, gray1} +
+                       {2'd0, gray2} + {2'd0, gray3}) >> 2;
         g_valid_r  <= in_valid_r;
         g_user_r   <= in_user_r;
         g_last_r   <= in_last_r;
@@ -209,14 +215,14 @@ always @(posedge I_clk or negedge I_rst_n) begin
             // Snapshot the window for the Sobel stage, then update/clear the
             // column registers.  The snapshot keeps the end-of-row values
             // available to stage 4 while zeroing the running registers.
-            win_top0 <= top_c0;
-            win_top1 <= top_c1;
+            win_top0 <= top_c1;
+            win_top1 <= top_c2;
             win_top2 <= top_row_r;
-            win_mid0 <= mid_c0;
-            win_mid1 <= mid_c1;
+            win_mid0 <= mid_c1;
+            win_mid1 <= mid_c2;
             win_mid2 <= mid_row_r;
-            win_cur0 <= cur_c0;
-            win_cur1 <= cur_c1;
+            win_cur0 <= cur_c1;
+            win_cur1 <= cur_c2;
             win_cur2 <= smooth_r;
 
             top_c0 <= top_c1;

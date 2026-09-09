@@ -126,16 +126,16 @@ module debug_uart_logger #(
                 6'd30: F_line_byte = F_hex_nibble(I_status[11:8]);
                 6'd31: F_line_byte = F_hex_nibble(I_status[7:4]);
                 6'd32: F_line_byte = F_hex_nibble(I_status[3:0]);
-                6'd33: F_line_byte = 8'h0D;
-                6'd34: F_line_byte = 8'h0A;
-                6'd35: F_line_byte = 8'h20;
-                6'd36: F_line_byte = 8'h4E;
-                6'd37: F_line_byte = 8'h3D;
-                6'd38: F_line_byte = F_hex_nibble(I_cnt[19:16]);
-                6'd39: F_line_byte = F_hex_nibble(I_cnt[15:12]);
-                6'd40: F_line_byte = F_hex_nibble(I_cnt[11:8]);
-                6'd41: F_line_byte = F_hex_nibble(I_cnt[7:4]);
-                6'd42: F_line_byte = F_hex_nibble(I_cnt[3:0]);
+                6'd33: F_line_byte = 8'h20;
+                6'd34: F_line_byte = 8'h4E;
+                6'd35: F_line_byte = 8'h3D;
+                6'd36: F_line_byte = F_hex_nibble(I_cnt[19:16]);
+                6'd37: F_line_byte = F_hex_nibble(I_cnt[15:12]);
+                6'd38: F_line_byte = F_hex_nibble(I_cnt[11:8]);
+                6'd39: F_line_byte = F_hex_nibble(I_cnt[7:4]);
+                6'd40: F_line_byte = F_hex_nibble(I_cnt[3:0]);
+                6'd41: F_line_byte = 8'h0D;
+                6'd42: F_line_byte = 8'h0A;
                 default: F_line_byte = 8'h20;
             endcase
         end
