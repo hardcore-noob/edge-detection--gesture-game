@@ -70,13 +70,13 @@ end
 	
 //	Use button to add / sub idelay values. I_button[0]:IncDatDly, [1]DecDatDly, [2]IncI_clkDly, [3]DecI_clkDly
 reg 	[3:0] 	r_button_0 = 0, r_button_1 = 0; 
-reg 	[15:0] 	r_ae_set = 3000, r_ag_set = 80; 
+reg 	[15:0] 	r_ae_set = 3990, r_ag_set = 89;
 always @(posedge I_clk or posedge I_rst) begin
 	if(I_rst) begin
 		r_button_0 <= 0; 
 		r_button_1 <= 0; 
-		r_ae_set <= 3000; 
-		r_ag_set <= 80; 
+		r_ae_set <= 3990;
+		r_ag_set <= 89;
 	end else begin
 	//	When button pressed, r_button_1 bit is 1. 
 		r_button_0 <= ~I_btn; 
@@ -85,7 +85,7 @@ always @(posedge I_clk or posedge I_rst) begin
 		if(r_button_1[0]) begin
 			r_ae_set <= (r_ae_set > 2) ? r_ae_set - r_ae_tick : r_ae_set; 
 		end else if(r_button_1[1]) begin
-			r_ae_set <= (r_ae_set < 2246) ? r_ae_set + r_ae_tick : r_ae_set; 
+			r_ae_set <= (r_ae_set < 3990) ? r_ae_set + r_ae_tick : r_ae_set;
 		end 
 		if(r_button_1[2]) begin
 				r_ag_set <= (r_ag_set > 16) ? r_ag_set - r_ag_tick : r_ag_set; 
@@ -121,4 +121,3 @@ end
 endmodule
 
 
-	

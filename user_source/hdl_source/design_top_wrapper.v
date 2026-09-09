@@ -1004,6 +1004,7 @@ isp_top u_isp_top (
         .I_bright_cnt   ( S_dbg_bright_px    ),
         .I_very_cnt     ( S_dbg_very_px      ),
         .I_max_px       ( S_dbg_raw_max_sync2),
+        .I_disp_max_px  ( S_dbg_max_px       ),
         .O_tx           ( O_debug_tx         )
     );
 
