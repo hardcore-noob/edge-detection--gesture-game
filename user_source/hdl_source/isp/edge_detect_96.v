@@ -19,357 +19,155 @@ module edge_detect_96 #(
 
 assign O_tready = I_tready;
 
+wire [23:0] pix0 = I_tdata[95:72];
+wire [23:0] pix1 = I_tdata[71:48];
+wire [23:0] pix2 = I_tdata[47:24];
+wire [23:0] pix3 = I_tdata[23:0];
+
+wire [7:0] gray0 = (pix0[23:16] + pix0[15:8] + pix0[7:0]) / 8'd3;
+wire [7:0] gray1 = (pix1[23:16] + pix1[15:8] + pix1[7:0]) / 8'd3;
+wire [7:0] gray2 = (pix2[23:16] + pix2[15:8] + pix2[7:0]) / 8'd3;
+wire [7:0] gray3 = (pix3[23:16] + pix3[15:8] + pix3[7:0]) / 8'd3;
+
 localparam IMG_WIDTH_GRP = (IMG_WIDTH >> 2);
 
 (* ram_style = "block" *) reg [7:0] line1_mem [0:IMG_WIDTH_GRP-1];
 (* ram_style = "block" *) reg [7:0] line2_mem [0:IMG_WIDTH_GRP-1];
 
-// Stage 0: register the AXI-Stream input and keep the group address.
-reg [95:0] in_data_r;
-reg        in_valid_r;
-reg        in_user_r;
-reg        in_user_raw;
-reg        in_last_r;
-reg        fs_armed;
-reg [10:0] x_cur;
-reg [10:0] y_cur;
+reg [10:0] x_grp;
+reg [10:0] y_pos;
+
+reg [7:0] r0c0, r0c1, r0c2;
+reg [7:0] r1c0, r1c1, r1c2;
+reg [7:0] r2c0, r2c1, r2c2;
+
+reg [7:0] grp_gray;
+reg [7:0] prev_grp_gray_d1;
+reg [7:0] prev_grp_gray_d2;
+reg [7:0] smooth_gray;
+reg [7:0] top_v;
+reg [7:0] mid_v;
+
+reg signed [12:0] gx;
+reg signed [12:0] gy;
+reg [12:0] abs_gx;
+reg [12:0] abs_gy;
+reg [13:0] mag;
+reg        edge_flag;
+reg        edge_hist_d1;
+reg        edge_hist_d2;
+reg        edge_flag_filt;
+
+reg [23:0] out_pix;
 
 integer i;
 
 always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        in_data_r  <= 96'd0;
-        in_valid_r <= 1'b0;
-        in_user_r  <= 1'b0;
-        in_user_raw <= 1'b0;
-        in_last_r  <= 1'b0;
-        fs_armed   <= 1'b0;
-        x_cur      <= 11'd0;
-        y_cur      <= 11'd0;
-    end
-    else begin
-        in_data_r  <= I_tdata;
-        in_valid_r <= I_tvalid;
-        in_user_raw <= I_tuser;
-        in_last_r  <= I_tlast;
-
-        // The AWB output data is delayed by its divider pipeline while I_tuser
-        // belongs to the original stream. Keep one frame-start flag, then emit
-        // it together with the first registered valid sample.
-        if (I_tuser) begin
-            in_user_r <= 1'b1;
-            fs_armed  <= ~I_tvalid;
-        end
-        else if (fs_armed && I_tvalid) begin
-            in_user_r <= 1'b1;
-            fs_armed  <= 1'b0;
-        end
-        else begin
-            in_user_r <= 1'b0;
-        end
-
-        if (I_tuser || (fs_armed && I_tvalid)) begin
-            x_cur <= 11'd0;
-            y_cur <= 11'd0;
-        end
-        else if (I_tvalid) begin
-            if (x_cur == IMG_WIDTH_GRP - 1) begin
-                x_cur <= 11'd0;
-                if (y_cur == IMG_HEIGHT - 1)
-                    y_cur <= 11'd0;
-                else
-                    y_cur <= y_cur + 1'b1;
-            end
-            else begin
-                x_cur <= x_cur + 1'b1;
-            end
-        end
-    end
-end
-
-// Stage 1: convert the four RGB pixels to one group gray value.
-wire [23:0] pix0 = in_data_r[95:72];
-wire [23:0] pix1 = in_data_r[71:48];
-wire [23:0] pix2 = in_data_r[47:24];
-wire [23:0] pix3 = in_data_r[23:0];
-
-wire [9:0] rgb_sum0 = {2'd0, pix0[23:16]} + {2'd0, pix0[15:8]} + {2'd0, pix0[7:0]};
-wire [9:0] rgb_sum1 = {2'd0, pix1[23:16]} + {2'd0, pix1[15:8]} + {2'd0, pix1[7:0]};
-wire [9:0] rgb_sum2 = {2'd0, pix2[23:16]} + {2'd0, pix2[15:8]} + {2'd0, pix2[7:0]};
-wire [9:0] rgb_sum3 = {2'd0, pix3[23:16]} + {2'd0, pix3[15:8]} + {2'd0, pix3[7:0]};
-
-wire [7:0] gray0 = rgb_sum0 / 10'd3;
-wire [7:0] gray1 = rgb_sum1 / 10'd3;
-wire [7:0] gray2 = rgb_sum2 / 10'd3;
-wire [7:0] gray3 = rgb_sum3 / 10'd3;
-
-reg [7:0]  grp_gray_r;
-reg        g_valid_r;
-reg        g_user_r;
-reg        g_user_raw;
-reg        g_last_r;
-reg [10:0] x1;
-reg [10:0] y1;
-
-always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        grp_gray_r <= 8'd0;
-        g_valid_r  <= 1'b0;
-        g_user_r   <= 1'b0;
-        g_user_raw <= 1'b0;
-        g_last_r   <= 1'b0;
-        x1         <= 11'd0;
-        y1         <= 11'd0;
-    end
-    else begin
-        grp_gray_r <= ({2'd0, gray0} + {2'd0, gray1} +
-                       {2'd0, gray2} + {2'd0, gray3}) >> 2;
-        g_valid_r  <= in_valid_r;
-        g_user_r   <= in_user_r;
-        g_user_raw <= in_user_raw;
-        g_last_r   <= in_last_r;
-        x1         <= x_cur;
-        y1         <= y_cur;
-    end
-end
-
-// Stage 2: horizontal smoothing, line memory access and current-row write.
-reg [7:0]  smooth_r;
-reg        s_valid_r;
-reg        s_user_r;
-reg        s_user_raw;
-reg        s_last_r;
-reg [10:0] x2;
-reg [10:0] y2;
-reg [7:0]  prev_grp_gray_d1;
-reg [7:0]  prev_grp_gray_d2;
-reg [7:0]  top_row_r;
-reg [7:0]  mid_row_r;
-
-wire [7:0] smooth_next =
-    (x1 == 11'd0) ? grp_gray_r :
-    (x1 == 11'd1) ? ((grp_gray_r + prev_grp_gray_d1) >> 1) :
-                    (({{2{1'b0}}, grp_gray_r} +
-                      ({{2{1'b0}}, prev_grp_gray_d1} << 1) +
-                      {{2{1'b0}}, prev_grp_gray_d2}) >> 2);
-
-always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        smooth_r            <= 8'd0;
-        s_valid_r           <= 1'b0;
-        s_user_r            <= 1'b0;
-        s_user_raw          <= 1'b0;
-        s_last_r            <= 1'b0;
-        x2                  <= 11'd0;
-        y2                  <= 11'd0;
-        prev_grp_gray_d1    <= 8'd0;
-        prev_grp_gray_d2    <= 8'd0;
-        top_row_r           <= 8'd0;
-        mid_row_r           <= 8'd0;
-        for (i = 0; i < IMG_WIDTH_GRP; i = i + 1) begin
+    if(!I_rst_n) begin
+        O_tlast  <= 1'b0;
+        O_tuser  <= 1'b0;
+        O_tdata  <= 96'd0;
+        O_tvalid <= 1'b0;
+        x_grp <= 11'd0;
+        y_pos <= 11'd0;
+        edge_hist_d1 = 1'b0;
+        edge_hist_d2 = 1'b0;
+        prev_grp_gray_d1 = 8'd0;
+        prev_grp_gray_d2 = 8'd0;
+        smooth_gray = 8'd0;
+        r0c0 = 8'd0; r0c1 = 8'd0; r0c2 = 8'd0;
+        r1c0 = 8'd0; r1c1 = 8'd0; r1c2 = 8'd0;
+        r2c0 = 8'd0; r2c1 = 8'd0; r2c2 = 8'd0;
+        for(i=0; i<IMG_WIDTH_GRP; i=i+1) begin
             line1_mem[i] <= 8'd0;
             line2_mem[i] <= 8'd0;
         end
     end
     else begin
-        smooth_r <= smooth_next;
-        s_valid_r <= g_valid_r;
-        s_user_r  <= g_user_r;
-        s_user_raw <= g_user_raw;
-        s_last_r  <= g_last_r;
-        x2        <= x1;
-        y2        <= y1;
+        O_tlast  <= I_tlast;
+        O_tuser  <= I_tuser;
+        O_tvalid <= I_tvalid;
 
-        prev_grp_gray_d2 <= prev_grp_gray_d1;
-        prev_grp_gray_d1 <= grp_gray_r;
-
-        if (g_valid_r) begin
-            top_row_r <= line2_mem[x1];
-            mid_row_r <= line1_mem[x1];
-            line2_mem[x1] <= line1_mem[x1];
-            line1_mem[x1] <= smooth_next;
-        end
-    end
-end
-
-// Stage 3: capture the 3x3 window and shift the running column registers.
-reg [7:0]  top_c0, top_c1, top_c2;
-reg [7:0]  mid_c0, mid_c1, mid_c2;
-reg [7:0]  cur_c0, cur_c1, cur_c2;
-reg [7:0]  win_top0, win_top1, win_top2;
-reg [7:0]  win_mid0, win_mid1, win_mid2;
-reg [7:0]  win_cur0, win_cur1, win_cur2;
-reg        w_valid_r;
-reg        w_user_r;
-reg        w_user_raw;
-reg        w_last_r;
-reg [10:0] x3;
-reg [10:0] y3;
-
-always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        top_c0 <= 8'd0; top_c1 <= 8'd0; top_c2 <= 8'd0;
-        mid_c0 <= 8'd0; mid_c1 <= 8'd0; mid_c2 <= 8'd0;
-        cur_c0 <= 8'd0; cur_c1 <= 8'd0; cur_c2 <= 8'd0;
-        win_top0 <= 8'd0; win_top1 <= 8'd0; win_top2 <= 8'd0;
-        win_mid0 <= 8'd0; win_mid1 <= 8'd0; win_mid2 <= 8'd0;
-        win_cur0 <= 8'd0; win_cur1 <= 8'd0; win_cur2 <= 8'd0;
-        w_valid_r <= 1'b0;
-        w_user_r  <= 1'b0;
-        w_user_raw <= 1'b0;
-        w_last_r  <= 1'b0;
-        x3        <= 11'd0;
-        y3        <= 11'd0;
-    end
-    else begin
-        if (s_valid_r) begin
-            // Snapshot the window for the Sobel stage, then update/clear the
-            // column registers.  The snapshot keeps the end-of-row values
-            // available to stage 4 while zeroing the running registers.
-            win_top0 <= top_c1;
-            win_top1 <= top_c2;
-            win_top2 <= top_row_r;
-            win_mid0 <= mid_c1;
-            win_mid1 <= mid_c2;
-            win_mid2 <= mid_row_r;
-            win_cur0 <= cur_c1;
-            win_cur1 <= cur_c2;
-            win_cur2 <= smooth_r;
-
-            top_c0 <= top_c1;
-            top_c1 <= top_c2;
-            top_c2 <= top_row_r;
-            mid_c0 <= mid_c1;
-            mid_c1 <= mid_c2;
-            mid_c2 <= mid_row_r;
-            cur_c0 <= cur_c1;
-            cur_c1 <= cur_c2;
-            cur_c2 <= smooth_r;
-
-            if (x2 == IMG_WIDTH_GRP - 1) begin
-                top_c0 <= 8'd0; top_c1 <= 8'd0; top_c2 <= 8'd0;
-                mid_c0 <= 8'd0; mid_c1 <= 8'd0; mid_c2 <= 8'd0;
-                cur_c0 <= 8'd0; cur_c1 <= 8'd0; cur_c2 <= 8'd0;
+        if(I_tvalid) begin
+            if(I_tuser) begin
+                x_grp <= 11'd0;
+                y_pos <= 11'd0;
+                edge_hist_d1 = 1'b0;
+                edge_hist_d2 = 1'b0;
+                prev_grp_gray_d1 = 8'd0;
+                prev_grp_gray_d2 = 8'd0;
+                r0c0 = 8'd0; r0c1 = 8'd0; r0c2 = 8'd0;
+                r1c0 = 8'd0; r1c1 = 8'd0; r1c2 = 8'd0;
+                r2c0 = 8'd0; r2c1 = 8'd0; r2c2 = 8'd0;
             end
-        end
 
-        w_valid_r <= s_valid_r;
-        w_user_r  <= s_user_r;
-        w_user_raw <= s_user_raw;
-        w_last_r  <= s_last_r;
-        x3        <= x2;
-        y3        <= y2;
-    end
-end
+            grp_gray = (gray0 + gray1 + gray2 + gray3) >> 2;
+            if(x_grp == 11'd0)
+                smooth_gray = grp_gray;
+            else if(x_grp == 11'd1)
+                smooth_gray = (grp_gray + prev_grp_gray_d1) >> 1;
+            else
+                smooth_gray = ({2'b00, grp_gray} + ({2'b00, prev_grp_gray_d1} << 1) + {2'b00, prev_grp_gray_d2}) >> 2;
+            prev_grp_gray_d2 = prev_grp_gray_d1;
+            prev_grp_gray_d1 = grp_gray;
 
-// Stage 4: Sobel horizontal and vertical gradients.
-reg signed [12:0] gx_r;
-reg signed [12:0] gy_r;
-reg        q_valid_r;
-reg        q_user_r;
-reg        q_user_raw;
-reg        q_last_r;
-reg [10:0] x4;
-reg [10:0] y4;
+            top_v = line2_mem[x_grp];
+            mid_v = line1_mem[x_grp];
 
-always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        gx_r       <= 13'sd0;
-        gy_r       <= 13'sd0;
-        q_valid_r  <= 1'b0;
-        q_user_r   <= 1'b0;
-        q_user_raw <= 1'b0;
-        q_last_r   <= 1'b0;
-        x4         <= 11'd0;
-        y4         <= 11'd0;
-    end
-    else begin
-        if (w_valid_r) begin
-            gx_r <= -$signed({5'b00000, win_top0}) + $signed({5'b00000, win_top2})
-                   - ($signed({5'b00000, win_mid0}) <<< 1) + ($signed({5'b00000, win_mid2}) <<< 1)
-                   - $signed({5'b00000, win_cur0}) + $signed({5'b00000, win_cur2});
+            r0c0 = r0c1; r0c1 = r0c2; r0c2 = top_v;
+            r1c0 = r1c1; r1c1 = r1c2; r1c2 = mid_v;
+            r2c0 = r2c1; r2c1 = r2c2; r2c2 = smooth_gray;
 
-            gy_r <=  $signed({5'b00000, win_top0}) + ($signed({5'b00000, win_top1}) <<< 1) + $signed({5'b00000, win_top2})
-                   - $signed({5'b00000, win_cur0}) - ($signed({5'b00000, win_cur1}) <<< 1) - $signed({5'b00000, win_cur2});
-        end
+            if((x_grp >= 11'd2) && (y_pos >= 11'd2)) begin
+                gx = -$signed({1'b0,r0c0}) + $signed({1'b0,r0c2})
+                   - ($signed({1'b0,r1c0}) <<< 1) + ($signed({1'b0,r1c2}) <<< 1)
+                   - $signed({1'b0,r2c0}) + $signed({1'b0,r2c2});
 
-        q_valid_r <= w_valid_r;
-        q_user_r  <= w_user_r;
-        q_user_raw <= w_user_raw;
-        q_last_r  <= w_last_r;
-        x4        <= x3;
-        y4        <= y3;
-    end
-end
+                gy =  $signed({1'b0,r0c0}) + ($signed({1'b0,r0c1}) <<< 1) + $signed({1'b0,r0c2})
+                   - $signed({1'b0,r2c0}) - ($signed({1'b0,r2c1}) <<< 1) - $signed({1'b0,r2c2});
 
-// Stage 5: magnitude, threshold and window validity.
-wire [12:0] abs_gx_next = gx_r[12] ? (~gx_r + 13'd1) : gx_r;
-wire [12:0] abs_gy_next = gy_r[12] ? (~gy_r + 13'd1) : gy_r;
-wire [13:0] mag_next    = {1'b0, abs_gx_next} + {1'b0, abs_gy_next};
-wire        edge_next   = (x4 >= 11'd2) && (y4 >= 11'd2) &&
-                          (mag_next >= {3'b000, EDGE_TH});
-
-reg        edge_r;
-reg        e_valid_r;
-reg        e_user_r;
-reg        e_user_raw;
-reg        e_last_r;
-
-always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        edge_r     <= 1'b0;
-        e_valid_r  <= 1'b0;
-        e_user_r   <= 1'b0;
-        e_user_raw <= 1'b0;
-        e_last_r   <= 1'b0;
-    end
-    else begin
-        edge_r     <= edge_next;
-        e_valid_r  <= q_valid_r;
-        e_user_r   <= q_user_r;
-        e_user_raw <= q_user_raw;
-        e_last_r   <= q_last_r;
-    end
-end
-
-// Stage 6: three-point majority filter and output register.
-reg edge_hist_d1;
-reg edge_hist_d2;
-
-always @(posedge I_clk or negedge I_rst_n) begin
-    if (!I_rst_n) begin
-        O_tdata      <= 96'd0;
-        O_tvalid     <= 1'b0;
-        O_tuser      <= 1'b0;
-        O_tlast      <= 1'b0;
-        edge_hist_d1 <= 1'b0;
-        edge_hist_d2 <= 1'b0;
-    end
-    else begin
-        if (e_valid_r) begin
-            O_tdata  <= (edge_r & edge_hist_d1) |
-                        (edge_r & edge_hist_d2) |
-                        (edge_hist_d1 & edge_hist_d2)
-                        ? {24'hFFFFFF, 24'hFFFFFF, 24'hFFFFFF, 24'hFFFFFF}
-                        : 96'd0;
-            O_tvalid <= 1'b1;
-            O_tuser  <= e_user_raw;
-            O_tlast  <= e_last_r;
-
-            if (e_user_r || e_last_r || (x4 == IMG_WIDTH_GRP - 1)) begin
-                edge_hist_d1 <= 1'b0;
-                edge_hist_d2 <= 1'b0;
+                abs_gx = gx[12] ? (~gx + 1'b1) : gx;
+                abs_gy = gy[12] ? (~gy + 1'b1) : gy;
+                mag    = abs_gx + abs_gy;
+                edge_flag = (mag >= EDGE_TH);
             end
             else begin
-                edge_hist_d2 <= edge_hist_d1;
-                edge_hist_d1 <= edge_r;
+                edge_flag = 1'b0;
+            end
+
+            // 3-point majority filter: suppress isolated single-point edge noise.
+            edge_flag_filt = (edge_flag & edge_hist_d1) |
+                             (edge_flag & edge_hist_d2) |
+                             (edge_hist_d1 & edge_hist_d2);
+            edge_hist_d2 = edge_hist_d1;
+            edge_hist_d1 = edge_flag;
+
+            out_pix = edge_flag_filt ? 24'hFFFFFF : 24'h000000;
+            O_tdata <= {out_pix, out_pix, out_pix, out_pix};
+
+            line2_mem[x_grp] <= mid_v;
+            line1_mem[x_grp] <= smooth_gray;
+
+            if(x_grp == IMG_WIDTH_GRP - 1) begin
+                x_grp <= 11'd0;
+                if(y_pos == IMG_HEIGHT - 1)
+                    y_pos <= 11'd0;
+                else
+                    y_pos <= y_pos + 1'b1;
+
+                edge_hist_d1 = 1'b0;
+                edge_hist_d2 = 1'b0;
+
+                r0c0 = 8'd0; r0c1 = 8'd0; r0c2 = 8'd0;
+                r1c0 = 8'd0; r1c1 = 8'd0; r1c2 = 8'd0;
+                r2c0 = 8'd0; r2c1 = 8'd0; r2c2 = 8'd0;
+            end
+            else begin
+                x_grp <= x_grp + 1'b1;
             end
         end
         else begin
-            O_tdata   <= 96'd0;
-            O_tvalid  <= 1'b0;
-            O_tuser   <= e_user_raw;
-            O_tlast   <= 1'b0;
+            O_tdata <= 96'd0;
         end
     end
 end
