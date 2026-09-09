@@ -198,6 +198,12 @@ module design_top_wrapper (
     reg [19:0]  S_dbg_nonzero_px;
     reg         S_hdmi_user_1d;
     reg         S_dbg_alg_prev;
+    wire        S_edge_dbg_valid;
+    wire        S_edge_dbg_nonzero;
+    reg         S_dbg_edge_valid_seen;
+    reg         S_dbg_edge_nonzero_seen;
+    reg [1:0]   S_dbg_edge_valid_seen_sync;
+    reg [1:0]   S_dbg_edge_nonzero_seen_sync;
     wire        S_lane_error_any;
     wire        S_alg_sel_24m;
     reg         S_alg_sel_csi_1d;
@@ -353,6 +359,19 @@ module design_top_wrapper (
             S_dbg_mc_cmd_pop_seen <= 1'b1;
     end
 
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n) begin
+            S_dbg_edge_valid_seen <= 1'b0;
+            S_dbg_edge_nonzero_seen <= 1'b0;
+        end
+        else begin
+            if(S_edge_dbg_valid)
+                S_dbg_edge_valid_seen <= 1'b1;
+            if(S_edge_dbg_nonzero)
+                S_dbg_edge_nonzero_seen <= 1'b1;
+        end
+    end
+
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
             S_dbg_cam_cfg_seen_sync <= 2'b00;
@@ -376,6 +395,8 @@ module design_top_wrapper (
             S_dbg_mc_wdf_rdy_seen_sync <= 2'b00;
             S_dbg_mc_cmd_pop_seen_sync <= 2'b00;
             S_dbg_alg_prev <= 1'b0;
+            S_dbg_edge_valid_seen_sync <= 2'b00;
+            S_dbg_edge_nonzero_seen_sync <= 2'b00;
         end
         else begin
             S_dbg_alg_prev <= S_alg_status_hdmi_3d;
@@ -400,6 +421,8 @@ module design_top_wrapper (
             S_dbg_mc_app_rdy_seen_sync <= {S_dbg_mc_app_rdy_seen_sync[0], S_dbg_mc_app_rdy_seen};
             S_dbg_mc_wdf_rdy_seen_sync <= {S_dbg_mc_wdf_rdy_seen_sync[0], S_dbg_mc_wdf_rdy_seen};
             S_dbg_mc_cmd_pop_seen_sync <= {S_dbg_mc_cmd_pop_seen_sync[0], S_dbg_mc_cmd_pop_seen};
+            S_dbg_edge_valid_seen_sync <= {S_dbg_edge_valid_seen_sync[0], S_dbg_edge_valid_seen};
+            S_dbg_edge_nonzero_seen_sync <= {S_dbg_edge_nonzero_seen_sync[0], S_dbg_edge_nonzero_seen};
             if(S_hdmi_window_rd_en && (S_video_rd_data != 24'd0))
                 S_dbg_video_nonzero_seen <= 1'b1;
         end
@@ -461,8 +484,8 @@ module design_top_wrapper (
         S_dbg_csi_seen_sync[1],
         S_dbg_hs_seen_sync[1],
         S_dbg_cam_cfg_seen_sync[1],
-        S_dbg_rd_req_seen_sync[1],
-        S_dbg_rd_valid_seen_sync[1],
+        S_dbg_edge_valid_seen_sync[1],
+        S_dbg_edge_nonzero_seen_sync[1],
         S_dbg_rd_nonzero_seen_sync[1],
         S_dbg_video_nonzero_seen,
         S_alg_status_hdmi_3d,
@@ -695,7 +718,9 @@ isp_top u_isp_top (
 .O_tlast         (S_ISP_O_tlast ),
 .O_tuser         (S_ISP_O_tuser ),
 .O_tvalid        (S_ISP_O_tvalid),
-.I_tready        ()
+.I_tready        (),
+.O_edge_dbg_valid (S_edge_dbg_valid),
+.O_edge_dbg_nonzero (S_edge_dbg_nonzero)
   );
 
 

@@ -12,7 +12,9 @@ module isp_top (
     output          O_tlast,
     output          O_tuser,
     output          O_tvalid,
-    output          I_tready
+    output          I_tready,
+    output          O_edge_dbg_valid,
+    output          O_edge_dbg_nonzero
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -58,6 +60,8 @@ module isp_top (
     assign O_tlast  = awb_O_tlast;
     assign O_tuser  = awb_O_tuser_128;
     assign O_tvalid = awb_O_tvalid_128;
+    assign O_edge_dbg_valid = edge_O_tvalid;
+    assign O_edge_dbg_nonzero = |edge_O_tdata;
 
     //assign m_aixs_tready = O_tready;
     //assign O_tdata  = m_aixs_tdata;

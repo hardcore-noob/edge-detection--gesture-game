@@ -24,9 +24,9 @@
  *  10 CSI 有数据
  *   9 MIPI HS 有效
  *   8 摄像头配置完成
- *   7 显示读请求
- *   6 DDR 读返回有效
- *   5 读到非零视频
+ *   7 EDGE 输出 valid 有效
+ *   6 EDGE 输出数据非零
+ *   5 DDR 读到非零视频
  *   4 HDMI 显示像素非零
  *   3 算法状态（0=RAW，1=EDGE）
  *   2 HDMI OUT DE
