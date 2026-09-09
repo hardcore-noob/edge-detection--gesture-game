@@ -157,6 +157,9 @@ module design_top_wrapper (
     wire[23:0]  S_video_rd_data;
     wire [7:0]  S_video_max_ch;
     reg         S_dbg_raw_seen;
+    reg [9:0]   S_dbg_raw_max_px;
+    reg [9:0]   S_dbg_raw_max_sync1;
+    reg [9:0]   S_dbg_raw_max_sync2;
     reg         S_dbg_isp_seen;
     reg         S_dbg_ddr_wr_seen;
     reg         S_dbg_ddr_rd_seen;
@@ -517,6 +520,34 @@ module design_top_wrapper (
                 S_video_rd_data[23:16] : S_video_rd_data[7:0]) :
             ((S_video_rd_data[15:8] > S_video_rd_data[7:0]) ?
                 S_video_rd_data[15:8] : S_video_rd_data[7:0]);
+
+    wire [9:0] S_raw_max_01 =
+        (S_raw_tdata[9:0] > S_raw_tdata[19:10]) ?
+            S_raw_tdata[9:0] : S_raw_tdata[19:10];
+    wire [9:0] S_raw_max_23 =
+        (S_raw_tdata[29:20] > S_raw_tdata[39:30]) ?
+            S_raw_tdata[29:20] : S_raw_tdata[39:30];
+    wire [9:0] S_raw_max =
+        (S_raw_max_01 > S_raw_max_23) ? S_raw_max_01 : S_raw_max_23;
+    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
+        if(!S_rst_n)
+            S_dbg_raw_max_px <= 10'd0;
+        else if(S_raw_tuser)
+            S_dbg_raw_max_px <= 10'd0;
+        else if(S_raw_tvalid && (S_raw_max > S_dbg_raw_max_px))
+            S_dbg_raw_max_px <= S_raw_max;
+    end
+
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_dbg_raw_max_sync1 <= 10'd0;
+            S_dbg_raw_max_sync2 <= 10'd0;
+        end
+        else begin
+            S_dbg_raw_max_sync1 <= S_dbg_raw_max_px;
+            S_dbg_raw_max_sync2 <= S_dbg_raw_max_sync1;
+        end
+    end
 
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
@@ -972,7 +1003,7 @@ isp_top u_isp_top (
         .I_nonzero_cnt  ( S_dbg_nonzero_px   ),
         .I_bright_cnt   ( S_dbg_bright_px    ),
         .I_very_cnt     ( S_dbg_very_px      ),
-        .I_max_px       ( S_dbg_max_px       ),
+        .I_max_px       ( S_dbg_raw_max_sync2),
         .O_tx           ( O_debug_tx         )
     );
 

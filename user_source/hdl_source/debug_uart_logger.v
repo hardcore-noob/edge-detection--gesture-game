@@ -47,7 +47,7 @@ module debug_uart_logger #(
     input  wire [19:0] I_nonzero_cnt,
     input  wire [19:0] I_bright_cnt,
     input  wire [19:0] I_very_cnt,
-    input  wire [7:0]  I_max_px,
+    input  wire [9:0]  I_max_px,
     output reg         O_tx
 );
 
@@ -60,7 +60,7 @@ module debug_uart_logger #(
     localparam [2:0] TX_DATA  = 3'd2;
     localparam [2:0] TX_STOP  = 3'd3;
 
-    localparam [5:0] LINE_LAST = 6'd63;
+    localparam [6:0] LINE_LAST = 7'd64;
 
     function [7:0] F_hex_nibble;
         input [3:0] I_n;
@@ -88,7 +88,7 @@ module debug_uart_logger #(
     endfunction
 
     function [7:0] F_line_byte;
-        input [5:0]  I_idx;
+        input [6:0]  I_idx;
         input [23:0] I_status;
         input [15:0] I_frame;
         input [15:0] I_ae;
@@ -96,7 +96,7 @@ module debug_uart_logger #(
         input [19:0] I_cnt;
         input [19:0] I_bright;
         input [19:0] I_very;
-        input [7:0]  I_max;
+        input [9:0]  I_max;
         begin
             case (I_idx)
                 6'd0:  F_line_byte = 8'h44;
@@ -159,10 +159,11 @@ module debug_uart_logger #(
                 6'd57: F_line_byte = 8'h20;
                 6'd58: F_line_byte = 8'h4D;
                 6'd59: F_line_byte = 8'h3D;
-                6'd60: F_line_byte = F_hex_nibble(I_max[7:4]);
-                6'd61: F_line_byte = F_hex_nibble(I_max[3:0]);
-                6'd62: F_line_byte = 8'h0D;
-                6'd63: F_line_byte = 8'h0A;
+                6'd60: F_line_byte = F_hex_nibble({2'b0, I_max[9:8]});
+                6'd61: F_line_byte = F_hex_nibble(I_max[7:4]);
+                6'd62: F_line_byte = F_hex_nibble(I_max[3:0]);
+                6'd63: F_line_byte = 8'h0D;
+                7'd64: F_line_byte = 8'h0A;
                 default: F_line_byte = 8'h20;
             endcase
         end
@@ -171,7 +172,7 @@ module debug_uart_logger #(
     reg [25:0] S_period_cnt;
     reg        S_first_send;
     reg        S_send_busy;
-    reg [5:0]  S_line_idx;
+    reg [6:0]  S_line_idx;
     reg [7:0]  S_tx_byte;
     reg        S_tx_start;
 
@@ -194,8 +195,8 @@ module debug_uart_logger #(
     reg [19:0] S_bright_sync2;
     reg [19:0] S_very_sync1;
     reg [19:0] S_very_sync2;
-    reg [7:0]  S_max_sync1;
-    reg [7:0]  S_max_sync2;
+    reg [9:0]  S_max_sync1;
+    reg [9:0]  S_max_sync2;
 
     wire S_tx_done = (S_tx_state == TX_STOP) &&
                      (S_tx_div == CLK_PER_BIT - 1);
@@ -216,8 +217,8 @@ module debug_uart_logger #(
             S_bright_sync2 <= 20'd0;
             S_very_sync1 <= 20'd0;
             S_very_sync2 <= 20'd0;
-            S_max_sync1 <= 8'd0;
-            S_max_sync2 <= 8'd0;
+            S_max_sync1 <= 10'd0;
+            S_max_sync2 <= 10'd0;
         end
         else begin
             S_status_sync1 <= I_status;
@@ -252,7 +253,7 @@ module debug_uart_logger #(
         if (!I_rst_n) begin
             S_tx_start   <= 1'b0;
             S_send_busy  <= 1'b0;
-            S_line_idx   <= 6'd0;
+            S_line_idx   <= 7'd0;
             S_tx_byte    <= 8'h00;
             S_first_send <= 1'b1;
         end
@@ -262,7 +263,7 @@ module debug_uart_logger #(
                 if (S_tx_done) begin
                     if (S_line_idx == LINE_LAST) begin
                         S_send_busy <= 1'b0;
-                        S_line_idx  <= 6'd0;
+                        S_line_idx  <= 7'd0;
                     end
                     else begin
                         S_line_idx <= S_line_idx + 1'b1;
@@ -284,7 +285,7 @@ module debug_uart_logger #(
             else begin
                 if (S_first_send || (S_period_cnt == TIMEOUT_CNT)) begin
                     S_send_busy  <= 1'b1;
-                    S_line_idx   <= 6'd0;
+                    S_line_idx   <= 7'd0;
                     S_tx_byte    <= F_line_byte(
                         6'd0,
                         S_status_sync2,
