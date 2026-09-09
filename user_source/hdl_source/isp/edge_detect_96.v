@@ -271,12 +271,12 @@ always @(posedge I_clk or negedge I_rst_n) begin
     end
     else begin
         if (w_valid_r) begin
-            gx_r <= -$signed({1'b0, win_top0}) + $signed({1'b0, win_top2})
-                   - ($signed({1'b0, win_mid0}) <<< 1) + ($signed({1'b0, win_mid2}) <<< 1)
-                   - $signed({1'b0, win_cur0}) + $signed({1'b0, win_cur2});
+            gx_r <= -$signed({5'b00000, win_top0}) + $signed({5'b00000, win_top2})
+                   - ($signed({5'b00000, win_mid0}) <<< 1) + ($signed({5'b00000, win_mid2}) <<< 1)
+                   - $signed({5'b00000, win_cur0}) + $signed({5'b00000, win_cur2});
 
-            gy_r <=  $signed({1'b0, win_top0}) + ($signed({1'b0, win_top1}) <<< 1) + $signed({1'b0, win_top2})
-                   - $signed({1'b0, win_cur0}) - ($signed({1'b0, win_cur1}) <<< 1) - $signed({1'b0, win_cur2});
+            gy_r <=  $signed({5'b00000, win_top0}) + ($signed({5'b00000, win_top1}) <<< 1) + $signed({5'b00000, win_top2})
+                   - $signed({5'b00000, win_cur0}) - ($signed({5'b00000, win_cur1}) <<< 1) - $signed({5'b00000, win_cur2});
         end
 
         q_valid_r <= w_valid_r;
@@ -338,7 +338,7 @@ always @(posedge I_clk or negedge I_rst_n) begin
             O_tuser  <= e_user_r;
             O_tlast  <= e_last_r;
 
-            if (e_user_r || e_last_r) begin
+            if (e_user_r || e_last_r || (x4 == IMG_WIDTH_GRP - 1)) begin
                 edge_hist_d1 <= 1'b0;
                 edge_hist_d2 <= 1'b0;
             end
