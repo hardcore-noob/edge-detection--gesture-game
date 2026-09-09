@@ -155,6 +155,7 @@ module design_top_wrapper (
     wire[23:0]  S_hdmi_out_data;
 
     wire[23:0]  S_video_rd_data;
+    wire [7:0]  S_video_max_ch;
     reg         S_dbg_raw_seen;
     reg         S_dbg_isp_seen;
     reg         S_dbg_ddr_wr_seen;
@@ -198,6 +199,9 @@ module design_top_wrapper (
     wire[23:0]  S_debug_status_bus;
     reg [15:0]  S_frame_cnt_dbg;
     reg [19:0]  S_dbg_nonzero_px;
+    reg [19:0]  S_dbg_bright_px;
+    reg [19:0]  S_dbg_very_px;
+    reg [7:0]   S_dbg_max_px;
     reg         S_hdmi_user_1d;
     reg         S_dbg_alg_prev;
     wire        S_edge_dbg_valid;
@@ -507,20 +511,42 @@ module design_top_wrapper (
         S_hdmi_window_rd_en
     };
 
+    assign S_video_max_ch =
+        (S_video_rd_data[23:16] > S_video_rd_data[15:8]) ?
+            ((S_video_rd_data[23:16] > S_video_rd_data[7:0]) ?
+                S_video_rd_data[23:16] : S_video_rd_data[7:0]) :
+            ((S_video_rd_data[15:8] > S_video_rd_data[7:0]) ?
+                S_video_rd_data[15:8] : S_video_rd_data[7:0]);
+
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
             S_hdmi_user_1d <= 1'b0;
             S_frame_cnt_dbg <= 16'd0;
             S_dbg_nonzero_px <= 20'd0;
+            S_dbg_bright_px <= 20'd0;
+            S_dbg_very_px <= 20'd0;
+            S_dbg_max_px <= 8'd0;
         end
         else begin
             S_hdmi_user_1d <= S_hdmi_user;
             if(S_hdmi_user && !S_hdmi_user_1d)
                 S_frame_cnt_dbg <= S_frame_cnt_dbg + 1'b1;
-            if(S_hdmi_user)
+            if(S_hdmi_user) begin
                 S_dbg_nonzero_px <= 20'd0;
-            else if(S_hdmi_window_rd_en && (S_video_rd_data != 24'd0))
-                S_dbg_nonzero_px <= S_dbg_nonzero_px + 1'b1;
+                S_dbg_bright_px <= 20'd0;
+                S_dbg_very_px <= 20'd0;
+                S_dbg_max_px <= 8'd0;
+            end
+            else if(S_hdmi_window_rd_en) begin
+                if(S_video_rd_data != 24'd0)
+                    S_dbg_nonzero_px <= S_dbg_nonzero_px + 1'b1;
+                if(S_video_max_ch >= 8'd64)
+                    S_dbg_bright_px <= S_dbg_bright_px + 1'b1;
+                if(S_video_max_ch >= 8'd128)
+                    S_dbg_very_px <= S_dbg_very_px + 1'b1;
+                if(S_video_max_ch > S_dbg_max_px)
+                    S_dbg_max_px <= S_video_max_ch;
+            end
         end
     end
 	
@@ -944,6 +970,9 @@ isp_top u_isp_top (
         .I_ag           ( S_ag               ),
         .I_frame_cnt    ( S_frame_cnt_dbg    ),
         .I_nonzero_cnt  ( S_dbg_nonzero_px   ),
+        .I_bright_cnt   ( S_dbg_bright_px    ),
+        .I_very_cnt     ( S_dbg_very_px      ),
+        .I_max_px       ( S_dbg_max_px       ),
         .O_tx           ( O_debug_tx         )
     );
 

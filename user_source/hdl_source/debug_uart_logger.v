@@ -45,6 +45,9 @@ module debug_uart_logger #(
     input  wire [15:0] I_ag,
     input  wire [15:0] I_frame_cnt,
     input  wire [19:0] I_nonzero_cnt,
+    input  wire [19:0] I_bright_cnt,
+    input  wire [19:0] I_very_cnt,
+    input  wire [7:0]  I_max_px,
     output reg         O_tx
 );
 
@@ -57,7 +60,7 @@ module debug_uart_logger #(
     localparam [2:0] TX_DATA  = 3'd2;
     localparam [2:0] TX_STOP  = 3'd3;
 
-    localparam [5:0] LINE_LAST = 6'd42;
+    localparam [5:0] LINE_LAST = 6'd63;
 
     function [7:0] F_hex_nibble;
         input [3:0] I_n;
@@ -91,6 +94,9 @@ module debug_uart_logger #(
         input [15:0] I_ae;
         input [15:0] I_ag;
         input [19:0] I_cnt;
+        input [19:0] I_bright;
+        input [19:0] I_very;
+        input [7:0]  I_max;
         begin
             case (I_idx)
                 6'd0:  F_line_byte = 8'h44;
@@ -134,8 +140,29 @@ module debug_uart_logger #(
                 6'd38: F_line_byte = F_hex_nibble(I_cnt[11:8]);
                 6'd39: F_line_byte = F_hex_nibble(I_cnt[7:4]);
                 6'd40: F_line_byte = F_hex_nibble(I_cnt[3:0]);
-                6'd41: F_line_byte = 8'h0D;
-                6'd42: F_line_byte = 8'h0A;
+                6'd41: F_line_byte = 8'h20;
+                6'd42: F_line_byte = 8'h42;
+                6'd43: F_line_byte = 8'h3D;
+                6'd44: F_line_byte = F_hex_nibble(I_bright[19:16]);
+                6'd45: F_line_byte = F_hex_nibble(I_bright[15:12]);
+                6'd46: F_line_byte = F_hex_nibble(I_bright[11:8]);
+                6'd47: F_line_byte = F_hex_nibble(I_bright[7:4]);
+                6'd48: F_line_byte = F_hex_nibble(I_bright[3:0]);
+                6'd49: F_line_byte = 8'h20;
+                6'd50: F_line_byte = 8'h43;
+                6'd51: F_line_byte = 8'h3D;
+                6'd52: F_line_byte = F_hex_nibble(I_very[19:16]);
+                6'd53: F_line_byte = F_hex_nibble(I_very[15:12]);
+                6'd54: F_line_byte = F_hex_nibble(I_very[11:8]);
+                6'd55: F_line_byte = F_hex_nibble(I_very[7:4]);
+                6'd56: F_line_byte = F_hex_nibble(I_very[3:0]);
+                6'd57: F_line_byte = 8'h20;
+                6'd58: F_line_byte = 8'h4D;
+                6'd59: F_line_byte = 8'h3D;
+                6'd60: F_line_byte = F_hex_nibble(I_max[7:4]);
+                6'd61: F_line_byte = F_hex_nibble(I_max[3:0]);
+                6'd62: F_line_byte = 8'h0D;
+                6'd63: F_line_byte = 8'h0A;
                 default: F_line_byte = 8'h20;
             endcase
         end
@@ -163,6 +190,12 @@ module debug_uart_logger #(
     reg [15:0] S_ag_sync2;
     reg [19:0] S_nonzero_sync1;
     reg [19:0] S_nonzero_sync2;
+    reg [19:0] S_bright_sync1;
+    reg [19:0] S_bright_sync2;
+    reg [19:0] S_very_sync1;
+    reg [19:0] S_very_sync2;
+    reg [7:0]  S_max_sync1;
+    reg [7:0]  S_max_sync2;
 
     wire S_tx_done = (S_tx_state == TX_STOP) &&
                      (S_tx_div == CLK_PER_BIT - 1);
@@ -179,6 +212,12 @@ module debug_uart_logger #(
             S_ag_sync2     <= 16'd0;
             S_nonzero_sync1 <= 20'd0;
             S_nonzero_sync2 <= 20'd0;
+            S_bright_sync1 <= 20'd0;
+            S_bright_sync2 <= 20'd0;
+            S_very_sync1 <= 20'd0;
+            S_very_sync2 <= 20'd0;
+            S_max_sync1 <= 8'd0;
+            S_max_sync2 <= 8'd0;
         end
         else begin
             S_status_sync1 <= I_status;
@@ -191,6 +230,12 @@ module debug_uart_logger #(
             S_ag_sync2     <= S_ag_sync1;
             S_nonzero_sync1 <= I_nonzero_cnt;
             S_nonzero_sync2 <= S_nonzero_sync1;
+            S_bright_sync1 <= I_bright_cnt;
+            S_bright_sync2 <= S_bright_sync1;
+            S_very_sync1 <= I_very_cnt;
+            S_very_sync2 <= S_very_sync1;
+            S_max_sync1 <= I_max_px;
+            S_max_sync2 <= S_max_sync1;
         end
     end
 
@@ -227,7 +272,10 @@ module debug_uart_logger #(
                             S_frame_sync2,
                             S_ae_sync2,
                             S_ag_sync2,
-                            S_nonzero_sync2
+                            S_nonzero_sync2,
+                            S_bright_sync2,
+                            S_very_sync2,
+                            S_max_sync2
                         );
                         S_tx_start <= 1'b1;
                     end
@@ -243,7 +291,10 @@ module debug_uart_logger #(
                         S_frame_sync2,
                         S_ae_sync2,
                         S_ag_sync2,
-                        S_nonzero_sync2
+                        S_nonzero_sync2,
+                        S_bright_sync2,
+                        S_very_sync2,
+                        S_max_sync2
                     );
                     S_tx_start   <= 1'b1;
                     S_first_send <= 1'b0;
