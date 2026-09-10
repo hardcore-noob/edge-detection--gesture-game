@@ -3,6 +3,43 @@
 FPGA 竞赛安路赛道赛题二工程：基于 PH1P35/HX1P35A 开发板，把 MIPI 摄像头采集、
 ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中。
 
+## 0. AI 会话入口（新会话先读）
+
+如果你是新会话中的 AI，先不要直接改代码。按下面顺序阅读，可以快速建立
+本项目的目标、硬件约束和当前工作方向：
+
+1. `参考资料/赛题解析二-整理.md`：赛题目标、评分点、必须实现的进阶功能和验收方向。
+2. `参考资料/新HX1P35A开发板手册-HDL版2604-文本.md`：开发板资源、按键、时钟、外设和约束。
+3. `参考资料/SC500CS_数据手册_V1.8-整理.md`：摄像头寄存器、曝光/增益和图像配置。
+4. `参考资料/DS1300_PH1P_Datasheet.md`：PH1P 器件和 DDR/外设接口资料。
+5. `参考资料/TangDynasty_CLI编译流程.md`：TD 命令行综合、布局布线和 bitgen 流程。
+6. 回到本 README 的第 1～9 节，理解当前数据流、按键、边缘基线和已知风险。
+
+`参考资料/` 中的 PDF、PPTX 是原始资料；上面的 md 文件是便于 AI 阅读的整理版。
+如果 md 和原始资料存在冲突，以赛题原始文件和硬件手册为准，并在代码提交说明中
+记录冲突点。
+
+阅读完成后，AI 应明确以下工作方向：
+
+- 当前目标是赛题二：在同一系统中完成 MIPI 采集、RAW/EDGE 实时切换、OSD、
+  HDMI 显示和可观测的运行时日志。
+- 当前 `edge_detect_96.v` 是官方 `lab_ex2_edge` 的兼容基线。不要因为它有
+  数值位宽问题就盲目替换；任何“更正确”的重写都必须先证明细字体边缘没有退化。
+- 后续优化应优先围绕“文字边缘清晰度、稳定性、可复现对比”展开，而不是只追求
+  边缘数量或单帧检测结果。
+- 调试时优先使用 `tools/read_debug_uart.ps1` 读取 `DBG:` 日志，再结合代码修改；
+  不要只凭一张画面的主观印象反复编译。
+
+工作时必须遵守：
+
+- 先执行 `git status`，不要覆盖或提交会话外产生的未提交改动。
+- `tmp/` 是本地临时诊断目录，不纳入提交；TD Run、bitstream、日志由 `.gitignore`
+  排除。
+- 当前按键定义为：KEY1 切换 RAW/EDGE，KEY2 降低曝光，KEY3 提高曝光。
+- 修改边缘模块、OSD 或 top wrapper 后，必须重新做 TD 综合/布局布线，并报告
+  实际 bitstream 路径和时序结果。
+- 没有用户明确指令时，不自动 push、合并 PR 或改写 Git 历史。
+
 ## 1. 工程概览
 
 本工程整合了官方三个例程的功能：
@@ -143,7 +180,7 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx
 
 - GitHub：`git@github.com:hardcore-noob/anlogic_competition.git`
 - 默认分支：`main`
-- Git 身份：`hardcore-noob <1270792258@qq.com>`
+- 提交身份：`hardcore-noob`（仓库本地已配置）
 
 构建产物、TD Run 目录、bitstream 和日志默认由 `.gitignore` 排除，不纳入版本库。
 
