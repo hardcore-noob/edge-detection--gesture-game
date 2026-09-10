@@ -1,2 +1,156 @@
 # anlogic_competition
-fpga竞赛安路赛道赛题二
+
+FPGA 竞赛安路赛道赛题二工程：基于 PH1P35/HX1P35A 开发板，把 MIPI 摄像头采集、
+ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中。
+
+## 1. 工程概览
+
+本工程整合了官方三个例程的功能：
+
+- `lab_ex1_mipi_hdmi`：MIPI 采集 + HDMI 实时显示
+- `lab_ex2_edge`：ISP 链路中的边缘检测
+- `lab_ex3_osd`：HDMI 输出前的 OSD 叠加
+
+整合版额外提供：
+
+- KEY1 实时切换 RAW / EDGE 算法
+- KEY2 / KEY3 调节摄像头曝光
+- OSD 显示安路 Logo、动态文字、帧计数和当前算法状态
+- 115200-8-N-1 UART 调试日志
+
+## 2. 系统数据流
+
+```text
+MIPI 摄像头
+  -> MIPI D-PHY RX
+  -> CSI / RAW10 解包
+  -> ISP（demosaic -> AWB）
+  -> 边缘检测（edge_detect_96）
+  -> RAW / EDGE 算法选择 MUX
+  -> DDR2 帧缓存
+  -> HDMI 时序
+  -> hdmi_mixer（Logo + 动态文字 + 帧计数 + 算法状态）
+  -> hdmi_tx
+  -> 显示器
+```
+
+RAW 路径和 EDGE 路径并行工作，MUX 在按键切换后选择其中一路送入 DDR。
+
+## 3. 按键定义
+
+| 板载按键 | 顶层信号 | 引脚 | 功能 |
+|----------|----------|------|------|
+| KEY1 | `I_button[1]` | D5 | RAW / EDGE 算法切换 |
+| KEY2 | `I_button[0]` | A9 | 曝光目标值递减 |
+| KEY3 | `I_button[2]` | B9 | 曝光目标值递增 |
+
+KEY1 采用约 20 ms 消抖，短按一次切换一次算法。KEY2、KEY3 当前为短按调节，
+不支持长按连续调整。KEY4 暂未使用。
+
+## 4. 边缘检测实现
+
+当前 `user_source/hdl_source/isp/edge_detect_96.v` 与官方
+`lab_ex2_edge` 的边缘检测实现保持一致。这样做的原因是：官方实现虽然存在
+数值位宽问题，但其流水线相位、行缓存时序、三点中值滤波和 `O_tuser` 输出时序
+共同决定了最终画面，尤其是薄字体的边缘形态；此前“数学上更正确”的重写版本
+在实测中反而把细字体笔画抹平了。
+
+官方边缘实现的已知限制：
+
+- 灰度计算 `R+G+B` 在 8 位表达式中回绕后再除以 3，会产生约 85 为周期的锯齿；
+- Sobel 的 2 倍权重在 9 位有符号表达式中可能溢出；
+- `data96_128` 的 128 位打包计数器不会被帧起始单独复位；
+- 官方参考工程的 Setup 时序报告存在负余量，属于可靠性风险。
+
+因此，当前版本优先保证“与官方画面一致”。如需做数值正确性优化，应另开分支，
+保持端口、流水线相位和行缓存时序不变，并使用固定文字目标做边缘图对比后再替换。
+
+## 5. OSD 与画面状态
+
+`hdmi_mixer.v` 负责在 HDMI 数据输出前叠加：
+
+- 左上角：安路 Logo；
+- 中部：动态文字和帧计数；
+- 右上角：当前算法状态 `RAW` / `EDGE`。
+
+算法状态文字位置由 `STATUS_OSD_X`、`STATUS_OSD_Y` 参数控制。切换算法瞬间
+可能出现短暂的一帧撕裂，下一帧恢复属于当前设计的预期现象。
+
+## 6. 编译与烧录
+
+使用安路 TangDynasty 打开：
+
+```text
+td_project/camera_to_dsi_display.al
+```
+
+命令行编译时，TD 安装在 `D:\TangDynasty`，两个 Run 目录分别是：
+
+```text
+td_project/camera_to_dsi_display_Runs/syn_1
+td_project/camera_to_dsi_display_Runs/phy_1
+```
+
+完整流程：
+
+```bat
+cd /d D:\competition\example\lab_ex4_integrated\lab_ex4_integrated\td_project\camera_to_dsi_display_Runs\syn_1
+D:\TangDynasty\bin\td_commands_prompt.exe D:/TangDynasty/scripts/DefaultFlow.tcl
+
+cd /d ..\phy_1
+D:\TangDynasty\bin\td_commands_prompt.exe D:/TangDynasty/scripts/DefaultFlow.tcl
+```
+
+生成的 bitstream 位于：
+
+```text
+td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit
+td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display_compress.bit
+```
+
+也可以通过 JTAG 下载或固化到板卡后上电运行。
+
+## 7. 串口运行时日志
+
+开发板 Type-C USB 带有 USB 转 UART，FPGA TXD 使用 H1 引脚。日志格式为
+115200-8-N-1，每秒输出一行：
+
+```text
+DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx
+```
+
+字段含义：
+
+- `F`：HDMI 显示帧计数
+- `A`：AE 曝光目标值
+- `G`：AG 增益目标值
+- `T`：24 位流水线状态位图，定义见 `debug_uart_logger.v` 顶部注释
+- `N`：当前帧非零像素计数
+- `B`：亮度不低于 64 的像素计数
+- `C`：亮度不低于 128 的像素计数
+- `M`：RAW10 最大值
+- `L`：显示层最大值
+
+读取日志：
+
+```powershell
+.\tools\read_debug_uart.ps1 -Port COM3
+```
+
+脚本会同时打印到终端并追加写入 `debug_uart.log`。
+
+## 8. 仓库与提交
+
+- GitHub：`git@github.com:hardcore-noob/anlogic_competition.git`
+- 默认分支：`main`
+- Git 身份：`hardcore-noob <1270792258@qq.com>`
+
+构建产物、TD Run 目录、bitstream 和日志默认由 `.gitignore` 排除，不纳入版本库。
+
+## 9. 当前已知风险
+
+- 当前采用官方边缘实现，画面与官方例程基本一致，但保留了其数值位宽问题；
+- 官方参考路径在 TD 中存在 Setup 时序负余量，量产或高低温环境下需要重新收敛；
+- 官方和整合版都没有完整的 ready/backpressure 闭环，DDR 或 FIFO 拥塞时
+  需要重点检查数据是否被丢弃；
+- 如果后续继续修正边缘算法，必须同时比较整幅边缘图，不能只比较“是否能检测到边缘”。
