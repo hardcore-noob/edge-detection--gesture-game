@@ -10,6 +10,9 @@
 //   4. 灰度公式改用官方 720P 例程的 R/4 + G/2 + B/4（0..253，不回绕、不用除法），
 //      取代旧的 (R+G+B)/3 —— 后者在 8 位表达式里先回绕，把全图亮度压到 0..85 并
 //      产生约 85 为周期的锯齿，中亮部信号只剩真实值的 1/3 左右。
+//   5. 梯度幅度的显示映射改用 √ 曲线查表（白点 K=256，Δ≈64 的阶跃边缘映射为纯白），
+//      取代原来的线性 ×1/×2 —— 线性映射经显示器 gamma 折算后感知响应是 Δ^2.2，
+//      弱边缘看不见、强边缘一片纯白。表由 tools/gen_edge_lut.ps1 生成。
 //
 // 保持不变的：96 位接口与逐拍 4 像素的节奏、逐像素 [1 2 1]/4 平滑、Sobel 核、
 // O_tuser/O_tlast/O_tvalid 与数据严格对齐（本版总延迟为 2 拍）。
@@ -17,16 +20,7 @@
 // ============================================================================
 module edge_detect_96 #(
     parameter IMG_WIDTH  = 1280,
-    parameter IMG_HEIGHT = 720,
-    // 显示增益：显示灰度 = clamp((|gx|+|gy|) << EDGE_GAIN_SHIFT)。
-    // 干净阶跃边缘的 |gx|+|gy| = 4*Δ，Δ 是两侧的真实灰阶差。
-    // 注意：换成 R/4+G/2+B/4 并不会放大 Δ —— 旧公式 (3g mod 256)/3 每段内的斜率
-    // 也是 1，局部差分基本原样保留（实测 Δ=8 时 232/248 个相邻位置保留，其余是
-    // 回绕产生的 ±78 假跳变）。所以增益和门限要按"想要什么显示响应"来选，不能按
-    // 公式换算：门限决定可见门槛（TH=16 → Δ≥4 可见），增益决定饱和点（增益 0 →
-    // Δ≥64 才全白，增益 1 → Δ≥32 就全白）。当前取增益 0，保留更多中间灰阶。
-    // （旧的 A/B 结论——组平均会把边缘摊成 4 像素、笔画变粗——仍然成立。）
-    parameter integer EDGE_GAIN_SHIFT = 0
+    parameter IMG_HEIGHT = 720
 )(
     input               I_clk,
     input               I_rst_n,
@@ -197,6 +191,282 @@ always @(posedge I_clk or negedge I_rst_n) begin
 end
 
 // ============================================================================
+// 显示映射：√ 曲线查表
+//
+// 输入 mag = |gx|+|gy|（干净阶跃边缘约等于 4*Δ，Δ 是两侧真实灰阶差），输出 8 位灰度：
+//     code = clamp(round(255 * sqrt(mag / K)), 255)，当前白点 K = 256
+// K 是"多强的边缘算纯白"：K=256 → Δ≈64 纯白；换成 128 更亮、但 Δ≥32 就过曝；
+// 换成 512 更保守、画面偏灰。经显示器 gamma（≈2.2）折算后感知亮度 ≈ (mag/K)^1.1，
+// 所以弱边缘（Δ≈8 时约 10% 白场亮度）不会像线性映射那样被压成黑。
+// 表内容由 tools/gen_edge_lut.ps1 生成，换白点就重新生成一次。
+// 索引取 mag[9:2]：mag 最大 4*253 = 1012，索引落在 0..253，量化步进 4 ≈ 1 个灰阶。
+// ============================================================================
+function [7:0] edge_curve;
+    input [7:0] idx;
+    begin
+        case (idx)
+            8'd0: edge_curve = 8'd0;
+            8'd1: edge_curve = 8'd32;
+            8'd2: edge_curve = 8'd45;
+            8'd3: edge_curve = 8'd55;
+            8'd4: edge_curve = 8'd64;
+            8'd5: edge_curve = 8'd71;
+            8'd6: edge_curve = 8'd78;
+            8'd7: edge_curve = 8'd84;
+            8'd8: edge_curve = 8'd90;
+            8'd9: edge_curve = 8'd96;
+            8'd10: edge_curve = 8'd101;
+            8'd11: edge_curve = 8'd106;
+            8'd12: edge_curve = 8'd110;
+            8'd13: edge_curve = 8'd115;
+            8'd14: edge_curve = 8'd119;
+            8'd15: edge_curve = 8'd123;
+            8'd16: edge_curve = 8'd128;
+            8'd17: edge_curve = 8'd131;
+            8'd18: edge_curve = 8'd135;
+            8'd19: edge_curve = 8'd139;
+            8'd20: edge_curve = 8'd143;
+            8'd21: edge_curve = 8'd146;
+            8'd22: edge_curve = 8'd150;
+            8'd23: edge_curve = 8'd153;
+            8'd24: edge_curve = 8'd156;
+            8'd25: edge_curve = 8'd159;
+            8'd26: edge_curve = 8'd163;
+            8'd27: edge_curve = 8'd166;
+            8'd28: edge_curve = 8'd169;
+            8'd29: edge_curve = 8'd172;
+            8'd30: edge_curve = 8'd175;
+            8'd31: edge_curve = 8'd177;
+            8'd32: edge_curve = 8'd180;
+            8'd33: edge_curve = 8'd183;
+            8'd34: edge_curve = 8'd186;
+            8'd35: edge_curve = 8'd189;
+            8'd36: edge_curve = 8'd191;
+            8'd37: edge_curve = 8'd194;
+            8'd38: edge_curve = 8'd196;
+            8'd39: edge_curve = 8'd199;
+            8'd40: edge_curve = 8'd202;
+            8'd41: edge_curve = 8'd204;
+            8'd42: edge_curve = 8'd207;
+            8'd43: edge_curve = 8'd209;
+            8'd44: edge_curve = 8'd211;
+            8'd45: edge_curve = 8'd214;
+            8'd46: edge_curve = 8'd216;
+            8'd47: edge_curve = 8'd219;
+            8'd48: edge_curve = 8'd221;
+            8'd49: edge_curve = 8'd223;
+            8'd50: edge_curve = 8'd225;
+            8'd51: edge_curve = 8'd228;
+            8'd52: edge_curve = 8'd230;
+            8'd53: edge_curve = 8'd232;
+            8'd54: edge_curve = 8'd234;
+            8'd55: edge_curve = 8'd236;
+            8'd56: edge_curve = 8'd239;
+            8'd57: edge_curve = 8'd241;
+            8'd58: edge_curve = 8'd243;
+            8'd59: edge_curve = 8'd245;
+            8'd60: edge_curve = 8'd247;
+            8'd61: edge_curve = 8'd249;
+            8'd62: edge_curve = 8'd251;
+            8'd63: edge_curve = 8'd253;
+            8'd64: edge_curve = 8'd255;
+            8'd65: edge_curve = 8'd255;
+            8'd66: edge_curve = 8'd255;
+            8'd67: edge_curve = 8'd255;
+            8'd68: edge_curve = 8'd255;
+            8'd69: edge_curve = 8'd255;
+            8'd70: edge_curve = 8'd255;
+            8'd71: edge_curve = 8'd255;
+            8'd72: edge_curve = 8'd255;
+            8'd73: edge_curve = 8'd255;
+            8'd74: edge_curve = 8'd255;
+            8'd75: edge_curve = 8'd255;
+            8'd76: edge_curve = 8'd255;
+            8'd77: edge_curve = 8'd255;
+            8'd78: edge_curve = 8'd255;
+            8'd79: edge_curve = 8'd255;
+            8'd80: edge_curve = 8'd255;
+            8'd81: edge_curve = 8'd255;
+            8'd82: edge_curve = 8'd255;
+            8'd83: edge_curve = 8'd255;
+            8'd84: edge_curve = 8'd255;
+            8'd85: edge_curve = 8'd255;
+            8'd86: edge_curve = 8'd255;
+            8'd87: edge_curve = 8'd255;
+            8'd88: edge_curve = 8'd255;
+            8'd89: edge_curve = 8'd255;
+            8'd90: edge_curve = 8'd255;
+            8'd91: edge_curve = 8'd255;
+            8'd92: edge_curve = 8'd255;
+            8'd93: edge_curve = 8'd255;
+            8'd94: edge_curve = 8'd255;
+            8'd95: edge_curve = 8'd255;
+            8'd96: edge_curve = 8'd255;
+            8'd97: edge_curve = 8'd255;
+            8'd98: edge_curve = 8'd255;
+            8'd99: edge_curve = 8'd255;
+            8'd100: edge_curve = 8'd255;
+            8'd101: edge_curve = 8'd255;
+            8'd102: edge_curve = 8'd255;
+            8'd103: edge_curve = 8'd255;
+            8'd104: edge_curve = 8'd255;
+            8'd105: edge_curve = 8'd255;
+            8'd106: edge_curve = 8'd255;
+            8'd107: edge_curve = 8'd255;
+            8'd108: edge_curve = 8'd255;
+            8'd109: edge_curve = 8'd255;
+            8'd110: edge_curve = 8'd255;
+            8'd111: edge_curve = 8'd255;
+            8'd112: edge_curve = 8'd255;
+            8'd113: edge_curve = 8'd255;
+            8'd114: edge_curve = 8'd255;
+            8'd115: edge_curve = 8'd255;
+            8'd116: edge_curve = 8'd255;
+            8'd117: edge_curve = 8'd255;
+            8'd118: edge_curve = 8'd255;
+            8'd119: edge_curve = 8'd255;
+            8'd120: edge_curve = 8'd255;
+            8'd121: edge_curve = 8'd255;
+            8'd122: edge_curve = 8'd255;
+            8'd123: edge_curve = 8'd255;
+            8'd124: edge_curve = 8'd255;
+            8'd125: edge_curve = 8'd255;
+            8'd126: edge_curve = 8'd255;
+            8'd127: edge_curve = 8'd255;
+            8'd128: edge_curve = 8'd255;
+            8'd129: edge_curve = 8'd255;
+            8'd130: edge_curve = 8'd255;
+            8'd131: edge_curve = 8'd255;
+            8'd132: edge_curve = 8'd255;
+            8'd133: edge_curve = 8'd255;
+            8'd134: edge_curve = 8'd255;
+            8'd135: edge_curve = 8'd255;
+            8'd136: edge_curve = 8'd255;
+            8'd137: edge_curve = 8'd255;
+            8'd138: edge_curve = 8'd255;
+            8'd139: edge_curve = 8'd255;
+            8'd140: edge_curve = 8'd255;
+            8'd141: edge_curve = 8'd255;
+            8'd142: edge_curve = 8'd255;
+            8'd143: edge_curve = 8'd255;
+            8'd144: edge_curve = 8'd255;
+            8'd145: edge_curve = 8'd255;
+            8'd146: edge_curve = 8'd255;
+            8'd147: edge_curve = 8'd255;
+            8'd148: edge_curve = 8'd255;
+            8'd149: edge_curve = 8'd255;
+            8'd150: edge_curve = 8'd255;
+            8'd151: edge_curve = 8'd255;
+            8'd152: edge_curve = 8'd255;
+            8'd153: edge_curve = 8'd255;
+            8'd154: edge_curve = 8'd255;
+            8'd155: edge_curve = 8'd255;
+            8'd156: edge_curve = 8'd255;
+            8'd157: edge_curve = 8'd255;
+            8'd158: edge_curve = 8'd255;
+            8'd159: edge_curve = 8'd255;
+            8'd160: edge_curve = 8'd255;
+            8'd161: edge_curve = 8'd255;
+            8'd162: edge_curve = 8'd255;
+            8'd163: edge_curve = 8'd255;
+            8'd164: edge_curve = 8'd255;
+            8'd165: edge_curve = 8'd255;
+            8'd166: edge_curve = 8'd255;
+            8'd167: edge_curve = 8'd255;
+            8'd168: edge_curve = 8'd255;
+            8'd169: edge_curve = 8'd255;
+            8'd170: edge_curve = 8'd255;
+            8'd171: edge_curve = 8'd255;
+            8'd172: edge_curve = 8'd255;
+            8'd173: edge_curve = 8'd255;
+            8'd174: edge_curve = 8'd255;
+            8'd175: edge_curve = 8'd255;
+            8'd176: edge_curve = 8'd255;
+            8'd177: edge_curve = 8'd255;
+            8'd178: edge_curve = 8'd255;
+            8'd179: edge_curve = 8'd255;
+            8'd180: edge_curve = 8'd255;
+            8'd181: edge_curve = 8'd255;
+            8'd182: edge_curve = 8'd255;
+            8'd183: edge_curve = 8'd255;
+            8'd184: edge_curve = 8'd255;
+            8'd185: edge_curve = 8'd255;
+            8'd186: edge_curve = 8'd255;
+            8'd187: edge_curve = 8'd255;
+            8'd188: edge_curve = 8'd255;
+            8'd189: edge_curve = 8'd255;
+            8'd190: edge_curve = 8'd255;
+            8'd191: edge_curve = 8'd255;
+            8'd192: edge_curve = 8'd255;
+            8'd193: edge_curve = 8'd255;
+            8'd194: edge_curve = 8'd255;
+            8'd195: edge_curve = 8'd255;
+            8'd196: edge_curve = 8'd255;
+            8'd197: edge_curve = 8'd255;
+            8'd198: edge_curve = 8'd255;
+            8'd199: edge_curve = 8'd255;
+            8'd200: edge_curve = 8'd255;
+            8'd201: edge_curve = 8'd255;
+            8'd202: edge_curve = 8'd255;
+            8'd203: edge_curve = 8'd255;
+            8'd204: edge_curve = 8'd255;
+            8'd205: edge_curve = 8'd255;
+            8'd206: edge_curve = 8'd255;
+            8'd207: edge_curve = 8'd255;
+            8'd208: edge_curve = 8'd255;
+            8'd209: edge_curve = 8'd255;
+            8'd210: edge_curve = 8'd255;
+            8'd211: edge_curve = 8'd255;
+            8'd212: edge_curve = 8'd255;
+            8'd213: edge_curve = 8'd255;
+            8'd214: edge_curve = 8'd255;
+            8'd215: edge_curve = 8'd255;
+            8'd216: edge_curve = 8'd255;
+            8'd217: edge_curve = 8'd255;
+            8'd218: edge_curve = 8'd255;
+            8'd219: edge_curve = 8'd255;
+            8'd220: edge_curve = 8'd255;
+            8'd221: edge_curve = 8'd255;
+            8'd222: edge_curve = 8'd255;
+            8'd223: edge_curve = 8'd255;
+            8'd224: edge_curve = 8'd255;
+            8'd225: edge_curve = 8'd255;
+            8'd226: edge_curve = 8'd255;
+            8'd227: edge_curve = 8'd255;
+            8'd228: edge_curve = 8'd255;
+            8'd229: edge_curve = 8'd255;
+            8'd230: edge_curve = 8'd255;
+            8'd231: edge_curve = 8'd255;
+            8'd232: edge_curve = 8'd255;
+            8'd233: edge_curve = 8'd255;
+            8'd234: edge_curve = 8'd255;
+            8'd235: edge_curve = 8'd255;
+            8'd236: edge_curve = 8'd255;
+            8'd237: edge_curve = 8'd255;
+            8'd238: edge_curve = 8'd255;
+            8'd239: edge_curve = 8'd255;
+            8'd240: edge_curve = 8'd255;
+            8'd241: edge_curve = 8'd255;
+            8'd242: edge_curve = 8'd255;
+            8'd243: edge_curve = 8'd255;
+            8'd244: edge_curve = 8'd255;
+            8'd245: edge_curve = 8'd255;
+            8'd246: edge_curve = 8'd255;
+            8'd247: edge_curve = 8'd255;
+            8'd248: edge_curve = 8'd255;
+            8'd249: edge_curve = 8'd255;
+            8'd250: edge_curve = 8'd255;
+            8'd251: edge_curve = 8'd255;
+            8'd252: edge_curve = 8'd255;
+            8'd253: edge_curve = 8'd255;
+            8'd254: edge_curve = 8'd255;
+            8'd255: edge_curve = 8'd255;
+            default: edge_curve = 8'd255;
+        endcase
+    end
+endfunction
+
+// ============================================================================
 // 第二级：Sobel 梯度 + 灰度输出
 //
 // 窗口索引 0..5 对应列 4k-2..4k+3；输出像素 j 对应列 4k-1+j，使用索引 j/j+1/j+2
@@ -273,16 +543,12 @@ always @(posedge I_clk or negedge I_rst_n) begin
             mag3 = 14'd0;
         end
 
-        // 门限以下作为噪声压掉，门限以上保留梯度灰阶：弱边缘（细笔画）
-        // 以中间灰度留下，不再被硬阈值直接抹平。
-        out0 = (mag0 < I_thresh) ? 8'd0 :
-               ((mag0 > (14'd255 >> EDGE_GAIN_SHIFT)) ? 8'd255 : (mag0[7:0] << EDGE_GAIN_SHIFT));
-        out1 = (mag1 < I_thresh) ? 8'd0 :
-               ((mag1 > (14'd255 >> EDGE_GAIN_SHIFT)) ? 8'd255 : (mag1[7:0] << EDGE_GAIN_SHIFT));
-        out2 = (mag2 < I_thresh) ? 8'd0 :
-               ((mag2 > (14'd255 >> EDGE_GAIN_SHIFT)) ? 8'd255 : (mag2[7:0] << EDGE_GAIN_SHIFT));
-        out3 = (mag3 < I_thresh) ? 8'd0 :
-               ((mag3 > (14'd255 >> EDGE_GAIN_SHIFT)) ? 8'd255 : (mag3[7:0] << EDGE_GAIN_SHIFT));
+        // 门限以下作为噪声压掉；门限以上按 √ 曲线查表出灰度：弱边缘（细笔画）
+        // 以中间灰度留下，强边缘到 Δ≈64 就纯白。
+        out0 = (mag0 < I_thresh) ? 8'd0 : edge_curve(mag0[9:2]);
+        out1 = (mag1 < I_thresh) ? 8'd0 : edge_curve(mag1[9:2]);
+        out2 = (mag2 < I_thresh) ? 8'd0 : edge_curve(mag2[9:2]);
+        out3 = (mag3 < I_thresh) ? 8'd0 : edge_curve(mag3[9:2]);
 
         if(valid_d1)
             // out0 是最左的输出像素（列 4k-1），放在最高字段。

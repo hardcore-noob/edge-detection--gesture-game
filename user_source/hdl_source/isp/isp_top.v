@@ -1,10 +1,10 @@
 module isp_top #(
-    // 边缘显示门限（噪声门限）与显示增益。做成参数，后续可直接接运行时可写寄存器。
-    // TH=16 对应"Δ≥4 灰阶就可见"，与旧公式 + 旧 TH16 的实际灵敏度一致。一度放大到
-    // 48 是把绝对灰度的压缩比当成了局部差分的压缩比，属于误判——上板对比时弱边缘被
-    // 整片拦掉（只剩强轮廓），已改回 16。增益 0 让饱和点落在 Δ≈64。
-    parameter [10:0]  EDGE_TH         = 11'd16,
-    parameter integer EDGE_GAIN_SHIFT = 0
+    // 边缘噪声门限（决定"多弱的边缘才出现"）。TH=16 对应 Δ≥4 灰阶可见，与旧公式 +
+    // 旧 TH16 的灵敏度一致；一度放大到 48 是把绝对灰度的压缩比当成了局部差分的压缩比，
+    // 属于误判——上板对比时弱边缘被整片拦掉（只剩强轮廓），已改回 16。
+    // 显示映射改成 √ 曲线查表（白点 Δ≈64）后，亮度和饱和点由 edge_detect_96.v 里的
+    // 表决定，这里不再有增益参数。
+    parameter [10:0]  EDGE_TH = 11'd16
 )(
     input           axi4s_video_aclk,
     input           I_rst_n,
@@ -125,8 +125,7 @@ module isp_top #(
 
     edge_detect_96 #(
         .IMG_WIDTH (1280),
-        .IMG_HEIGHT(720),
-        .EDGE_GAIN_SHIFT(EDGE_GAIN_SHIFT)
+        .IMG_HEIGHT(720)
     ) u_edge_detect_96 (
         .I_clk   (axi4s_video_aclk),
         .I_rst_n (I_rst_n),
