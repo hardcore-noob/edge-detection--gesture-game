@@ -1,7 +1,10 @@
 module edge_detect_96 #(
     parameter IMG_WIDTH  = 1024,
     parameter IMG_HEIGHT = 600,
-    parameter EDGE_TH    = 11'd132
+    // 显示增益：显示灰度 = clamp((|gx|+|gy|) << EDGE_GAIN_SHIFT)。
+    // 官方灰度链路把亮度压缩在 0..85（R+G+B 在 8 位表达式里回绕再除以 3，见 README 第 4 节），
+    // 左移 1 位后 1 像素宽笔画落在约 80/255、2 像素约 168/255，粗边缘饱和为白。
+    parameter integer EDGE_GAIN_SHIFT = 1
 )(
     input               I_clk,
     input               I_rst_n,
@@ -10,6 +13,7 @@ module edge_detect_96 #(
     input      [95:0]   I_tdata,
     input               I_tvalid,
     input               I_tready,
+    input      [10:0]   I_thresh,
     output reg          O_tlast,
     output reg          O_tuser,
     output reg [95:0]   O_tdata,
@@ -53,10 +57,7 @@ reg signed [12:0] gy;
 reg [12:0] abs_gx;
 reg [12:0] abs_gy;
 reg [13:0] mag;
-reg        edge_flag;
-reg        edge_hist_d1;
-reg        edge_hist_d2;
-reg        edge_flag_filt;
+reg [7:0]  out_gray;
 
 reg [23:0] out_pix;
 
@@ -70,8 +71,6 @@ always @(posedge I_clk or negedge I_rst_n) begin
         O_tvalid <= 1'b0;
         x_grp <= 11'd0;
         y_pos <= 11'd0;
-        edge_hist_d1 = 1'b0;
-        edge_hist_d2 = 1'b0;
         prev_grp_gray_d1 = 8'd0;
         prev_grp_gray_d2 = 8'd0;
         smooth_gray = 8'd0;
@@ -92,8 +91,6 @@ always @(posedge I_clk or negedge I_rst_n) begin
             if(I_tuser) begin
                 x_grp <= 11'd0;
                 y_pos <= 11'd0;
-                edge_hist_d1 = 1'b0;
-                edge_hist_d2 = 1'b0;
                 prev_grp_gray_d1 = 8'd0;
                 prev_grp_gray_d2 = 8'd0;
                 r0c0 = 8'd0; r0c1 = 8'd0; r0c2 = 8'd0;
@@ -129,20 +126,21 @@ always @(posedge I_clk or negedge I_rst_n) begin
                 abs_gx = gx[12] ? (~gx + 1'b1) : gx;
                 abs_gy = gy[12] ? (~gy + 1'b1) : gy;
                 mag    = abs_gx + abs_gy;
-                edge_flag = (mag >= EDGE_TH);
             end
             else begin
-                edge_flag = 1'b0;
+                mag = 14'd0;
             end
 
-            // 3-point majority filter: suppress isolated single-point edge noise.
-            edge_flag_filt = (edge_flag & edge_hist_d1) |
-                             (edge_flag & edge_hist_d2) |
-                             (edge_hist_d1 & edge_hist_d2);
-            edge_hist_d2 = edge_hist_d1;
-            edge_hist_d1 = edge_flag;
+            // 输出梯度幅度而不是硬二值化：门限以下作为噪声压掉，门限以上保留灰阶，
+            // 弱边缘（细笔画）以中间灰度保留，不再被三点多数滤波直接抹平。
+            if(mag < I_thresh)
+                out_gray = 8'd0;
+            else if(mag > (14'd255 >> EDGE_GAIN_SHIFT))
+                out_gray = 8'd255;
+            else
+                out_gray = mag[7:0] << EDGE_GAIN_SHIFT;
 
-            out_pix = edge_flag_filt ? 24'hFFFFFF : 24'h000000;
+            out_pix = {out_gray, out_gray, out_gray};
             O_tdata <= {out_pix, out_pix, out_pix, out_pix};
 
             line2_mem[x_grp] <= mid_v;
@@ -154,9 +152,6 @@ always @(posedge I_clk or negedge I_rst_n) begin
                     y_pos <= 11'd0;
                 else
                     y_pos <= y_pos + 1'b1;
-
-                edge_hist_d1 = 1'b0;
-                edge_hist_d2 = 1'b0;
 
                 r0c0 = 8'd0; r0c1 = 8'd0; r0c2 = 8'd0;
                 r1c0 = 8'd0; r1c1 = 8'd0; r1c2 = 8'd0;

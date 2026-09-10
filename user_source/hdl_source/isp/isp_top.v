@@ -1,4 +1,8 @@
-module isp_top (
+module isp_top #(
+    // 边缘显示门限（噪声门限）与显示增益。做成参数，后续可直接接运行时可写寄存器。
+    parameter [10:0]  EDGE_TH         = 11'd16,
+    parameter integer EDGE_GAIN_SHIFT = 1
+)(
     input           axi4s_video_aclk,
     input           I_rst_n,
     input           I_alg_sel,
@@ -119,7 +123,7 @@ module isp_top (
     edge_detect_96 #(
         .IMG_WIDTH (1024),
         .IMG_HEIGHT(600),
-        .EDGE_TH   (11'd132)
+        .EDGE_GAIN_SHIFT(EDGE_GAIN_SHIFT)
     ) u_edge_detect_96 (
         .I_clk   (axi4s_video_aclk),
         .I_rst_n (I_rst_n),
@@ -128,6 +132,7 @@ module isp_top (
         .I_tdata (awb_O_tdata),
         .I_tvalid(awb_O_tvalid),
         .I_tready(1'b1),
+        .I_thresh(EDGE_TH),
         .O_tlast (edge_O_tlast),
         .O_tuser (edge_O_tuser),
         .O_tdata (edge_O_tdata),
