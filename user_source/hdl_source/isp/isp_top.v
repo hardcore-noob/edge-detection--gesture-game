@@ -1,7 +1,7 @@
 module isp_top #(
     // 边缘显示门限（噪声门限）与显示增益。做成参数，后续可直接接运行时可写寄存器。
     parameter [10:0]  EDGE_TH         = 11'd16,
-    parameter integer EDGE_GAIN_SHIFT = 0
+    parameter integer EDGE_GAIN_SHIFT = 1
 )(
     input           axi4s_video_aclk,
     input           I_rst_n,

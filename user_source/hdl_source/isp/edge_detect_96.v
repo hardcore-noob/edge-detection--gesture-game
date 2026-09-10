@@ -16,8 +16,11 @@ module edge_detect_96 #(
     parameter IMG_WIDTH  = 1024,
     parameter IMG_HEIGHT = 600,
     // 显示增益：显示灰度 = clamp((|gx|+|gy|) << EDGE_GAIN_SHIFT)。
-    // 全分辨率梯度的幅度约为组平均版本的 4 倍，因此默认不做放大。
-    parameter integer EDGE_GAIN_SHIFT = 0
+    // 上板 A/B 结论：第一步（组平均 + 增益 2）与第二步（全分辨率 + 增益 0）的明暗
+    // 肉眼分辨不出，说明真实笔画宽度多落在 3 像素以上、两版都已接近饱和；但第一步
+    // 的笔画明显更粗（那是组平均把边缘摊成 4 像素的副作用）。因此保留全分辨率几何，
+    // 把增益调回 1，让通过门限的弱边缘也提亮一档。
+    parameter integer EDGE_GAIN_SHIFT = 1
 )(
     input               I_clk,
     input               I_rst_n,
