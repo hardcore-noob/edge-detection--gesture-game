@@ -34,7 +34,7 @@
  *   0 HDMI 窗口读使能
  */
 module debug_uart_logger #(
-    parameter integer CLK_HZ = 52000000,
+    parameter integer CLK_HZ = 75000000,
     parameter integer BAUD = 115200,
     parameter integer LOG_PERIOD_MS = 1000
 ) (

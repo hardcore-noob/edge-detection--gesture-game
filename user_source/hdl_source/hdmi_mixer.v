@@ -1,8 +1,8 @@
 module hdmi_mixer #(
     parameter H_OFFSET = 128,
     parameter V_OFFSET = 60,
-    parameter IMG_WIDTH = 1024,
-    parameter IMG_HEIGHT = 600,
+    parameter IMG_WIDTH = 1280,
+    parameter IMG_HEIGHT = 720,
     parameter integer DEBUG_MODE = 0
 )(
     input wire        I_clk,
@@ -113,7 +113,7 @@ module hdmi_mixer #(
     localparam COLOR_LOGO_BLUE   = 24'h1f315c;
     localparam COLOR_LOGO_RED    = 24'hec1c2d;
     localparam COLOR_TEXT        = 24'h00e6ff;
-    localparam DYN_OSD_X         = 12'd375;
+    localparam DYN_OSD_X         = 12'd540;
     localparam DYN_OSD_Y         = 12'd120;
     localparam DYN_OSD_W         = 12'd200;
     localparam DYN_OSD_H         = 12'd24;
@@ -132,7 +132,7 @@ module hdmi_mixer #(
     localparam CHAR_G            = 8'h47;
     localparam CHAR_R            = 8'h52;
     localparam CHAR_W            = 8'h57;
-    localparam STATUS_OSD_X      = 12'd850;
+    localparam STATUS_OSD_X      = 12'd1100;
     localparam STATUS_OSD_Y      = 12'd20;
     localparam STATUS_OSD_W      = 12'd112;
     localparam STATUS_OSD_H      = 12'd24;

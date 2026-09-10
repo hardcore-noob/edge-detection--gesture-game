@@ -51,6 +51,21 @@ output reg              O_ae_cfg_done
 );	
 
 localparam CAM_ID = 8'h6C;
+// 出厂寄存器表要求：先写 0x0100=01（stream on，索引 114），等 10 ms 后再写 0x302d=00（索引 115）。
+// 24 MHz 下 240000 拍 ≈ 10 ms。
+localparam [17:0] POST_STREAM_DELAY = 18'd240000;
+reg  [17:0] delay_cnt;
+wire        S_post_stream_wait = (O_cfg_done == 1'b0) && (reg_index == 9'd115) &&
+                                 (delay_cnt < POST_STREAM_DELAY);
+
+always@(posedge I_clk) begin
+    if(rst_cnt[7] == 1'b0)
+        delay_cnt <= 18'd0;
+    else if(S_post_stream_wait)
+        delay_cnt <= delay_cnt + 1'b1;
+    else
+        delay_cnt <= 18'd0;
+end
 //内部计数器产生一个延迟复位
 reg[7:0] rst_cnt =0;
 always@(posedge I_clk or negedge I_rst_n)  
@@ -94,7 +109,7 @@ always@(posedge I_clk ) begin
             O_ae_cfg_done <= 0;
             reg_index   <= 0;
         end
-        else if((O_cfg_done&O_ae_cfg_done) == 1'b0)
+        else if(((O_cfg_done&O_ae_cfg_done) == 1'b0) && !S_post_stream_wait)
             TS_S <= 2'd1;           //下一个状态
         1:if(!iic_busy)begin        //当总线非忙，才可以操作I2C控制器
             iic_req  <= 1'b1;       //请求操作I2C控制器

@@ -55,7 +55,7 @@ module image_correction #(
             v_cnt  <=  v_cnt + 1;
     end
 
-    assign V_valid = (v_cnt >= 0) && (v_cnt <= 599);
+    assign V_valid = (v_cnt >= 0) && (v_cnt <= 719);
 
     // 计算每行像素个数
     always @(posedge I_clk or negedge I_rst_n) begin
@@ -66,14 +66,14 @@ module image_correction #(
         else if(I_raw_tvalid_d)
             h_cnt <=  h_cnt + 1;
     end
-    assign H_valid = (h_cnt <= 255) && (h_cnt >= 0);
+    assign H_valid = (h_cnt <= 319) && (h_cnt >= 0);
     
     assign tuser = (h_cnt == 0) && (v_cnt == 0) && I_raw_tvalid_d;
     
     assign O_raw_tdata  = V_valid && H_valid? I_raw_tdata_r:0;
     assign I_raw_tready = O_raw_tready;
     assign O_raw_tvalid = H_valid && V_valid && I_raw_tvalid_d;
-    assign O_raw_tlast  = V_valid && (h_cnt == 255) && I_raw_tvalid_d;
+    assign O_raw_tlast  = V_valid && (h_cnt == 319) && I_raw_tvalid_d;
     assign O_raw_tuser  = tuser;
 
 //   cwc cwc_inst

@@ -75,8 +75,8 @@ module isp_top #(
     //assign O_tvalid = m_aixs_tvalid;
 
     demosaic #(
-        .IMG_HEIGHT          (600),  // 图像高度
-        .IMG_WIDTH           (1024),   // 图像宽度
+        .IMG_HEIGHT          (720),  // 图像高度
+        .IMG_WIDTH           (1280),   // 图像宽度
         .data_complete_delay (50  ),
         .BAYER_MODE          ("BGGR")
     )
@@ -103,8 +103,8 @@ module isp_top #(
     );
 
     awb #(
-        .IMG_HEIGHT(600),
-        .IMG_WIDTH (1024)
+        .IMG_HEIGHT(720),
+        .IMG_WIDTH (1280)
     ) u_awb (
         .I_clk   (axi4s_video_aclk),
         .I_rst_n (I_rst_n),
@@ -121,8 +121,8 @@ module isp_top #(
     );
 
     edge_detect_96 #(
-        .IMG_WIDTH (1024),
-        .IMG_HEIGHT(600),
+        .IMG_WIDTH (1280),
+        .IMG_HEIGHT(720),
         .EDGE_GAIN_SHIFT(EDGE_GAIN_SHIFT)
     ) u_edge_detect_96 (
         .I_clk   (axi4s_video_aclk),

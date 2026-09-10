@@ -175,16 +175,16 @@ module hdmi_tx (
     hdmi_1_4b_transmitter_core_wrapper#(
         .DEVICE                 ( "PH1P"   ),
 
-		.HTOTAL                 ( 1344     ),
-        .HSA                    ( 24       ),
-        .HFP                    ( 160      ),
-        .HBP                    ( 136      ),
-        .HACTIVE                ( 1024     ),
-        .VTOTAL                 ( 635      ),
-        .VSA                    ( 2        ),
-        .VFP                    ( 12       ),
-        .VBP                    ( 21       ),
-        .VACTIVE                ( 600      ),
+		.HTOTAL                 ( 1650     ),
+        .HSA                    ( 40       ),
+        .HFP                    ( 110      ),
+        .HBP                    ( 220      ),
+        .HACTIVE                ( 1280     ),
+        .VTOTAL                 ( 750      ),
+        .VSA                    ( 5        ),
+        .VFP                    ( 5        ),
+        .VBP                    ( 20       ),
+        .VACTIVE                ( 720      ),
 
 		.VIDEO_VIC              ( 0        ),
 

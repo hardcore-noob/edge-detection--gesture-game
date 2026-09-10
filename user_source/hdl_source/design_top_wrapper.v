@@ -719,8 +719,8 @@ raw10_unpacket_2lane u_raw10_unpacket (
 
 //将数据转为stream流
 uial2axis #(
-.IMG_WIDTH(1024),
-.IMG_HEIGHT(600),
+.IMG_WIDTH(1280),
+.IMG_HEIGHT(720),
 .INPUT_DATA_WIDTH(40)
 ) 
 u_uial2axis (
@@ -917,14 +917,14 @@ isp_top u_isp_top (
 
 
     uivtc #(
-        .H_ActiveSize ( 1024 ),
-        .H_FrameSize  ( 1344 ),
-        .H_SyncStart  ( 1184 ),
-        .H_SyncEnd    ( 1208 ),
-        .V_ActiveSize ( 600  ),
-        .V_FrameSize  ( 635  ),
-        .V_SyncStart  ( 612  ),
-        .V_SyncEnd    ( 614  )
+        .H_ActiveSize ( 1280 ),
+        .H_FrameSize  ( 1650 ),
+        .H_SyncStart  ( 1390 ),
+        .H_SyncEnd    ( 1430 ),
+        .V_ActiveSize ( 720  ),
+        .V_FrameSize  ( 750  ),
+        .V_SyncStart  ( 725  ),
+        .V_SyncEnd    ( 730  )
     )u_hdmi_vtc(
         .I_vtc_rstn    ( S_hdmi_rst_n    ),
         .I_vtc_clk     ( S_hdmi_pixel_clk ),
@@ -938,8 +938,8 @@ isp_top u_isp_top (
     hdmi_mixer #(
         .H_OFFSET   ( 0    ),
         .V_OFFSET   ( 0    ),
-        .IMG_WIDTH  ( 1024 ),
-        .IMG_HEIGHT ( 600  ),
+        .IMG_WIDTH  ( 1280 ),
+        .IMG_HEIGHT ( 720  ),
         .DEBUG_MODE ( 0    )
     )u_hdmi_mixer(
         .I_clk           ( S_hdmi_pixel_clk   ),
@@ -990,7 +990,7 @@ isp_top u_isp_top (
     );
 
     debug_uart_logger #(
-        .CLK_HZ         ( 52000000 ),
+        .CLK_HZ         ( 75000000 ),
         .BAUD           ( 115200   ),
         .LOG_PERIOD_MS  ( 1000     )
     ) u_debug_uart_logger (
