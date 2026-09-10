@@ -1,7 +1,10 @@
 module isp_top #(
     // 边缘显示门限（噪声门限）与显示增益。做成参数，后续可直接接运行时可写寄存器。
-    parameter [10:0]  EDGE_TH         = 11'd16,
-    parameter integer EDGE_GAIN_SHIFT = 1
+    // 灰阶公式换成 R/4+G/2+B/4（0..253）后，同一场景的梯度幅度比旧公式大 2~3 倍：
+    // 门限同步放大到 48（保持原来约 Δ≥4 灰阶的噪声门），增益降回 0（保留 ×2 会让
+    // Δ≥32 的普通边缘直接饱和成纯白，理由见 edge_detect_96.v 的参数注释）。
+    parameter [10:0]  EDGE_TH         = 11'd48,
+    parameter integer EDGE_GAIN_SHIFT = 0
 )(
     input           axi4s_video_aclk,
     input           I_rst_n,

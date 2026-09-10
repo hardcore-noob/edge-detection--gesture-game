@@ -641,7 +641,12 @@ module hdmi_mixer #(
                (S_y_2d >= LOGO_Y) && (S_y_2d < (LOGO_Y + LOGO_H))) begin
                 S_logo_x = S_x_2d - LOGO_X;
                 S_logo_y = S_y_2d - LOGO_Y;
-                S_logo_addr = S_logo_y * LOGO_W + S_logo_x;
+                // LOGO_W = 160 = 128 + 32，写成移位加法而不是乘法：综合器会把
+                // S_logo_y * LOGO_W 做成一个 DSP 乘法器（TD 网表里叫 mult0），而
+                // mult0 → Logo ROM → O_hdmi_data_reg 正是 75MHz 像素域上最紧的
+                // 一条路径（720P 下报 Setup WNS -99ps 就落在它上面）。S_logo_y
+                // 只在 Logo 框内取值 0..159，所以 19 位的中间结果不会溢出。
+                S_logo_addr = (({7'b0, S_logo_y} << 7) + ({7'b0, S_logo_y} << 5)) + S_logo_x;
                 if(S_logo_pixel[24]) begin
                     S_osd_hit   = 1'b1;
                     S_osd_color = S_logo_pixel[23:0];
