@@ -139,9 +139,11 @@ KEY1 采用约 20 ms 消抖，短按一次切换一次算法。KEY2、KEY3 当�
 
 历史配置（全分辨率 + 旧公式 + 增益 1 + 门限 16）在 1024x600 与 720P 两种分辨率下
 都已上板测试、细笔画效果良好。当前配置（全分辨率 + 官方 luma 公式 + 增益 0 +
-门限 16）已通过 TD（final Setup WNS +9 ps / Hold +20 ps、0 违例），bitstream 在
-`tmp/720p_edge_ab/edge_gain0_th16.bit`；**这一版还没上板**，上板重点是看弱边缘
-（纹理、印刷细节）是否与旧版相当、同时旧版那种回绕假边是否消失。
+门限 16）已通过 TD（`main` @ `f6903de`，final Setup WNS +596 ps / Hold +20 ps、
+0 违例），bitstream 在
+`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`；
+**这一版还没上板**，上板重点是看弱边缘（纹理、印刷细节）是否与旧版相当、同时旧版
+那种回绕假边是否消失。
 
 行缓存改成**三块按行轮转的 block RAM**：每块 320×48 位（1024x600 时是 256×48，
 行缓存按 `IMG_WIDTH/4` 自动跟着分辨率走），保存一行内 6 个平滑灰度
@@ -251,15 +253,32 @@ EDGE 模式下显示层是梯度灰度，所以 `N` / `B` / `C` 实际是 mag �
 
 脚本会同时打印到终端并追加写入 `debug_uart.log`。
 
+日志模块里的两个位宽都从参数推导（`debug_uart_logger.v` 的 `CLK_PER_BIT_W`、
+`LOG_TICKS_W` 用 `$clog2` 算），**不要写死**——720P 升级把 `CLK_HZ` 从 52 MHz 改成
+75 MHz 时踩过这个坑：
+
+- 115200 的分频值是 651，而 `S_tx_div` 当时只有 9 位（0..511），比较永不成立，
+  状态机进 `TX_START` 后就停在起始位、TXD 恒低，日志完全不再输出；
+- `TIMEOUT_CNT` 当时写死 26 位，74,999,999 被截断成 7,891,135；即使修好分频，
+  日志周期也只有 0.105 s 而不是 1 s。
+
+分频值同时从 `ceil` 改成四舍五入（651，误差 +0.006%；`ceil` 得到的 652 是 -0.15%）。
+同一个函数里 `F_line_byte` 的 case 标签也必须写成 `7'd64..7'd68`：写成 6 位字面量
+时值会退化成 0..4 并落进 `default`，`L` 字段整段发的是空格、CR 也没了。
+这次修复已通过 TD 综合/布局布线，但**还没上板确认**。
+
 ## 8. 仓库与提交
 
 - GitHub：`git@github.com:hardcore-noob/anlogic_competition.git`
 - 默认分支：`main`
 - 提交身份：`hardcore-noob`（仓库本地已配置）
-- 边缘模块改造分支：`feat/edge-magnitude`（已与 `main` 同步）；
-  `feat/edge-magnitude-step1` 只是 A/B 对比用的中间状态（组平均 + 增益 2），
+- 工作分支就是 `main`；下面这些分支都已快进合并进 `main`，只在本地留作历史：
+  `feat/edge-magnitude`（全分辨率 Sobel + 灰度输出）、`feat/720p`（1280x720 改造）、
+  `feat/edge-luma`（官方 720P luma 公式 + TH16）
+- `feat/edge-magnitude-step1` 只是 A/B 对比用的中间状态（组平均 + 增益 2），
   不需要推送
-- 720P 改造分支：`feat/720p`（当前工作分支，基于 `main`）
+- 还在做的实验放在独立 worktree 的独立分支上：`feat/edge-lut`（K=512 等边缘参数
+  实验，已推送到远端同名分支）、`feat/edge-denoise`（降噪实验，本地开发中）
 
 构建产物、TD Run 目录、bitstream 和日志默认由 `.gitignore` 排除，不纳入版本库。
 
@@ -279,11 +298,11 @@ EDGE 模式下显示层是梯度灰度，所以 `N` / `B` / `C` 实际是 mag �
 - 时序余量一直很薄：720P 上出现过 Setup **-99 ps**（只差一个端点）的版本。而且
    TD 的布局布线是确定性的——同一份网表重跑，HPWL、拥塞和时序数字完全一样，
   不能指望“再跑一次就好了”，只能改逻辑或改约束。去掉 `hdmi_mixer` 里那个 DSP
-  乘法器后，TH48 那版是 Setup +728 ps；当前 TH16 版布线落点不同、只有 +9 ps
-  （仍 0 违例）。余量对布局落点很敏感，继续加功能后必须重新确认；
-- 当前配置是“新公式 + TH16 + 增益 0”，已通过 TD 但**尚未上板**（Setup 余量只有
-  +9 ps，虽然 0 违例但很薄）；上板要看弱边缘是否与旧版相当、以及旧版的回绕假边
-  是否消失。增益 0/1 的取舍（饱和点 Δ≥64 vs Δ≥32）也还没在板上比过；
+  乘法器后，TH48 那版是 Setup +728 ps；`main` 上的 TH16 版是 +596 ps（0 违例）。
+  余量对布局落点很敏感，继续加功能后必须重新确认；
+- 当前配置是“新公式 + TH16 + 增益 0”，已通过 TD（final Setup WNS +596 ps、0 违例）
+  但**尚未上板**；上板要看弱边缘是否与旧版相当、以及旧版的回绕假边是否消失。
+  增益 0/1 的取舍（饱和点 Δ≥64 vs Δ≥32）也还没在板上比过；
 - 调 TH / 增益时**不要按灰度公式换算**：公式改的是绝对亮度，Sobel 只看局部差分，
   两者不是一回事——TH 48 那一版就是这么踩的坑，弱边缘被整片拦掉。
 
@@ -307,10 +326,11 @@ EDGE 模式下显示层是梯度灰度，所以 `N` / `B` / `C` 实际是 mag �
 等 10 ms 再写 `0x302d=00`（索引 115），这个延时由 `uicfgcs500.v` 里的
 `POST_STREAM_DELAY` 实现，换表时不要丢掉。
 
-构建结果（TD Release_2026.1_SP2，`feat/edge-luma`，新公式 + TH16 + 增益 0）：
-**final Setup WNS +9 ps / TNS 0 / 0 违例，Hold WNS +20 ps / 0 违例**，slices 16092
-（75.85%），ERAM 39，DSP 8。余量很薄（同一设计的 TH48 版是 +728 ps，布线落点不同），
-但 0 违例；`feat/720p` 的 720P 首版是 +271 ps / slices 16101 / DSP 9。bitstream：
+构建结果（TD Release_2026.1_SP2，`main` @ `f6903de`，新公式 + TH16 + 增益 0，
+含第 7 节的串口日志修复）：**final Setup WNS +596 ps / TNS 0 / 0 违例，
+Hold WNS +20 ps / 0 违例**，slices 16157（76.15%）、RAM 30、DSP 9。时序余量对
+布线落点很敏感（同一设计的 TH48 版 +728 ps、`feat/720p` 首版 +271 ps、
+`feat/edge-luma` 那版 +9 ps），但都 0 违例。bitstream：
 `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`。
 
 **已上板确认**：1280x720 画面正常、RAW/EDGE 切换与曝光按键可用、OSD 位置合适，
