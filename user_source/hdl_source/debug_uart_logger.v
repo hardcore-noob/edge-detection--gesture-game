@@ -52,9 +52,13 @@ module debug_uart_logger #(
     output reg         O_tx
 );
 
-    localparam integer CLK_PER_BIT = (CLK_HZ + BAUD - 1) / BAUD;
-    localparam [25:0] TIMEOUT_CNT =
-        ((CLK_HZ / 1000) * LOG_PERIOD_MS) - 1;
+    // 分频值按四舍五入取整，位宽一律由参数用 $clog2 推导：
+    // 75 MHz / 115200 需要 10 位，写死 9 位会在改时钟频率后卡死 UART。
+    localparam integer CLK_PER_BIT   = (CLK_HZ + (BAUD / 2)) / BAUD;
+    localparam integer CLK_PER_BIT_W = $clog2(CLK_PER_BIT);
+    localparam integer LOG_TICKS     = (CLK_HZ / 1000) * LOG_PERIOD_MS;
+    localparam integer LOG_TICKS_W   = $clog2(LOG_TICKS);
+    localparam [LOG_TICKS_W-1:0] TIMEOUT_CNT = LOG_TICKS - 1;
 
     localparam [2:0] TX_IDLE  = 3'd0;
     localparam [2:0] TX_START = 3'd1;
@@ -165,18 +169,18 @@ module debug_uart_logger #(
                 6'd61: F_line_byte = F_hex_nibble(I_max[7:4]);
                 6'd62: F_line_byte = F_hex_nibble(I_max[3:0]);
                 6'd63: F_line_byte = 8'h20;
-                6'd64: F_line_byte = 8'h4C;
-                6'd65: F_line_byte = 8'h3D;
-                6'd66: F_line_byte = F_hex_nibble(I_dmax[7:4]);
-                6'd67: F_line_byte = F_hex_nibble(I_dmax[3:0]);
-                6'd68: F_line_byte = 8'h0D;
+                7'd64: F_line_byte = 8'h4C;
+                7'd65: F_line_byte = 8'h3D;
+                7'd66: F_line_byte = F_hex_nibble(I_dmax[7:4]);
+                7'd67: F_line_byte = F_hex_nibble(I_dmax[3:0]);
+                7'd68: F_line_byte = 8'h0D;
                 7'd69: F_line_byte = 8'h0A;
                 default: F_line_byte = 8'h20;
             endcase
         end
     endfunction
 
-    reg [25:0] S_period_cnt;
+    reg [LOG_TICKS_W-1:0] S_period_cnt;
     reg        S_first_send;
     reg        S_send_busy;
     reg [6:0]  S_line_idx;
@@ -184,7 +188,7 @@ module debug_uart_logger #(
     reg        S_tx_start;
 
     reg [2:0]  S_tx_state;
-    reg [8:0]  S_tx_div;
+    reg [CLK_PER_BIT_W-1:0] S_tx_div;
     reg [3:0]  S_tx_bit;
     reg [9:0]  S_tx_shift;
 
@@ -255,9 +259,9 @@ module debug_uart_logger #(
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if (!I_rst_n)
-            S_period_cnt <= 26'd0;
+            S_period_cnt <= {LOG_TICKS_W{1'b0}};
         else if (S_period_cnt == TIMEOUT_CNT)
-            S_period_cnt <= 26'd0;
+            S_period_cnt <= {LOG_TICKS_W{1'b0}};
         else
             S_period_cnt <= S_period_cnt + 1'b1;
     end
@@ -323,13 +327,13 @@ module debug_uart_logger #(
         if (!I_rst_n) begin
             O_tx       <= 1'b1;
             S_tx_state <= TX_IDLE;
-            S_tx_div   <= 9'd0;
+            S_tx_div   <= {CLK_PER_BIT_W{1'b0}};
             S_tx_bit   <= 4'd0;
             S_tx_shift <= 10'd0;
         end
         else begin
             if (S_tx_div == CLK_PER_BIT - 1)
-                S_tx_div <= 9'd0;
+                S_tx_div <= {CLK_PER_BIT_W{1'b0}};
             else
                 S_tx_div <= S_tx_div + 1'b1;
 
@@ -339,7 +343,7 @@ module debug_uart_logger #(
                     if (S_tx_start) begin
                         S_tx_state <= TX_START;
                         S_tx_shift <= {1'b1, S_tx_byte, 1'b0};
-                        S_tx_div   <= 9'd0;
+                        S_tx_div   <= {CLK_PER_BIT_W{1'b0}};
                         S_tx_bit   <= 4'd0;
                     end
                 end
