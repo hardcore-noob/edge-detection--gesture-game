@@ -158,6 +158,7 @@ module design_top_wrapper (
     wire [7:0]  S_video_max_ch;
     reg         S_dbg_raw_seen;
     reg [9:0]   S_dbg_raw_max_px;
+    reg [9:0]   S_dbg_raw_max_hold;
     reg [9:0]   S_dbg_raw_max_sync1;
     reg [9:0]   S_dbg_raw_max_sync2;
     reg         S_dbg_isp_seen;
@@ -205,6 +206,12 @@ module design_top_wrapper (
     reg [19:0]  S_dbg_bright_px;
     reg [19:0]  S_dbg_very_px;
     reg [7:0]   S_dbg_max_px;
+    // 日志只报"上一完整帧"的统计：计数器在帧首清零前先锁存，避免一行 4.3ms 里
+    // 边发边采样（N/B/C 各自采自帧内不同时刻，读数会在几倍之间乱跳）。
+    reg [19:0]  S_dbg_nonzero_hold;
+    reg [19:0]  S_dbg_bright_hold;
+    reg [19:0]  S_dbg_very_hold;
+    reg [7:0]   S_dbg_max_hold;
     reg         S_hdmi_user_1d;
     reg         S_dbg_alg_prev;
     wire        S_edge_dbg_valid;
@@ -530,10 +537,15 @@ module design_top_wrapper (
     wire [9:0] S_raw_max =
         (S_raw_max_01 > S_raw_max_23) ? S_raw_max_01 : S_raw_max_23;
     always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
-        if(!S_rst_n)
-            S_dbg_raw_max_px <= 10'd0;
-        else if(S_raw_tuser)
-            S_dbg_raw_max_px <= 10'd0;
+        if(!S_rst_n) begin
+            S_dbg_raw_max_px   <= 10'd0;
+            S_dbg_raw_max_hold <= 10'd0;
+        end
+        else if(S_raw_tuser) begin
+            // 相机帧首：先把上一完整帧的峰值搬进 hold，再清零重算
+            S_dbg_raw_max_hold <= S_dbg_raw_max_px;
+            S_dbg_raw_max_px   <= 10'd0;
+        end
         else if(S_raw_tvalid && (S_raw_max > S_dbg_raw_max_px))
             S_dbg_raw_max_px <= S_raw_max;
     end
@@ -544,7 +556,7 @@ module design_top_wrapper (
             S_dbg_raw_max_sync2 <= 10'd0;
         end
         else begin
-            S_dbg_raw_max_sync1 <= S_dbg_raw_max_px;
+            S_dbg_raw_max_sync1 <= S_dbg_raw_max_hold;
             S_dbg_raw_max_sync2 <= S_dbg_raw_max_sync1;
         end
     end
@@ -557,11 +569,21 @@ module design_top_wrapper (
             S_dbg_bright_px <= 20'd0;
             S_dbg_very_px <= 20'd0;
             S_dbg_max_px <= 8'd0;
+            S_dbg_nonzero_hold <= 20'd0;
+            S_dbg_bright_hold <= 20'd0;
+            S_dbg_very_hold <= 20'd0;
+            S_dbg_max_hold <= 8'd0;
         end
         else begin
             S_hdmi_user_1d <= S_hdmi_user;
-            if(S_hdmi_user && !S_hdmi_user_1d)
+            if(S_hdmi_user && !S_hdmi_user_1d) begin
                 S_frame_cnt_dbg <= S_frame_cnt_dbg + 1'b1;
+                // 帧首：计数器里是上一帧的完整统计，先锁存再清零
+                S_dbg_nonzero_hold <= S_dbg_nonzero_px;
+                S_dbg_bright_hold  <= S_dbg_bright_px;
+                S_dbg_very_hold    <= S_dbg_very_px;
+                S_dbg_max_hold     <= S_dbg_max_px;
+            end
             if(S_hdmi_user) begin
                 S_dbg_nonzero_px <= 20'd0;
                 S_dbg_bright_px <= 20'd0;
@@ -1000,11 +1022,11 @@ isp_top u_isp_top (
         .I_ae           ( S_ae               ),
         .I_ag           ( S_ag               ),
         .I_frame_cnt    ( S_frame_cnt_dbg    ),
-        .I_nonzero_cnt  ( S_dbg_nonzero_px   ),
-        .I_bright_cnt   ( S_dbg_bright_px    ),
-        .I_very_cnt     ( S_dbg_very_px      ),
+        .I_nonzero_cnt  ( S_dbg_nonzero_hold ),
+        .I_bright_cnt   ( S_dbg_bright_hold  ),
+        .I_very_cnt     ( S_dbg_very_hold    ),
         .I_max_px       ( S_dbg_raw_max_sync2),
-        .I_disp_max_px  ( S_dbg_max_px       ),
+        .I_disp_max_px  ( S_dbg_max_hold     ),
         .O_tx           ( O_debug_tx         )
     );
 
