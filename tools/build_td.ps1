@@ -62,12 +62,76 @@ function Invoke-TdStage {
 function Show-Summary {
     $phyTs   = Join-Path $phyD 'camera_to_dsi_display_phy.ts'
     $phyArea = Join-Path $phyD 'camera_to_dsi_display_phy.area'
+    $phyRpt  = Join-Path $phyD 'final_timing.rpt'
     $bit     = Join-Path $phyD 'camera_to_dsi_display.bit'
     $cbit    = Join-Path $phyD 'camera_to_dsi_display_compress.bit'
 
     if (Test-Path -LiteralPath $phyTs) {
         Write-Host "--- 最终时序 (final)" -ForegroundColor Yellow
         Get-Content -LiteralPath $phyTs | ForEach-Object { "  $_" }
+    }
+    # 全局 WNS 只说"最紧的地方有多紧"，不说"紧在哪"：下面这两段把分时钟域余量和
+    # 最紧那条路径的构成打出来（逻辑层数 + cell/net 占比），一眼能看出是逻辑深还是走线远。
+    if (Test-Path -LiteralPath $phyRpt) {
+        # 注意：报告有 4~5 MB，别用 (?s).*? 这类跨行正则（会回溯爆炸、脚本卡死），
+        # 一律逐行扫描 + 小窗口。
+        $lines = [IO.File]::ReadAllLines($phyRpt)
+
+        # 路径组（= 时钟域对）的余量：只列真正有约束端点的组，按余量从紧到松
+        $groups = @()
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*Path Group\s+:\s*(.+?)\s*$') {
+                $name = $matches[1]
+                for ($j = $i + 1; $j -lt [Math]::Min($i + 12, $lines.Count); $j++) {
+                    if ($lines[$j] -match '^\s*Max\s+:\s*SWNS\s+(-?[\d.]+)ns.*?(\d+)\s+Total Endpoints') {
+                        $n = [int]$matches[2]
+                        if ($n -gt 0) { $groups += [pscustomobject]@{ G = $name; S = [double]$matches[1]; N = $n } }
+                        break
+                    }
+                }
+            }
+        }
+        if ($groups.Count -gt 0) {
+            Write-Host "--- 分时钟域余量 (final, 从紧到松)" -ForegroundColor Yellow
+            # 同名时钟对可能有多组（DDR 有十几个生成时钟），只留最紧的那组
+            $uniq = $groups | Group-Object G | ForEach-Object {
+                $w = $_.Group | Sort-Object S | Select-Object -First 1
+                [pscustomobject]@{ G = $_.Name; S = $w.S; N = ($_.Group | Measure-Object N -Sum).Sum }
+            }
+            foreach ($g in ($uniq | Sort-Object S)) {
+                "  SWNS {0,7:N3} ns  端点 {1,6}  {2}" -f $g.S, $g.N, $g.G
+            }
+        }
+
+        # 最紧的 setup 路径：找 "Check Type : setup" 行，往前找 Slack/Begin/End、往后找延迟与逻辑级数
+        $best = $null
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*Check Type\s+:\s*setup\s*$') {
+                $slack = $null; $beg = $null; $end = $null; $dly = $null; $lev = $null
+                for ($j = [Math]::Max(0, $i - 6); $j -lt $i; $j++) {
+                    if ($lines[$j] -match '^\s*Slack\s+:\s*(-?[\d.]+)ns') { $slack = [double]$matches[1] }
+                    elseif ($lines[$j] -match '^\s*Begin Point\s+:\s*(.+?)\s*$') { $beg = $matches[1] }
+                    elseif ($lines[$j] -match '^\s*End Point\s+:\s*(.+?)\s*$') { $end = $matches[1] }
+                }
+                for ($j = $i + 1; $j -lt [Math]::Min($i + 12, $lines.Count); $j++) {
+                    if ($lines[$j] -match '^\s*Data Path Delay\s+:\s*(.+?)\s*$') { $dly = $matches[1] }
+                    if ($lines[$j] -match '^\s*Logic Level\s+:\s*(\d+)') { $lev = $matches[1] }
+                }
+                if ($null -ne $slack -and ($null -eq $best -or $slack -lt $best.S)) {
+                    $best = [pscustomobject]@{
+                        S = $slack; Lev = $lev; Dly = (($dly -replace '\s+', ' '))
+                        B = ($beg -replace '\s*\(rising edge.*$', '')
+                        E = ($end -replace '\s*\(rising edge.*$', '')
+                    }
+                }
+            }
+        }
+        if ($best) {
+            Write-Host "--- 最紧的一条路径 (final)" -ForegroundColor Yellow
+            "  slack {0:N3} ns   逻辑级数 {1}   延迟 {2}" -f $best.S, $best.Lev, $best.Dly
+            "  from {0}" -f $best.B
+            "  to   {0}" -f $best.E
+        }
     }
     if (Test-Path -LiteralPath $phyArea) {
         $t = Get-Content -LiteralPath $phyArea -Raw
