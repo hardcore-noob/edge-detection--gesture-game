@@ -72,13 +72,15 @@ localparam IMG_WIDTH_GRP = (IMG_WIDTH >> 2);
 // 每个条目保存同一行内 6 个平滑灰度，对应列 [4k-2 .. 4k+3]：低字节是最左列
 // 4k-2，高字节是最右列 4k+3。存 6 列而不是 4 列，是为了读一次地址就拿到算 4 个
 // 像素 Sobel 所需的完整左右邻域。
-(* ram_style = "block" *) reg [47:0] line_mem0 [0:IMG_WIDTH_GRP-1];
-(* ram_style = "block" *) reg [47:0] line_mem1 [0:IMG_WIDTH_GRP-1];
-(* ram_style = "block" *) reg [47:0] line_mem2 [0:IMG_WIDTH_GRP-1];
+// 2026-09-12：三块行缓存改成显式例化 PH1P ERAM（见下方的 eram_spram 实例）——
+// `(* ram_style = "block" *)` 这个属性 TD 不认，之前它们落成 1152 个 LUTRAM
+// （面积表 u_edge_detect_96 的 dram lut = 1152、eram = 0）。读时序不变：
+// 地址 x_grp 在当拍给出、数据下一拍有效，与原数组写法逐拍等价。
 
 reg [10:0] x_grp;
 reg [10:0] y_pos;
 reg [1:0]  row_phase;   // 0/1/2 轮转：本行写入哪一块
+reg [1:0]  row_phase_d1; // 上一拍的轮转相位，用来选"这一拍有效的 ERAM 读出数据"
 
 // 逐像素水平平滑 s[n] = (g[n] + 2*g[n-1] + g[n-2]) / 4 的历史寄存器，
 // 滤波器形状与官方实现一致，只是从"组平均域"搬到"逐像素域"。
@@ -86,13 +88,40 @@ reg [7:0] gray_h1;
 reg [7:0] gray_h2;
 reg [7:0] sm_h1;
 reg [7:0] sm_h2;
-reg [7:0] sm0, sm1, sm2, sm3;
-reg [47:0] win_cur;
+
+// 当拍平滑结果与 6 列窗口：原来是 always 块里的变量（sm0..sm3、win_cur），现在
+// 引成显式线网 —— ERAM 的写数据必须能在 always 块外看到（否则综合器把它当寄存器，
+// 写数据会比写地址晚一拍，行缓存整体错 4 个像素）。
+wire [7:0]  S_sm0 = ({2'b00, gray0} + ({2'b00, gray_h1} << 1) + {2'b00, gray_h2}) >> 2;
+wire [7:0]  S_sm1 = ({2'b00, gray1} + ({2'b00, gray0}   << 1) + {2'b00, gray_h1}) >> 2;
+wire [7:0]  S_sm2 = ({2'b00, gray2} + ({2'b00, gray1}   << 1) + {2'b00, gray0})   >> 2;
+wire [7:0]  S_sm3 = ({2'b00, gray3} + ({2'b00, gray2}   << 1) + {2'b00, gray1})   >> 2;
+wire [47:0] S_win_cur = {S_sm3, S_sm2, S_sm1, S_sm0, sm_h1, sm_h2};
+
+// ---- 行缓存：3 块 PH1P ERAM（每块 320 x 48 位，1 拍读延迟）------------------
+// 每拍每块要么读要么写（行轮转保证），所以单口（MODE="SP"）就够；
+// 写的那一块读出来没有意义，读侧选择用上一拍的相位（见 mid_r/top_r）。
+wire [47:0] S_mem0_q, S_mem1_q, S_mem2_q;
+// 写使能带上 I_rst_n：原实现的写操作在 always 块的"非复位"分支里，复位期间不写。
+wire        S_we0 = I_rst_n && I_tvalid && (row_phase == 2'd0);
+wire        S_we1 = I_rst_n && I_tvalid && (row_phase == 2'd1);
+wire        S_we2 = I_rst_n && I_tvalid && (row_phase == 2'd2);
+
+eram_spram #(.DATA_WIDTH(48), .ADDR_WIDTH(9)) u_line_mem0 (
+    .I_clk(I_clk), .I_we(S_we0), .I_addr(x_grp[8:0]), .I_wdata(S_win_cur), .O_rdata(S_mem0_q));
+eram_spram #(.DATA_WIDTH(48), .ADDR_WIDTH(9)) u_line_mem1 (
+    .I_clk(I_clk), .I_we(S_we1), .I_addr(x_grp[8:0]), .I_wdata(S_win_cur), .O_rdata(S_mem1_q));
+eram_spram #(.DATA_WIDTH(48), .ADDR_WIDTH(9)) u_line_mem2 (
+    .I_clk(I_clk), .I_we(S_we2), .I_addr(x_grp[8:0]), .I_wdata(S_win_cur), .O_rdata(S_mem2_q));
+
+// 读出的三块里取"第 y-1 行"和"第 y-2 行"：地址在上一拍给出，所以相位也要用上一拍的。
+wire [47:0] mid_r = (row_phase_d1 == 2'd0) ? S_mem2_q :
+                    (row_phase_d1 == 2'd1) ? S_mem0_q : S_mem1_q;
+wire [47:0] top_r = (row_phase_d1 == 2'd0) ? S_mem1_q :
+                    (row_phase_d1 == 2'd1) ? S_mem2_q : S_mem0_q;
 
 // ---- 流水第一级输出：与行缓存读数据对齐 ----
 reg [47:0] cur_r;   // 当前行 y  , 列 4k-2..4k+3
-reg [47:0] mid_r;   // 第 y-1 行
-reg [47:0] top_r;   // 第 y-2 行
 reg [10:0] x_r;
 reg [10:0] y_r;
 reg        valid_d1;
@@ -112,15 +141,12 @@ always @(posedge I_clk or negedge I_rst_n) begin
         x_grp <= 11'd0;
         y_pos <= 11'd0;
         row_phase <= 2'd0;
+        row_phase_d1 <= 2'd0;
         gray_h1 = 8'd0;
         gray_h2 = 8'd0;
         sm_h1 = 8'd0;
         sm_h2 = 8'd0;
-        sm0 = 8'd0; sm1 = 8'd0; sm2 = 8'd0; sm3 = 8'd0;
-        win_cur = 48'd0;
         cur_r <= 48'd0;
-        mid_r <= 48'd0;
-        top_r <= 48'd0;
         x_r   <= 11'd0;
         y_r   <= 11'd0;
         valid_d1 <= 1'b0;
@@ -128,12 +154,10 @@ always @(posedge I_clk or negedge I_rst_n) begin
         last_d1  <= 1'b0;
     end
     else begin
-        // 行缓存读（地址寄存）。消隐期 x_grp 不变，读出的数据不会被使用。
-        case(row_phase)
-            2'd0: begin mid_r <= line_mem2[x_grp]; top_r <= line_mem1[x_grp]; end
-            2'd1: begin mid_r <= line_mem0[x_grp]; top_r <= line_mem2[x_grp]; end
-            default: begin mid_r <= line_mem1[x_grp]; top_r <= line_mem0[x_grp]; end
-        endcase
+        // 与 ERAM 读出数据对齐：这一拍有效的 doa 对应上一拍给出的地址，
+        // 所以读侧选择（mid_r/top_r）要用上一拍的轮转相位。
+        // 消隐期 x_grp 不变，读出的数据不会被使用。
+        row_phase_d1 <= row_phase;
 
         valid_d1 <= I_tvalid;
         user_d1  <= I_tuser;
@@ -150,28 +174,16 @@ always @(posedge I_clk or negedge I_rst_n) begin
                 sm_h2 = 8'd0;
             end
 
-            // 逐像素 [1 2 1]/4 平滑。这里必须显式扩展到 10 位再做加法，
-            // 否则 8 位表达式会回绕（与官方灰度公式同一类问题）。
-            sm0 = ({2'b00, gray0} + ({2'b00, gray_h1} << 1) + {2'b00, gray_h2}) >> 2;
-            sm1 = ({2'b00, gray1} + ({2'b00, gray0}   << 1) + {2'b00, gray_h1}) >> 2;
-            sm2 = ({2'b00, gray2} + ({2'b00, gray1}   << 1) + {2'b00, gray0})   >> 2;
-            sm3 = ({2'b00, gray3} + ({2'b00, gray2}   << 1) + {2'b00, gray1})   >> 2;
+            // 逐像素 [1 2 1]/4 平滑的当拍结果在 S_sm0..S_sm3（文件上部的显式线网，
+            // 那里做了 10 位扩展避免 8 位回绕）。这里只更新历史寄存器。
             gray_h2 = gray2;
             gray_h1 = gray3;
+            sm_h2 = S_sm2;
+            sm_h1 = S_sm3;
 
-            // 当前行在这个组上的 6 列窗口（列 4k-2 .. 4k+3）
-            win_cur = {sm3, sm2, sm1, sm0, sm_h1, sm_h2};
-            sm_h2 = sm2;
-            sm_h1 = sm3;
-
-            // 写入本行的行缓存（与上面读的另外两块不同块，不会读写同址）
-            case(row_phase)
-                2'd0: line_mem0[x_grp] <= win_cur;
-                2'd1: line_mem1[x_grp] <= win_cur;
-                default: line_mem2[x_grp] <= win_cur;
-            endcase
-
-            cur_r <= win_cur;
+            // 写行缓存由 S_we0/1/2 驱动（见上面的 eram_spram 实例），写数据与写地址
+            // 都取自当拍：地址 x_grp、数据 S_win_cur（6 列窗口）。
+            cur_r <= S_win_cur;
             x_r   <= x_grp;
             y_r   <= y_pos;
 
