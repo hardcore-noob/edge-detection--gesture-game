@@ -328,7 +328,7 @@ EDGE 模式下显示层是梯度灰度，所以 `N` / `B` / `C` 实际是 mag �
 
 构建结果（TD Release_2026.1_SP2，`main` @ `f6903de`，新公式 + TH16 + 增益 0，
 含第 7 节的串口日志修复）：**final Setup WNS +596 ps / TNS 0 / 0 违例，
-Hold WNS +20 ps / 0 违例**，slices 16157（76.15%）、RAM 30、DSP 9。时序余量对
+Hold WNS +20 ps / 0 违例**，slices 16627（78.37%）、RAM 39、DSP 8。时序余量对
 布线落点很敏感（同一设计的 TH48 版 +728 ps、`feat/720p` 首版 +271 ps、
 `feat/edge-luma` 那版 +9 ps），但都 0 违例。bitstream：
 `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`。
