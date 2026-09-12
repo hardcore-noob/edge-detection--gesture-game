@@ -32,11 +32,31 @@ $exe   = 'D:\TangDynasty\bin\td_commands_prompt.exe'
 $tcl   = 'D:/TangDynasty/scripts/DefaultFlow.tcl'
 
 function Invoke-TdStage {
-    param([string]$Name, [string]$Dir)
+    param([string]$Name, [string]$Dir, [string]$Artifact)
+    $start = Get-Date
     Write-Host "=== TD $Name  ($Dir)" -ForegroundColor Cyan
     $p = Start-Process -FilePath $exe -ArgumentList $tcl -WorkingDirectory $Dir -Wait -NoNewWindow -PassThru
     Write-Host ("EXIT={0}" -f $p.ExitCode)
     if ($p.ExitCode -ne 0) { throw "TD $Name 阶段失败，退出码 $($p.ExitCode)" }
+
+    # TD 的退出码不反映源文件分析错误：分析失败时它会带着旧数据库继续往下跑，
+    # 退出码照样是 0（2026-09-12 踩过：logger 里一个多余逗号导致 HDL-8007，整轮
+    # 构建"成功"，但综合数据库和 bit 流全是上一版的）。所以必须自己验两件事：
+    #   1) 本次生成的 td_*.log 里没有 ERROR；
+    #   2) 本阶段的关键产物确实被这次运行更新过。
+    $logs = Get-ChildItem -LiteralPath $Dir -Filter 'td_*.log' | Where-Object { $_.LastWriteTime -ge $start }
+    if (-not $logs) { throw "TD $Name 阶段没有产生新的 td_*.log，八成根本没跑起来" }
+    $errs = @()
+    foreach ($l in $logs) { $errs += Select-String -LiteralPath $l.FullName -Pattern '\bERROR\b' -CaseSensitive }
+    if ($errs.Count -gt 0) {
+        $errs | Select-Object -First 8 | ForEach-Object { Write-Host ("    " + $_.Line.Trim()) -ForegroundColor Red }
+        throw "TD $Name 阶段的日志里有 $($errs.Count) 条 ERROR（注意：TD 退出码仍是 0）"
+    }
+    $art = Join-Path $Dir $Artifact
+    if (-not (Test-Path -LiteralPath $art)) { throw "TD $Name 阶段没有生成 $Artifact" }
+    if ((Get-Item -LiteralPath $art).LastWriteTime -lt $start) {
+        throw "$Artifact 没有被本次运行更新：后续阶段会拿旧网表继续跑，结果不可信"
+    }
 }
 
 function Show-Summary {
@@ -68,9 +88,12 @@ function Show-Summary {
 }
 
 switch ($Stage) {
-    'syn'     { Invoke-TdStage '综合 syn_1' $synD }
-    'phy'     { Invoke-TdStage '布局布线 phy_1' $phyD }
-    'both'    { Invoke-TdStage '综合 syn_1' $synD; Invoke-TdStage '布局布线 phy_1' $phyD }
+    'syn'     { Invoke-TdStage '综合 syn_1' $synD 'camera_to_dsi_display_gate.db' }
+    'phy'     { Invoke-TdStage '布局布线 phy_1' $phyD 'camera_to_dsi_display.bit' }
+    'both'    {
+        Invoke-TdStage '综合 syn_1' $synD 'camera_to_dsi_display_gate.db'
+        Invoke-TdStage '布局布线 phy_1' $phyD 'camera_to_dsi_display.bit'
+    }
     'summary' { }
 }
 
