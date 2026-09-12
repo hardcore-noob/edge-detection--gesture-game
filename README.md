@@ -256,6 +256,18 @@ worktree 后若没有 Run 目录，先从已有 worktree 复制 `settings.cfg`�
 Run 目录被 `.gitignore` 排除，所以从别处复制 Run 目录时也要重新补这一条
 （`eram_spram.v` 就是这么加进去的）。
 
+**改 place / route 的流程参数时**：Run 目录的 `settings.cfg` 支持"通配参数"，流程脚本
+（`camera_to_dsi_display.tcl` 的 `prepare`）会把它展开成
+`set_param <step> <param> <value>`：
+
+```tcl
+set phyWildParams {place opt_timing high}
+```
+
+2026-09-12 就是用这一行把布局的时序优化从默认 `medium` 提到 `high`，把 TMDS 串行域
+那条"91% 是走线"的路径从 0.226 ns 拉到 1.12 ns（见 11.1.4）。同样地，Run 目录不纳
+版本库，换 worktree 时要记得补。
+
 生成的 bitstream 位于：
 
 ```text
@@ -529,6 +541,41 @@ ERAM"这种打法要算着用）；触发器 +261，来自 ERAM 输出/地址这
 ERAM 用掉 6 块后还剩 38 块（共 108）。Setup 余量从 +522 掉到 +226 ps：0 违例，但
 低于第 11.4 节建议的 +300 ps 基线，可能因为 ERAM 是固定列资源、ISP 逻辑落点被牵动；
 后面再动 ISP 之前先重新确认这个数字。
+
+### 11.1.4 时序余量：place 的 opt_timing 提到 high（2026-09-12）
+
+11.1.3 之后全局 WNS 掉到 +226 ps。用 `tools/build_td.ps1` 新加的"分时钟域余量"一看，
+紧的根本不是我们写的逻辑：
+
+| 路径组 | medium | high（本次） |
+|--------|--------|--------------|
+| HDMI_SERIAL_CLK -> 自身（375 MHz） | **0.226 ns** | 1.120 ns |
+| HDMI_PIXEL_CLK -> HDMI_SERIAL_CLK | 0.876 ns | 1.086 ns |
+| HDMI_PIXEL_CLK -> 自身（75 MHz，我们的逻辑） | 1.057 ns | 1.560 ns |
+| MIPI_RX_BYTE_CLK / DDR usr_clk 等 | 5.0 ~ 37.8 ns | 5.0 ~ 37.4 ns |
+
+最紧那条路径是 `u0_lane_lvds_8_1` 里从一个触发器到 IO 里 ODDR 输入：
+**延迟 2.221 ns 里 net 占 2.006 ns（91%）、逻辑级数 0** —— 发射触发器被布局器摆到了
+离 ODDR 13 列远的地方，纯走线问题。所以"拆大 mux / 打通全局拥挤"对它没用（没有逻辑
+可拆，全局利用率也只有 61%），真正的杠杆是**落点**。
+
+改法：Run 目录 `settings.cfg` 里加 `set phyWildParams {place opt_timing high}`
+（默认 medium，见第 6 节）。一次布局布线之后：
+
+| 指标 | medium | high |
+|------|--------|------|
+| 全局 final Setup WNS | +226 ps | **+866 ps** |
+| slices | 13002（61.28%） | 12987（61.21%） |
+| LUT6 / 触发器 | 10743 / 14032 | 10738 / 14036 |
+| feedthrough | 6626 | 6513 |
+| final Hold WNS | +20 ps（0 违例） | +20 ps（0 违例） |
+| place / route 耗时 | 2m04s / 58s | 2m08s / 57s |
+
+**结论**：遇到"余量薄"先看分时钟域余量和最紧路径的 net 占比，再决定是改逻辑还是改
+落点。这条路径靠落点修，代价接近零；反过来，为了它去动全局打包/feedthrough 是白费力气。
+
+> 说明：这次只改了布局参数、RTL 与综合网表都没动，所以逻辑功能与 11.1.3 那版逐位
+> 一致，只是重新布局布线后的 bitstream。
 
 ### 11.2 横向对比（都在 `official_example/`，同一器件）
 
