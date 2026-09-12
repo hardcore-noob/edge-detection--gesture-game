@@ -7,6 +7,13 @@
  *   G    AG 增益目标值           (HEX)
  *   T    24 位流水线状态位图     (HEX)
  *
+ * 2026-09-12 追加 4 个字段（都在行尾，T 位图不动）：
+ *   D    video_in  FIFO（ISP→DDR）上一帧丢写次数  (HEX=16 位)
+ *   E    video_out FIFO（DDR→HDMI）上一帧丢写次数 (HEX=16 位)
+ *   W    video_in  FIFO 上一帧最大占用 0..511     (HEX=9 位)
+ *   V    video_out FIFO 上一帧最大占用 0..511     (HEX=9 位)
+ *   D/E 恒为 0 表示这一秒没有因为 FIFO 满而丢数据；W/V 越接近 1FF 说明离写满越近。
+ *
  * T 位定义（bit 23 -> bit 0）：
  *  23 MC 初始化完成
  *  22 MC APP READY
@@ -49,6 +56,10 @@ module debug_uart_logger #(
     input  wire [19:0] I_very_cnt,
     input  wire [9:0]  I_max_px,
     input  wire [7:0]  I_disp_max_px,
+    input  wire [15:0] I_fifo_in_drop,
+    input  wire [15:0] I_fifo_out_drop,
+    input  wire [8:0]  I_fifo_in_used,
+    input  wire [8:0]  I_fifo_out_used,
     output reg         O_tx
 );
 
@@ -65,7 +76,9 @@ module debug_uart_logger #(
     localparam [2:0] TX_DATA  = 3'd2;
     localparam [2:0] TX_STOP  = 3'd3;
 
-    localparam [6:0] LINE_LAST = 7'd69;
+    // 一行 96 字节：原来的 70 字节（到 L=xx 为止）+ 追加的 " D=xxxx E=xxxx W=xxx V=xxx"
+    // + CRLF。115200 下发一行约 8.3 ms，仍远小于 1 s 的发送周期。
+    localparam [6:0] LINE_LAST = 7'd95;
 
     function [7:0] F_hex_nibble;
         input [3:0] I_n;
@@ -170,8 +183,34 @@ module debug_uart_logger #(
                 7'd65: F_tpl = 8'h3d;   // '='
                 7'd66: F_tpl = 8'h00;   // 数字位，不使用
                 7'd67: F_tpl = 8'h00;   // 数字位，不使用
-                7'd68: F_tpl = 8'h0d;   // (0x0d)
-                7'd69: F_tpl = 8'h0a;   // (0x0a)
+                7'd68: F_tpl = 8'h20;   // ' '
+                7'd69: F_tpl = 8'h44;   // 'D'
+                7'd70: F_tpl = 8'h3d;   // '='
+                7'd71: F_tpl = 8'h00;   // 数字位，不使用
+                7'd72: F_tpl = 8'h00;   // 数字位，不使用
+                7'd73: F_tpl = 8'h00;   // 数字位，不使用
+                7'd74: F_tpl = 8'h00;   // 数字位，不使用
+                7'd75: F_tpl = 8'h20;   // ' '
+                7'd76: F_tpl = 8'h45;   // 'E'
+                7'd77: F_tpl = 8'h3d;   // '='
+                7'd78: F_tpl = 8'h00;   // 数字位，不使用
+                7'd79: F_tpl = 8'h00;   // 数字位，不使用
+                7'd80: F_tpl = 8'h00;   // 数字位，不使用
+                7'd81: F_tpl = 8'h00;   // 数字位，不使用
+                7'd82: F_tpl = 8'h20;   // ' '
+                7'd83: F_tpl = 8'h57;   // 'W'
+                7'd84: F_tpl = 8'h3d;   // '='
+                7'd85: F_tpl = 8'h00;   // 数字位，不使用
+                7'd86: F_tpl = 8'h00;   // 数字位，不使用
+                7'd87: F_tpl = 8'h00;   // 数字位，不使用
+                7'd88: F_tpl = 8'h20;   // ' '
+                7'd89: F_tpl = 8'h56;   // 'V'
+                7'd90: F_tpl = 8'h3d;   // '='
+                7'd91: F_tpl = 8'h00;   // 数字位，不使用
+                7'd92: F_tpl = 8'h00;   // 数字位，不使用
+                7'd93: F_tpl = 8'h00;   // 数字位，不使用
+                7'd94: F_tpl = 8'h0d;   // (0x0d)
+                7'd95: F_tpl = 8'h0a;   // (0x0a)
                 default: F_tpl = 8'h00;
             endcase
         end
@@ -220,13 +259,42 @@ module debug_uart_logger #(
                 7'd62: F_nib = {1'b1, 6'd35};   // I_max_px[3:0]
                 7'd66: F_nib = {1'b1, 6'd36};   // I_disp_max_px[7:4]
                 7'd67: F_nib = {1'b1, 6'd37};   // I_disp_max_px[3:0]
+                7'd71: F_nib = {1'b1, 6'd38};   // I_fifo_in_drop[15:12]
+                7'd72: F_nib = {1'b1, 6'd39};   // I_fifo_in_drop[11:8]
+                7'd73: F_nib = {1'b1, 6'd40};   // I_fifo_in_drop[7:4]
+                7'd74: F_nib = {1'b1, 6'd41};   // I_fifo_in_drop[3:0]
+                7'd78: F_nib = {1'b1, 6'd42};   // I_fifo_out_drop[15:12]
+                7'd79: F_nib = {1'b1, 6'd43};   // I_fifo_out_drop[11:8]
+                7'd80: F_nib = {1'b1, 6'd44};   // I_fifo_out_drop[7:4]
+                7'd81: F_nib = {1'b1, 6'd45};   // I_fifo_out_drop[3:0]
+                7'd85: F_nib = {1'b1, 6'd46};   // {3'b0, I_fifo_in_used[8]}
+                7'd86: F_nib = {1'b1, 6'd47};   // I_fifo_in_used[7:4]
+                7'd87: F_nib = {1'b1, 6'd48};   // I_fifo_in_used[3:0]
+                7'd91: F_nib = {1'b1, 6'd49};   // {3'b0, I_fifo_out_used[8]}
+                7'd92: F_nib = {1'b1, 6'd50};   // I_fifo_out_used[7:4]
+                7'd93: F_nib = {1'b1, 6'd51};   // I_fifo_out_used[3:0]
                 default: F_nib = 7'd0;
             endcase
         end
     endfunction
 
-    // 行内 nibble：nib0 = 最先发送的那个（F 的最高位），nib37 = 最后一个（L 的最低位）。
-    wire [151:0] S_nibble_vec = {
+    // 行内 nibble：nib0 = 最先发送的那个（F 的最高位），nib51 = 最后一个（V 的最低位）。
+    // 向量按"高编号在前"书写：最上面一项是 nib51（= V 的最低 4 位），最下面一项是 nib0。
+    wire [207:0] S_nibble_vec = {
+        I_fifo_out_used[3:0],          // nib51
+        I_fifo_out_used[7:4],          // nib50
+        {3'b0, I_fifo_out_used[8]},    // nib49
+        I_fifo_in_used[3:0],           // nib48
+        I_fifo_in_used[7:4],           // nib47
+        {3'b0, I_fifo_in_used[8]},     // nib46
+        I_fifo_out_drop[3:0],          // nib45
+        I_fifo_out_drop[7:4],          // nib44
+        I_fifo_out_drop[11:8],         // nib43
+        I_fifo_out_drop[15:12],        // nib42
+        I_fifo_in_drop[3:0],           // nib41
+        I_fifo_in_drop[7:4],           // nib40
+        I_fifo_in_drop[11:8],          // nib39
+        I_fifo_in_drop[15:12],         // nib38
         I_disp_max_px[3:0],           // nib37
         I_disp_max_px[7:4],           // nib36
         I_max_px[3:0],            // nib35

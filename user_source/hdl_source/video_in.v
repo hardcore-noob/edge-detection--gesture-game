@@ -19,7 +19,14 @@ module video_in (
     output reg         O_ddr_user_wr_en,
     output reg[24:0]   O_ddr_user_addr,
     output wire[127:0] O_ddr_user_wr_data,
-    input wire         I_ddr_user_ready
+    input wire         I_ddr_user_ready,
+
+    // FIFO 拥塞可观测性（2026-09-12 新增）：都在 I_camera_clk 域里产生，
+    // 由 design_top_wrapper 同步到显示域后再进 DBG 日志。
+    //   O_fifo_drop = 写侧在 full 时仍尝试写入的次数（这些拍的数据被丢弃）
+    //   O_fifo_used = 当前 FIFO 占用（0..511），用来观察离写满还有多少余量
+    output wire[15:0]  O_fifo_drop,
+    output wire[8:0]   O_fifo_used
 );
 
     wire        S_fifo_rst;
@@ -36,6 +43,10 @@ module video_in (
     wire[127:0] S_fifo_rd_data; 
     reg         S_ddr_wr_valid;
     reg[9:0]    S_ddr_wr_cnt;
+    wire        S_fifo_full;
+    wire        S_fifo_afull;
+    wire[8:0]   S_fifo_wr_used;
+    reg[15:0]   S_fifo_drop_cnt;
 
     localparam IMAGE_BASE_ADDR_0 = 25'd0;
     localparam IMAGE_BASE_ADDR_1 = 25'd7000000;
@@ -47,15 +58,27 @@ module video_in (
 
     assign O_video_in_wr_busy = S_ddr_wr_valid | O_ddr_user_wr_en;
 
+    // 写侧丢数据计数：we 与 full_flag 同拍有效 ⇒ 这一拍没写进去（静默丢失）。
+    // 这里是自由运行计数器，design_top_wrapper 按帧取差值上报，跨时钟域只同步数值。
+    assign O_fifo_drop = S_fifo_drop_cnt;
+    assign O_fifo_used = S_fifo_wr_used;
+
+    always @(posedge I_camera_clk or negedge I_rst_n) begin
+        if(!I_rst_n)
+            S_fifo_drop_cnt <= 16'd0;
+        else if(I_camera_valid && S_fifo_full)
+            S_fifo_drop_cnt <= S_fifo_drop_cnt + 16'd1;
+    end
+
     w128_d512_fifo U_w128_d512_fifo(
         .rst        ( S_fifo_rst         ),   
 
         .clkw       ( I_camera_clk       ),     
         .we         ( I_camera_valid     ),
         .di         ( I_camera_data      ),
-        .afull      (),
-        .full_flag  (),
-        .wrusedw    (),
+        .afull      ( S_fifo_afull       ),
+        .full_flag  ( S_fifo_full        ),
+        .wrusedw    ( S_fifo_wr_used     ),
  
         .clkr       ( I_ddr_clk          ),
         .re         ( S_fifo_rd_en       ), 

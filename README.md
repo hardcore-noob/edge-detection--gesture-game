@@ -283,7 +283,7 @@ td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display_compress.bit
 115200-8-N-1，每秒输出一行：
 
 ```text
-DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx
+DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xxxx W=xxx V=xxx
 ```
 
 字段含义：
@@ -297,6 +297,25 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx
 - `C`：亮度不低于 128 的像素计数
 - `M`：RAW10 最大值
 - `L`：显示层最大值
+
+2026-09-12 追加的 4 个字段（专门用来回答"有没有因为 FIFO 满而丢数据"，**没有复用 `T`
+位图**，行因此从 70 字节变成 96 字节，115200 下一行约 8.3 ms，仍远小于 1 s 周期）：
+
+- `D`：`video_in` FIFO（ISP→DDR）**上一帧的丢写次数**（16 位，HEX）
+- `E`：`video_out` FIFO（DDR→HDMI）**上一帧的丢写次数**（16 位，HEX）
+- `W`：`video_in` FIFO 上一帧**最大占用**（0..0x1FF，HEX）
+- `V`：`video_out` FIFO 上一帧**最大占用**（0..0x1FF，HEX）
+
+怎么读：`D`/`E` 恒为 0 表示这一秒没有因为写满而丢数据；一旦非 0，就说明那一路的
+写入被 FIFO 丢掉了（原设计里这是**静默**发生的，见第 9 节）。`W`/`V` 是余量指标：
+FIFO 深度 512，`W`/`V` 越接近 `1FF` 说明离写满越近，可以提前看出"再加大算法负载就
+要丢了"。丢写计数在两个 FIFO 各自的写时钟域里自由计数（不会漏单拍事件），在
+`design_top_wrapper` 里同步到显示域、按显示帧取 16 位差值上报；跨域同步带来的偏斜
+最多一两拍，对统计无影响。
+
+代价（本次构建实测）：slices 12987 → 13214、LUT6 10738 → 10809、触发器 14036 →
+14256、feedthrough 6513 → 6767，final Setup WNS +866 → +820 ps（仍 0 违例）。
+买来的就是"丢没丢数据"从猜变成看。
 
 `N` / `B` / `C` / `M` / `L` 都是**上一完整帧**的统计：计数器在帧首锁存后清零，所以
 同一行里的字段最多只差一帧，可以安全地拿去做 A/B 对比。
@@ -378,10 +397,13 @@ slices 16957（79.93%）**；脚本已在 PowerShell 5.1 实测不再报错。
   已上板实测合格。以后若改 sensor 窗口/帧率、PLL 或 HDMI 时序，必须按第 10 节的
   对照表整链一起改，并重新综合与上板确认；
 - 边缘图相对 RAW 左移 1 像素、总延迟 2 拍，这是设计选择而非缺陷；
-- 官方和整合版都没有完整的 ready/backpressure 闭环，DDR 或 FIFO 拥塞时
-  需要重点检查数据是否被丢弃；720P 的 DDR 读写量比 1024x600 高 50%（写+读约
-  330 MB/s），上板实测画面稳定，但长时间运行或加大算法负载时仍要用 `DBG:` 日志
-  的帧计数和 N/B/C 复查有没有丢帧；
+- 官方和整合版都没有完整的 ready/backpressure 闭环（`isp_top.v` 里 `m_aixs_tready`
+  被注释掉、内部各级 `tready` 悬空或直接拉高，两块 FIFO 的 `full_flag` 原本也没人
+  接），DDR 或 FIFO 拥塞时数据会被**静默丢弃**；720P 的 DDR 读写量比 1024x600 高
+  50%（写+读约 330 MB/s），上板实测画面稳定。**2026-09-12 起这件事变成可观测的**：
+  `DBG:` 行尾新增 `D/E/W/V`——`D`/`E` 是两块 FIFO 上一帧的丢写次数（非 0 就是真丢了
+  数据），`W`/`V` 是上一帧的最大占用（离写满还有多少余量），见第 7 节。长时间运行
+  或加大算法负载时先看这四个字段，再看帧计数和 N/B/C；
 - 时序余量一直很薄：720P 上出现过 Setup **-99 ps**（只差一个端点）的版本。而且
    TD 的布局布线是确定性的——同一份网表重跑，HPWL、拥塞和时序数字完全一样，
   不能指望“再跑一次就好了”，只能改逻辑或改约束。去掉 `hdmi_mixer` 里那个 DSP

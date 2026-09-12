@@ -212,6 +212,27 @@ module design_top_wrapper (
     reg [19:0]  S_dbg_bright_hold;
     reg [19:0]  S_dbg_very_hold;
     reg [7:0]   S_dbg_max_hold;
+    // ---- FIFO 拥塞观测（2026-09-12 新增）------------------------------------
+    // 两个 FIFO 的写侧都可能静默丢数据（没有 backpressure 闭环，见 README 第 9 节），
+    // 这里把它们各自的"丢写次数 + 占用"同步到显示域，按显示帧统计后进 DBG 日志：
+    //   D = video_in  FIFO（ISP→DDR）上一帧丢写次数
+    //   E = video_out FIFO（DDR→HDMI）上一帧丢写次数
+    //   W = video_in  FIFO 上一帧最大占用（0..511）
+    //   V = video_out FIFO 上一帧最大占用（0..511）
+    // 丢写次数在两个 FIFO 自己的写时钟域里自由计数，这里只同步数值、按帧取差，
+    // 所以不会漏掉"单拍脉冲"；同步引入的偏斜最多一两拍，对统计无影响。
+    wire [15:0] S_fifo_in_drop_raw;
+    wire [15:0] S_fifo_out_drop_raw;
+    wire [8:0]  S_fifo_in_used_raw;
+    wire [8:0]  S_fifo_out_used_raw;
+    reg  [15:0] S_fifo_in_drop_s1,  S_fifo_in_drop_s2;
+    reg  [15:0] S_fifo_out_drop_s1, S_fifo_out_drop_s2;
+    reg  [8:0]  S_fifo_in_used_s1,  S_fifo_in_used_s2;
+    reg  [8:0]  S_fifo_out_used_s1, S_fifo_out_used_s2;
+    reg  [15:0] S_fifo_in_drop_prev, S_fifo_out_drop_prev;
+    reg  [15:0] S_dbg_fifo_in_drop,  S_dbg_fifo_out_drop;
+    reg  [8:0]  S_dbg_fifo_in_used,  S_dbg_fifo_out_used;
+    reg  [8:0]  S_fifo_in_used_max,  S_fifo_out_used_max;
     reg         S_hdmi_user_1d;
     reg         S_dbg_alg_prev;
     wire        S_edge_dbg_valid;
@@ -561,6 +582,46 @@ module design_top_wrapper (
         end
     end
 
+    // FIFO 拥塞观测：两级同步 → 帧内峰值 → 帧首换帧（丢写次数取 16 位差值，跨回绕安全）
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_fifo_in_drop_s1    <= 16'd0;  S_fifo_in_drop_s2    <= 16'd0;
+            S_fifo_out_drop_s1   <= 16'd0;  S_fifo_out_drop_s2   <= 16'd0;
+            S_fifo_in_used_s1    <= 9'd0;   S_fifo_in_used_s2    <= 9'd0;
+            S_fifo_out_used_s1   <= 9'd0;   S_fifo_out_used_s2   <= 9'd0;
+            S_fifo_in_drop_prev  <= 16'd0;  S_fifo_out_drop_prev <= 16'd0;
+            S_dbg_fifo_in_drop   <= 16'd0;  S_dbg_fifo_out_drop  <= 16'd0;
+            S_dbg_fifo_in_used   <= 9'd0;   S_dbg_fifo_out_used  <= 9'd0;
+            S_fifo_in_used_max   <= 9'd0;   S_fifo_out_used_max  <= 9'd0;
+        end
+        else begin
+            S_fifo_in_drop_s1    <= S_fifo_in_drop_raw;
+            S_fifo_in_drop_s2    <= S_fifo_in_drop_s1;
+            S_fifo_out_drop_s1   <= S_fifo_out_drop_raw;
+            S_fifo_out_drop_s2   <= S_fifo_out_drop_s1;
+            S_fifo_in_used_s1    <= S_fifo_in_used_raw;
+            S_fifo_in_used_s2    <= S_fifo_in_used_s1;
+            S_fifo_out_used_s1   <= S_fifo_out_used_raw;
+            S_fifo_out_used_s2   <= S_fifo_out_used_s1;
+
+            if(S_fifo_in_used_s2 > S_fifo_in_used_max)
+                S_fifo_in_used_max <= S_fifo_in_used_s2;
+            if(S_fifo_out_used_s2 > S_fifo_out_used_max)
+                S_fifo_out_used_max <= S_fifo_out_used_s2;
+
+            if(S_hdmi_user && !S_hdmi_user_1d) begin
+                S_dbg_fifo_in_drop   <= S_fifo_in_drop_s2  - S_fifo_in_drop_prev;
+                S_dbg_fifo_out_drop  <= S_fifo_out_drop_s2 - S_fifo_out_drop_prev;
+                S_fifo_in_drop_prev  <= S_fifo_in_drop_s2;
+                S_fifo_out_drop_prev <= S_fifo_out_drop_s2;
+                S_dbg_fifo_in_used   <= S_fifo_in_used_max;
+                S_dbg_fifo_out_used  <= S_fifo_out_used_max;
+                S_fifo_in_used_max   <= S_fifo_in_used_s2;
+                S_fifo_out_used_max  <= S_fifo_out_used_s2;
+            end
+        end
+    end
+
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
             S_hdmi_user_1d <= 1'b0;
@@ -834,7 +895,9 @@ isp_top u_isp_top (
         .O_ddr_user_wr_en     ( S_vi_ddr_wr_en        ),
         .O_ddr_user_addr      ( S_vi_ddr_wr_addr      ),
         .O_ddr_user_wr_data   ( S_vi_ddr_wr_data      ),
-        .I_ddr_user_ready     ( S_ddr_user_ready      )
+        .I_ddr_user_ready     ( S_ddr_user_ready      ),
+        .O_fifo_drop          ( S_fifo_in_drop_raw    ),
+        .O_fifo_used          ( S_fifo_in_used_raw    )
     );
 
 
@@ -868,7 +931,9 @@ isp_top u_isp_top (
         .I_dsi_clk           ( S_hdmi_pixel_clk     ),
         .I_video_vsync       ( S_video_out_vsync    ),
         .I_video_rd_en       ( S_hdmi_window_rd_en  ),
-        .O_vdieo_data        ( S_video_rd_data      )
+        .O_vdieo_data        ( S_video_rd_data      ),
+        .O_fifo_drop         ( S_fifo_out_drop_raw  ),
+        .O_fifo_used         ( S_fifo_out_used_raw  )
     );
 
 
@@ -1027,6 +1092,10 @@ isp_top u_isp_top (
         .I_very_cnt     ( S_dbg_very_hold    ),
         .I_max_px       ( S_dbg_raw_max_sync2),
         .I_disp_max_px  ( S_dbg_max_hold     ),
+        .I_fifo_in_drop  ( S_dbg_fifo_in_drop  ),
+        .I_fifo_out_drop ( S_dbg_fifo_out_drop ),
+        .I_fifo_in_used  ( S_dbg_fifo_in_used  ),
+        .I_fifo_out_used ( S_dbg_fifo_out_used ),
         .O_tx           ( O_debug_tx         )
     );
 
