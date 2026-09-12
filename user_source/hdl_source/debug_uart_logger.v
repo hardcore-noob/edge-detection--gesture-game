@@ -92,93 +92,180 @@ module debug_uart_logger #(
         end
     endfunction
 
-    function [7:0] F_line_byte;
-        input [6:0]  I_idx;
-        input [23:0] I_status;
-        input [15:0] I_frame;
-        input [15:0] I_ae;
-        input [15:0] I_ag;
-        input [19:0] I_cnt;
-        input [19:0] I_bright;
-        input [19:0] I_very;
-        input [9:0]  I_max;
-        input [7:0]  I_dmax;
+    // ---- 行模板 -------------------------------------------------------------
+    // 一行 70 字节 = 32 个固定文本字节 + 38 个十六进制数字（F/A/G/T/N/B/C/M/L 的
+    // nibble）。拆成"常量字节表 + nibble 源表 + 一份 hex 编码器"：
+    // 直接写成一个 70 分支的 case 时，38 个数字分支各自带一份 4->8 位编码逻辑，
+    // TD 面积表里 u_debug_uart_logger 那 201 个 LUT 大头就在这里。
+    // 两张表由 tools 之外的一次性脚本从旧版 case 逐行转换而来，并做了 70 项穷举比对。
+    function [7:0] F_tpl;
+        input [6:0] I_idx;
         begin
             case (I_idx)
-                6'd0:  F_line_byte = 8'h44;
-                6'd1:  F_line_byte = 8'h42;
-                6'd2:  F_line_byte = 8'h47;
-                6'd3:  F_line_byte = 8'h3A;
-                6'd4:  F_line_byte = 8'h46;
-                6'd5:  F_line_byte = 8'h3D;
-                6'd6:  F_line_byte = F_hex_nibble(I_frame[15:12]);
-                6'd7:  F_line_byte = F_hex_nibble(I_frame[11:8]);
-                6'd8:  F_line_byte = F_hex_nibble(I_frame[7:4]);
-                6'd9:  F_line_byte = F_hex_nibble(I_frame[3:0]);
-                6'd10: F_line_byte = 8'h20;
-                6'd11: F_line_byte = 8'h41;
-                6'd12: F_line_byte = 8'h3D;
-                6'd13: F_line_byte = F_hex_nibble(I_ae[15:12]);
-                6'd14: F_line_byte = F_hex_nibble(I_ae[11:8]);
-                6'd15: F_line_byte = F_hex_nibble(I_ae[7:4]);
-                6'd16: F_line_byte = F_hex_nibble(I_ae[3:0]);
-                6'd17: F_line_byte = 8'h20;
-                6'd18: F_line_byte = 8'h47;
-                6'd19: F_line_byte = 8'h3D;
-                6'd20: F_line_byte = F_hex_nibble(I_ag[15:12]);
-                6'd21: F_line_byte = F_hex_nibble(I_ag[11:8]);
-                6'd22: F_line_byte = F_hex_nibble(I_ag[7:4]);
-                6'd23: F_line_byte = F_hex_nibble(I_ag[3:0]);
-                6'd24: F_line_byte = 8'h20;
-                6'd25: F_line_byte = 8'h54;
-                6'd26: F_line_byte = 8'h3D;
-                6'd27: F_line_byte = F_hex_nibble(I_status[23:20]);
-                6'd28: F_line_byte = F_hex_nibble(I_status[19:16]);
-                6'd29: F_line_byte = F_hex_nibble(I_status[15:12]);
-                6'd30: F_line_byte = F_hex_nibble(I_status[11:8]);
-                6'd31: F_line_byte = F_hex_nibble(I_status[7:4]);
-                6'd32: F_line_byte = F_hex_nibble(I_status[3:0]);
-                6'd33: F_line_byte = 8'h20;
-                6'd34: F_line_byte = 8'h4E;
-                6'd35: F_line_byte = 8'h3D;
-                6'd36: F_line_byte = F_hex_nibble(I_cnt[19:16]);
-                6'd37: F_line_byte = F_hex_nibble(I_cnt[15:12]);
-                6'd38: F_line_byte = F_hex_nibble(I_cnt[11:8]);
-                6'd39: F_line_byte = F_hex_nibble(I_cnt[7:4]);
-                6'd40: F_line_byte = F_hex_nibble(I_cnt[3:0]);
-                6'd41: F_line_byte = 8'h20;
-                6'd42: F_line_byte = 8'h42;
-                6'd43: F_line_byte = 8'h3D;
-                6'd44: F_line_byte = F_hex_nibble(I_bright[19:16]);
-                6'd45: F_line_byte = F_hex_nibble(I_bright[15:12]);
-                6'd46: F_line_byte = F_hex_nibble(I_bright[11:8]);
-                6'd47: F_line_byte = F_hex_nibble(I_bright[7:4]);
-                6'd48: F_line_byte = F_hex_nibble(I_bright[3:0]);
-                6'd49: F_line_byte = 8'h20;
-                6'd50: F_line_byte = 8'h43;
-                6'd51: F_line_byte = 8'h3D;
-                6'd52: F_line_byte = F_hex_nibble(I_very[19:16]);
-                6'd53: F_line_byte = F_hex_nibble(I_very[15:12]);
-                6'd54: F_line_byte = F_hex_nibble(I_very[11:8]);
-                6'd55: F_line_byte = F_hex_nibble(I_very[7:4]);
-                6'd56: F_line_byte = F_hex_nibble(I_very[3:0]);
-                6'd57: F_line_byte = 8'h20;
-                6'd58: F_line_byte = 8'h4D;
-                6'd59: F_line_byte = 8'h3D;
-                6'd60: F_line_byte = F_hex_nibble({2'b0, I_max[9:8]});
-                6'd61: F_line_byte = F_hex_nibble(I_max[7:4]);
-                6'd62: F_line_byte = F_hex_nibble(I_max[3:0]);
-                6'd63: F_line_byte = 8'h20;
-                7'd64: F_line_byte = 8'h4C;
-                7'd65: F_line_byte = 8'h3D;
-                7'd66: F_line_byte = F_hex_nibble(I_dmax[7:4]);
-                7'd67: F_line_byte = F_hex_nibble(I_dmax[3:0]);
-                7'd68: F_line_byte = 8'h0D;
-                7'd69: F_line_byte = 8'h0A;
-                default: F_line_byte = 8'h20;
+                7'd0 : F_tpl = 8'h44;   // 'D'
+                7'd1 : F_tpl = 8'h42;   // 'B'
+                7'd2 : F_tpl = 8'h47;   // 'G'
+                7'd3 : F_tpl = 8'h3a;   // ':'
+                7'd4 : F_tpl = 8'h46;   // 'F'
+                7'd5 : F_tpl = 8'h3d;   // '='
+                7'd6 : F_tpl = 8'h00;   // 数字位，不使用
+                7'd7 : F_tpl = 8'h00;   // 数字位，不使用
+                7'd8 : F_tpl = 8'h00;   // 数字位，不使用
+                7'd9 : F_tpl = 8'h00;   // 数字位，不使用
+                7'd10: F_tpl = 8'h20;   // ' '
+                7'd11: F_tpl = 8'h41;   // 'A'
+                7'd12: F_tpl = 8'h3d;   // '='
+                7'd13: F_tpl = 8'h00;   // 数字位，不使用
+                7'd14: F_tpl = 8'h00;   // 数字位，不使用
+                7'd15: F_tpl = 8'h00;   // 数字位，不使用
+                7'd16: F_tpl = 8'h00;   // 数字位，不使用
+                7'd17: F_tpl = 8'h20;   // ' '
+                7'd18: F_tpl = 8'h47;   // 'G'
+                7'd19: F_tpl = 8'h3d;   // '='
+                7'd20: F_tpl = 8'h00;   // 数字位，不使用
+                7'd21: F_tpl = 8'h00;   // 数字位，不使用
+                7'd22: F_tpl = 8'h00;   // 数字位，不使用
+                7'd23: F_tpl = 8'h00;   // 数字位，不使用
+                7'd24: F_tpl = 8'h20;   // ' '
+                7'd25: F_tpl = 8'h54;   // 'T'
+                7'd26: F_tpl = 8'h3d;   // '='
+                7'd27: F_tpl = 8'h00;   // 数字位，不使用
+                7'd28: F_tpl = 8'h00;   // 数字位，不使用
+                7'd29: F_tpl = 8'h00;   // 数字位，不使用
+                7'd30: F_tpl = 8'h00;   // 数字位，不使用
+                7'd31: F_tpl = 8'h00;   // 数字位，不使用
+                7'd32: F_tpl = 8'h00;   // 数字位，不使用
+                7'd33: F_tpl = 8'h20;   // ' '
+                7'd34: F_tpl = 8'h4e;   // 'N'
+                7'd35: F_tpl = 8'h3d;   // '='
+                7'd36: F_tpl = 8'h00;   // 数字位，不使用
+                7'd37: F_tpl = 8'h00;   // 数字位，不使用
+                7'd38: F_tpl = 8'h00;   // 数字位，不使用
+                7'd39: F_tpl = 8'h00;   // 数字位，不使用
+                7'd40: F_tpl = 8'h00;   // 数字位，不使用
+                7'd41: F_tpl = 8'h20;   // ' '
+                7'd42: F_tpl = 8'h42;   // 'B'
+                7'd43: F_tpl = 8'h3d;   // '='
+                7'd44: F_tpl = 8'h00;   // 数字位，不使用
+                7'd45: F_tpl = 8'h00;   // 数字位，不使用
+                7'd46: F_tpl = 8'h00;   // 数字位，不使用
+                7'd47: F_tpl = 8'h00;   // 数字位，不使用
+                7'd48: F_tpl = 8'h00;   // 数字位，不使用
+                7'd49: F_tpl = 8'h20;   // ' '
+                7'd50: F_tpl = 8'h43;   // 'C'
+                7'd51: F_tpl = 8'h3d;   // '='
+                7'd52: F_tpl = 8'h00;   // 数字位，不使用
+                7'd53: F_tpl = 8'h00;   // 数字位，不使用
+                7'd54: F_tpl = 8'h00;   // 数字位，不使用
+                7'd55: F_tpl = 8'h00;   // 数字位，不使用
+                7'd56: F_tpl = 8'h00;   // 数字位，不使用
+                7'd57: F_tpl = 8'h20;   // ' '
+                7'd58: F_tpl = 8'h4d;   // 'M'
+                7'd59: F_tpl = 8'h3d;   // '='
+                7'd60: F_tpl = 8'h00;   // 数字位，不使用
+                7'd61: F_tpl = 8'h00;   // 数字位，不使用
+                7'd62: F_tpl = 8'h00;   // 数字位，不使用
+                7'd63: F_tpl = 8'h20;   // ' '
+                7'd64: F_tpl = 8'h4c;   // 'L'
+                7'd65: F_tpl = 8'h3d;   // '='
+                7'd66: F_tpl = 8'h00;   // 数字位，不使用
+                7'd67: F_tpl = 8'h00;   // 数字位，不使用
+                7'd68: F_tpl = 8'h0d;   // (0x0d)
+                7'd69: F_tpl = 8'h0a;   // (0x0a)
+                default: F_tpl = 8'h00;
             endcase
         end
     endfunction
+
+    // 数字位返回 {1'b1, nib_no[5:0]}；非数字位返回 7'd0。
+    function [6:0] F_nib;
+        input [6:0] I_idx;
+        begin
+            case (I_idx)
+                7'd6 : F_nib = {1'b1, 6'd0};   // I_frame_cnt[15:12]
+                7'd7 : F_nib = {1'b1, 6'd1};   // I_frame_cnt[11:8]
+                7'd8 : F_nib = {1'b1, 6'd2};   // I_frame_cnt[7:4]
+                7'd9 : F_nib = {1'b1, 6'd3};   // I_frame_cnt[3:0]
+                7'd13: F_nib = {1'b1, 6'd4};   // I_ae[15:12]
+                7'd14: F_nib = {1'b1, 6'd5};   // I_ae[11:8]
+                7'd15: F_nib = {1'b1, 6'd6};   // I_ae[7:4]
+                7'd16: F_nib = {1'b1, 6'd7};   // I_ae[3:0]
+                7'd20: F_nib = {1'b1, 6'd8};   // I_ag[15:12]
+                7'd21: F_nib = {1'b1, 6'd9};   // I_ag[11:8]
+                7'd22: F_nib = {1'b1, 6'd10};   // I_ag[7:4]
+                7'd23: F_nib = {1'b1, 6'd11};   // I_ag[3:0]
+                7'd27: F_nib = {1'b1, 6'd12};   // I_status[23:20]
+                7'd28: F_nib = {1'b1, 6'd13};   // I_status[19:16]
+                7'd29: F_nib = {1'b1, 6'd14};   // I_status[15:12]
+                7'd30: F_nib = {1'b1, 6'd15};   // I_status[11:8]
+                7'd31: F_nib = {1'b1, 6'd16};   // I_status[7:4]
+                7'd32: F_nib = {1'b1, 6'd17};   // I_status[3:0]
+                7'd36: F_nib = {1'b1, 6'd18};   // I_nonzero_cnt[19:16]
+                7'd37: F_nib = {1'b1, 6'd19};   // I_nonzero_cnt[15:12]
+                7'd38: F_nib = {1'b1, 6'd20};   // I_nonzero_cnt[11:8]
+                7'd39: F_nib = {1'b1, 6'd21};   // I_nonzero_cnt[7:4]
+                7'd40: F_nib = {1'b1, 6'd22};   // I_nonzero_cnt[3:0]
+                7'd44: F_nib = {1'b1, 6'd23};   // I_bright_cnt[19:16]
+                7'd45: F_nib = {1'b1, 6'd24};   // I_bright_cnt[15:12]
+                7'd46: F_nib = {1'b1, 6'd25};   // I_bright_cnt[11:8]
+                7'd47: F_nib = {1'b1, 6'd26};   // I_bright_cnt[7:4]
+                7'd48: F_nib = {1'b1, 6'd27};   // I_bright_cnt[3:0]
+                7'd52: F_nib = {1'b1, 6'd28};   // I_very_cnt[19:16]
+                7'd53: F_nib = {1'b1, 6'd29};   // I_very_cnt[15:12]
+                7'd54: F_nib = {1'b1, 6'd30};   // I_very_cnt[11:8]
+                7'd55: F_nib = {1'b1, 6'd31};   // I_very_cnt[7:4]
+                7'd56: F_nib = {1'b1, 6'd32};   // I_very_cnt[3:0]
+                7'd60: F_nib = {1'b1, 6'd33};   // {2'b0, I_max_px[9:8]}
+                7'd61: F_nib = {1'b1, 6'd34};   // I_max_px[7:4]
+                7'd62: F_nib = {1'b1, 6'd35};   // I_max_px[3:0]
+                7'd66: F_nib = {1'b1, 6'd36};   // I_disp_max_px[7:4]
+                7'd67: F_nib = {1'b1, 6'd37};   // I_disp_max_px[3:0]
+                default: F_nib = 7'd0;
+            endcase
+        end
+    endfunction
+
+    // 行内 nibble：nib0 = 最先发送的那个（F 的最高位），nib37 = 最后一个（L 的最低位）。
+    wire [151:0] S_nibble_vec = {
+        I_disp_max_px[3:0],           // nib37
+        I_disp_max_px[7:4],           // nib36
+        I_max_px[3:0],            // nib35
+        I_max_px[7:4],            // nib34
+        {2'b0, I_max_px[9:8]},    // nib33
+        I_very_cnt[3:0],           // nib32
+        I_very_cnt[7:4],           // nib31
+        I_very_cnt[11:8],          // nib30
+        I_very_cnt[15:12],         // nib29
+        I_very_cnt[19:16],         // nib28
+        I_bright_cnt[3:0],         // nib27
+        I_bright_cnt[7:4],         // nib26
+        I_bright_cnt[11:8],        // nib25
+        I_bright_cnt[15:12],       // nib24
+        I_bright_cnt[19:16],       // nib23
+        I_nonzero_cnt[3:0],            // nib22
+        I_nonzero_cnt[7:4],            // nib21
+        I_nonzero_cnt[11:8],           // nib20
+        I_nonzero_cnt[15:12],          // nib19
+        I_nonzero_cnt[19:16],          // nib18
+        I_status[3:0],         // nib17
+        I_status[7:4],         // nib16
+        I_status[11:8],        // nib15
+        I_status[15:12],       // nib14
+        I_status[19:16],       // nib13
+        I_status[23:20],       // nib12
+        I_ag[3:0],             // nib11
+        I_ag[7:4],             // nib10
+        I_ag[11:8],            // nib9
+        I_ag[15:12],           // nib8
+        I_ae[3:0],             // nib7
+        I_ae[7:4],             // nib6
+        I_ae[11:8],            // nib5
+        I_ae[15:12],           // nib4
+        I_frame_cnt[3:0],          // nib3
+        I_frame_cnt[7:4],          // nib2
+        I_frame_cnt[11:8],         // nib1
+        I_frame_cnt[15:12]         // nib0
+    };
 
     reg [LOG_TICKS_W-1:0] S_period_cnt;
     reg        S_first_send;
@@ -192,70 +279,26 @@ module debug_uart_logger #(
     reg [3:0]  S_tx_bit;
     reg [9:0]  S_tx_shift;
 
-    reg [23:0] S_status_sync1;
-    reg [23:0] S_status_sync2;
-    reg [15:0] S_frame_sync1;
-    reg [15:0] S_frame_sync2;
-    reg [15:0] S_ae_sync1;
-    reg [15:0] S_ae_sync2;
-    reg [15:0] S_ag_sync1;
-    reg [15:0] S_ag_sync2;
-    reg [19:0] S_nonzero_sync1;
-    reg [19:0] S_nonzero_sync2;
-    reg [19:0] S_bright_sync1;
-    reg [19:0] S_bright_sync2;
-    reg [19:0] S_very_sync1;
-    reg [19:0] S_very_sync2;
-    reg [9:0]  S_max_sync1;
-    reg [9:0]  S_max_sync2;
-    reg [7:0]  S_dmax_sync1;
-    reg [7:0]  S_dmax_sync2;
+    // 下一个要发送的字节序号：发送中就是 S_line_idx+1，新开一帧就是 0。两个分支
+    // 共用这一个组合结果，模板逻辑因此只被例化一份。
+    wire [6:0] S_next_idx = S_send_busy ? (S_line_idx + 7'd1) : 7'd0;
+
+    // 行模板输出：F_nib 指出当前位是不是数字位、是第几个 nibble；是数字位就查
+    // nibble 向量并做一次 hex 编码，否则取常量字节表。
+    wire [6:0] S_sel       = F_nib(S_next_idx);
+    wire [5:0] S_nib_no    = S_sel[5:0];
+    wire [3:0] S_nib_val   = S_nibble_vec[{S_nib_no, 2'b00} +: 4];
+    wire [7:0] S_line_byte = S_sel[6] ? F_hex_nibble(S_nib_val) : F_tpl(S_next_idx);
 
     wire S_tx_done = (S_tx_state == TX_STOP) &&
                      (S_tx_div == CLK_PER_BIT - 1);
 
-    always @(posedge I_clk or negedge I_rst_n) begin
-        if (!I_rst_n) begin
-            S_status_sync1 <= 24'd0;
-            S_status_sync2 <= 24'd0;
-            S_frame_sync1  <= 16'd0;
-            S_frame_sync2  <= 16'd0;
-            S_ae_sync1     <= 16'd0;
-            S_ae_sync2     <= 16'd0;
-            S_ag_sync1     <= 16'd0;
-            S_ag_sync2     <= 16'd0;
-            S_nonzero_sync1 <= 20'd0;
-            S_nonzero_sync2 <= 20'd0;
-            S_bright_sync1 <= 20'd0;
-            S_bright_sync2 <= 20'd0;
-            S_very_sync1 <= 20'd0;
-            S_very_sync2 <= 20'd0;
-            S_max_sync1 <= 10'd0;
-            S_max_sync2 <= 10'd0;
-            S_dmax_sync1 <= 8'd0;
-            S_dmax_sync2 <= 8'd0;
-        end
-        else begin
-            S_status_sync1 <= I_status;
-            S_status_sync2 <= S_status_sync1;
-            S_frame_sync1  <= I_frame_cnt;
-            S_frame_sync2  <= S_frame_sync1;
-            S_ae_sync1     <= I_ae;
-            S_ae_sync2     <= S_ae_sync1;
-            S_ag_sync1     <= I_ag;
-            S_ag_sync2     <= S_ag_sync1;
-            S_nonzero_sync1 <= I_nonzero_cnt;
-            S_nonzero_sync2 <= S_nonzero_sync1;
-            S_bright_sync1 <= I_bright_cnt;
-            S_bright_sync2 <= S_bright_sync1;
-            S_very_sync1 <= I_very_cnt;
-            S_very_sync2 <= S_very_sync1;
-            S_max_sync1 <= I_max_px;
-            S_max_sync2 <= S_max_sync1;
-            S_dmax_sync1 <= I_disp_max_px;
-            S_dmax_sync2 <= S_dmax_sync1;
-        end
-    end
+    // 说明：这里原来对 9 个输入各做了两级寄存（sync1/sync2），共约 300 个触发器。
+    // 但本模块的 I_clk 就是统计计数器所在的那一个时钟（S_hdmi_pixel_clk），
+    // 字段在同一个时钟域里，两级寄存器只是延迟，不提供任何同步作用；真正跨域的
+    // 只有 M（RAW10 峰值），它在 design_top_wrapper 里已经用 S_dbg_raw_max_sync1/2
+    // 同步过（并锁存在 _hold 里，整帧稳定）。所以直接接端口即可，见 2026-09-12
+    // 的"精简调试/观测逻辑（第一批）"。
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if (!I_rst_n)
@@ -284,18 +327,7 @@ module debug_uart_logger #(
                     end
                     else begin
                         S_line_idx <= S_line_idx + 1'b1;
-                        S_tx_byte  <= F_line_byte(
-                            S_line_idx + 1'b1,
-                            S_status_sync2,
-                            S_frame_sync2,
-                            S_ae_sync2,
-                            S_ag_sync2,
-                            S_nonzero_sync2,
-                            S_bright_sync2,
-                            S_very_sync2,
-                            S_max_sync2,
-                            S_dmax_sync2
-                        );
+                        S_tx_byte  <= S_line_byte;
                         S_tx_start <= 1'b1;
                     end
                 end
@@ -304,18 +336,7 @@ module debug_uart_logger #(
                 if (S_first_send || (S_period_cnt == TIMEOUT_CNT)) begin
                     S_send_busy  <= 1'b1;
                     S_line_idx   <= 7'd0;
-                    S_tx_byte    <= F_line_byte(
-                        6'd0,
-                        S_status_sync2,
-                        S_frame_sync2,
-                        S_ae_sync2,
-                        S_ag_sync2,
-                        S_nonzero_sync2,
-                        S_bright_sync2,
-                        S_very_sync2,
-                        S_max_sync2,
-                        S_dmax_sync2
-                    );
+                    S_tx_byte    <= S_line_byte;
                     S_tx_start   <= 1'b1;
                     S_first_send <= 1'b0;
                 end
