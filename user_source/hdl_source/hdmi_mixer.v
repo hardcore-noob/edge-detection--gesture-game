@@ -489,8 +489,9 @@ module hdmi_mixer #(
     assign O_video_rd_en = I_video_de;
 
     anlogic_logo_rom u_anlogic_logo_rom(
-        .I_addr  ( S_logo_addr  ),
-        .O_pixel ( S_logo_pixel )
+        .I_clk   ( I_clk         ),
+        .I_addr  ( S_logo_addr   ),
+        .O_pixel ( S_logo_pixel  )
     );
 
     osd_char_lib u_osd_char_lib(
@@ -578,13 +579,32 @@ module hdmi_mixer #(
         end
     end
 
+    // ---- Logo ROM 预取地址 --------------------------------------------------
+    // ERAM 版 ROM（anlogic_logo_rom.v）是 1 拍读延迟：第 N 拍给出的地址，数据在
+    // 第 N+1 拍才有效。这里用 *_1d（下一拍才变成 *_2d）算地址，数据就正好在
+    // *_2d 那一拍到达，与原来的组合 case ROM 时序完全等价，整条链路总延迟不变。
+    // 地址公式保持原样：S_logo_y * LOGO_W + S_logo_x，LOGO_W = 160 = 128 + 32，
+    // 写成移位加法而不是乘法（综合器会把 *160 做成 DSP 乘法器，720P 下 mult0 ->
+    // Logo ROM 曾是 75MHz 像素域上最紧的一条路径）。S_logo_y 只在 Logo 框内取值
+    // 0..159，所以 19 位中间结果不会溢出。
+    always @(*) begin
+        S_logo_x    = 12'd0;
+        S_logo_y    = 12'd0;
+        S_logo_addr = 15'd0;
+
+        if(S_video_de_1d &&
+           (S_x_1d >= LOGO_X) && (S_x_1d < (LOGO_X + LOGO_W)) &&
+           (S_y_1d >= LOGO_Y) && (S_y_1d < (LOGO_Y + LOGO_H))) begin
+            S_logo_x    = S_x_1d - LOGO_X;
+            S_logo_y    = S_y_1d - LOGO_Y;
+            S_logo_addr = (({7'b0, S_logo_y} << 7) + ({7'b0, S_logo_y} << 5)) + S_logo_x;
+        end
+    end
+
     always @(*) begin
         S_osd_hit   = 1'b0;
         S_osd_color = 24'd0;
-        S_logo_addr = 15'd0;
 
-        S_logo_x = 12'd0;
-        S_logo_y = 12'd0;
         S_char_idx = 4'd0;
         S_char_row = 3'd0;
         S_char_col = 3'd0;
@@ -639,14 +659,8 @@ module hdmi_mixer #(
         if(S_video_de_2d) begin
             if((S_x_2d >= LOGO_X) && (S_x_2d < (LOGO_X + LOGO_W)) &&
                (S_y_2d >= LOGO_Y) && (S_y_2d < (LOGO_Y + LOGO_H))) begin
-                S_logo_x = S_x_2d - LOGO_X;
-                S_logo_y = S_y_2d - LOGO_Y;
-                // LOGO_W = 160 = 128 + 32，写成移位加法而不是乘法：综合器会把
-                // S_logo_y * LOGO_W 做成一个 DSP 乘法器（TD 网表里叫 mult0），而
-                // mult0 → Logo ROM → O_hdmi_data_reg 正是 75MHz 像素域上最紧的
-                // 一条路径（720P 下报 Setup WNS -99ps 就落在它上面）。S_logo_y
-                // 只在 Logo 框内取值 0..159，所以 19 位的中间结果不会溢出。
-                S_logo_addr = (({7'b0, S_logo_y} << 7) + ({7'b0, S_logo_y} << 5)) + S_logo_x;
+                // Logo 像素由上一拍的"预取地址"取回（见上面的预取 always 块），
+                // 这里只做 alpha 判定与着色。
                 if(S_logo_pixel[24]) begin
                     S_osd_hit   = 1'b1;
                     S_osd_color = S_logo_pixel[23:0];

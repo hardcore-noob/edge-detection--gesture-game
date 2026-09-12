@@ -182,6 +182,26 @@ Logo 的 ROM 地址原来是 `S_logo_y * LOGO_W`，会被综合成一个 DSP 乘
 Setup 差 99 ps 就落在它上面）。`LOGO_W = 160 = 128 + 32`，现在写成移位加法
 `((y<<7) + (y<<5)) + x`，数值完全等价、少用一个 DSP，这条路径也不再是瓶颈。
 
+2026-09-12（分支 `feat/resource-opt`）：Logo 位图从"6387 条 case 的组合 ROM"换成
+**ERAM（块 RAM）**。依据是综合报告 `syn_1/camera_to_dsi_display_rtl.area` 的层次
+面积表：`u_anlogic_logo_rom` 占 38426 个门，是父模块 `hdmi_mixer`（38822 门）的
+99%，技术映射后这些门就是 mixer 那 2633 个 LUT6 的绝大部分（同一张表里
+`u_osd_char_lib` 只有 101 门）。换 ERAM 后这部分 LUT 全部还给逻辑，代价约 20 块
+ERAM（25 位 × 16384 深；器件 108 块，原本已用 39 块）。改这个模块前必须知道：
+
+- **读延迟 1 拍**：`anlogic_logo_rom.v` 现在直接例化 `PH1P_LOGIC_ERAM`
+  （`MODE="SP"`、`REGMODE_A="OUTREG"`、`ocea=1`），地址第 N 拍给出、数据第 N+1
+  拍有效。0 拍的组合读在块 RAM 上不被支持（TD 的 `apm_memory` 模型对此直接报
+  错），所以不要把 `REGMODE_A` 改成 `NOREG`。
+- **地址改成"预取"**：`hdmi_mixer.v` 里用 `S_x_1d/S_y_1d`（下一拍才成为
+  `S_x_2d/S_y_2d`）算 Logo 地址，单独放在一个 `always` 块里；这样数据正好在
+  `*_2d` 那一拍到达，与原来的组合 ROM 逐像素等价、整条链路总延迟不变。动预取级
+  或 `*_d` 流水线时两处必须一起改。
+- 位图数据在 `user_source/hdl_source/anlogic_logo_rom.dat`（TD 的 .dat 约定：
+  一行一个单元、行序即地址序、25 位二进制高位在前，靠文件名在源码目录里找到，
+  与 DDR PHY 的 `ddrphy_cfg_rom.txt` 同一套机制）。重新生成用
+  `tools/logo_rom_case_to_dat.ps1`，脚本会穷举校验新旧行为逐地址一致。
+
 ## 6. 编译与烧录
 
 使用安路 TangDynasty 打开：
@@ -413,7 +433,7 @@ DSP 40 与 TD 报告的容量完全一致，可以互相印证。
 | 手段 | 估算收益 | 风险 |
 |------|----------|------|
 | 分布式 RAM 搬进 BRAM（BRAM 还剩 69 块） | −800 ~ −1200 slices | 中：BRAM 读延迟 1 拍、写模式受限，要同步改流水线 |
-| Logo/文字 ROM 搬 BRAM | −200 ~ −600 | 低 |
+| Logo ROM 搬 BRAM（**已改**，见第 5 节：RTL 级占 mixer 99% 的门，估算收益远大于下表的 −200~−600；文字库 `osd_char_lib` 只有 101 门，不值得一起搬） | −1000 ~ −2500 | 低：只需给地址加一级预取 |
 | 精简调试/观测逻辑（UART logger、N/B/C/M/L 统计） | −200 ~ −500 | 低，功能可保留（抽样或复用计数器） |
 | 宽通路重构（96 位 × 4 像素延迟线、RAW/EDGE 双路径 mux、常量乘法移位化） | −200 ~ −600 | 中高：必须守住第 4 节的流水线相位 |
 | 打通拥挤、回收 feedthrough（打包选项、拆大 mux、减少跨区走线） | −300 ~ −1000 | 高：最不确定，得反复试落点 |
@@ -431,11 +451,22 @@ slices 基本吃掉；继续做到 **64%~66%（13.5k~14k）** 需要上面几项
 - 比百分比更该盯的三个指标：**final Setup WNS**（建议 ≥ +300 ps 才当基线）、
   **feedthrough**（继续涨说明布线在恶化，比 slices 更早预警）、以及**能否一次
   布局布线成功**（要反复重跑就说明余量不够）。
-- 新增行缓存/延迟线一律写 `(* ram_style = "block" *)`（`edge_detect_96.v` 已经这么
-  写）。历史上行缓存落成触发器直接把 FF 打满，TD 报 `PHY-9002 Placer initialization
+- **属性写法不足以把大数组推断成 ERAM**（2026-09-12 用面积报告坐实）：行缓存
+  无论写 Vivado 风格的 `(* ram_style = "block" *)`、还是 TD 自己模板用的
+  `(*ram_style="bram"*)`，TD 仍把它们做成分布式 RAM——`u_edge_detect_96` 的
+  `dram lut = 1152`、`eram = 0` 就是证据（这 1152 个 LUT 正是本工程比官方例程多
+  出来的那部分分布式 RAM）。要真正搬进块 RAM，得像 `anlogic_logo_rom.v` 那样
+  **直接例化 `PH1P_LOGIC_ERAM`**（TD 的器件原语模板在
+  `D:\TangDynasty\template\verilog\Device-Primitive\PH1P\RAM,ROM\ph1p_ram_rom.v`）。
+  历史上行缓存落成触发器会把 FF 打满，TD 报 `PHY-9002 Placer initialization
   failed`——这个流在资源满时是“编不出来”，不是“编得慢”。
 - 看资源数字请认**本次运行**的 `td_YYYYMMDD_HHMMSS.log` 与 `*.area`：`phy_1\run.log`
   可能是更早构建留下的旧文件（本项目就误读过一次，把 8 月的数字当成当次结果）。
-  目前还没有分层次面积报告，要定位具体模块可以在 TD 里跑 `report_area -hier`。
+- **定位到具体模块用 `*.area` 里的层次面积表**：syn_1 与 phy_1 各有一份
+  `camera_to_dsi_display_{rtl,gate,phy}.area`，文末 `Report Hierarchy Area` 表按实例
+  列出 `logic lut / ripple / seq / eram / dram lut`（父模块的数字包含子模块，可直接
+  相减得到自身开销）；RTL 级那张表还带"未映射的综合门数"，正是它暴露出 logo ROM
+  占了 mixer 99% 的门。注意 phy 表里 `u_anlogic_logo_rom` 只剩 14 LUT 是优化器把
+  边界逻辑摊进父模块造成的假象，别据此判断某个子模块的代价。
 - 想加功能又不想吃 slice 时，优先用富余的块资源：ERAM 还剩 69 块、DSP 还剩 32 个，
   “把逻辑换成 BRAM/DSP”是本设计最现实的资源来源。
