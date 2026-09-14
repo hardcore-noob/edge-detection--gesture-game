@@ -266,6 +266,10 @@ module design_top_wrapper (
     wire [7:0]  S_mode_committed;     // CSI 域：相机帧首提交后的生效值
     wire [7:0]  S_mode_echo;          // 像素域：提交回执
     wire        S_mode_echo_valid;
+    // 提交字布局：{display_mode[3:0], edge_th_sel[3:0]}（见 mode_sync.v 头注释）。
+    // 消费侧一律用这两个具名线网取位，别再手写下标——2026-09-14 就是把两段取反了。
+    wire [3:0]  S_committed_display;
+    wire [3:0]  S_committed_th_sel;
     wire [7:0]  S_uart_byte;
     wire        S_uart_byte_valid;
     wire        S_cmd_we;
@@ -488,9 +492,9 @@ module design_top_wrapper (
             S_dbg_edge_nonzero_seen_sync <= 2'b00;
         end
         else begin
-            // 算法状态位改用像素域的模式寄存器值（M0 起它是唯一事实源）
-            S_dbg_alg_prev <= S_display_mode[0];
-            if(S_display_mode[0] != S_dbg_alg_prev)
+            // 算法状态位用**已提交**值，与屏幕上实际在放的那一路一致
+            S_dbg_alg_prev <= S_committed_display[0];
+            if(S_committed_display[0] != S_dbg_alg_prev)
                 S_dbg_video_nonzero_seen <= 1'b0;
             S_dbg_cam_cfg_seen_sync <= {S_dbg_cam_cfg_seen_sync[0], S_dbg_cam_cfg_seen};
             S_dbg_hs_seen_sync      <= {S_dbg_hs_seen_sync[0],      S_dbg_hs_seen};
@@ -546,9 +550,11 @@ module design_top_wrapper (
     assign S_mc_dbg_wdf_rdy = S_mc_app_wdf_rdy;
     assign S_mc_dbg_cmd_pop = S_mc_app_en;
 
-    // mixer 的 I_debug_status：bit0 = display_mode（0=RAW, 1=EDGE，game_mode=0 时显示
-    // RAW/EDGE），bit1 = game_mode（显示 GES）
-    assign S_hdmi_debug_status = {2'b00, S_game_mode[0], S_display_mode[0]};
+    // mixer 的 I_debug_status：bit0 = **已提交的** display_mode（0=RAW, 1=EDGE），
+    // bit1 = game_mode（显示 GES）。用提交值而不是请求值，这样"右上角字样"永远等于
+    // 屏幕上真正在放的那一路——2026-09-14 位序取反那次，字样变了画面没变，正是这两者
+    // 不一致造成的误导。
+    assign S_hdmi_debug_status = {2'b00, S_game_mode[0], S_committed_display[0]};
 
     assign S_debug_status_bus = {
         S_dbg_mc_init_seen_sync[1],
@@ -571,7 +577,7 @@ module design_top_wrapper (
         S_dbg_edge_nonzero_seen_sync[1],
         S_dbg_rd_nonzero_seen_sync[1],
         S_dbg_video_nonzero_seen,
-        S_display_mode[0],
+        S_committed_display[0],
         S_hdmi_out_de,
         S_hdmi_de,
         S_hdmi_window_rd_en
@@ -818,8 +824,12 @@ module design_top_wrapper (
       .O_commit_pulse(                        )
   );
 
-  // CSI 域实际生效的边缘门限：提交值的高 4 位是档位，TH = 16 + 4×sel
-  wire [10:0] S_edge_th_csi = 11'd16 + ({7'b0, S_mode_committed[7:4]} << 2);
+  // 提交字拆位（布局见 mode_sync.v 头注释）：高 4 位是 display_mode、低 4 位是门限档位
+  assign S_committed_display = S_mode_committed[7:4];
+  assign S_committed_th_sel  = S_mode_committed[3:0];
+
+  // CSI 域实际生效的边缘门限：TH = 16 + 4×档位
+  wire [10:0] S_edge_th_csi = 11'd16 + ({7'b0, S_committed_th_sel} << 2);
 
   // CTRL_SYNC 插座：下行（像素域 → CSI 域）与上行（CSI 域 → 像素域）各一条。
   // M0 的下行由 game_top 每帧发测试常数、上行由 recog_top 原样回传，用来验证双向往返。
@@ -1006,7 +1016,7 @@ image_correction #(
 isp_top u_isp_top (
 .axi4s_video_aclk(S_csi_rx_clk),
 .I_rst_n         (S_rst_n),
-.I_alg_sel       (S_mode_committed[0]),
+.I_alg_sel       (S_committed_display[0]),
 .I_edge_th       (S_edge_th_csi),
 .I_tlast         (S_raw_tlast	),
 .I_tuser         (S_raw_tuser	),
