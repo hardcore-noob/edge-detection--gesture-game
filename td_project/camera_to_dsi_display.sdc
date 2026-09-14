@@ -22,3 +22,18 @@ set_clock_groups -asynchronous \
 set_max_delay -datapath_only 5.000 \
     -from [get_clocks {pll_clk_24m}] \
     -to   [get_clocks {HDMI_PIXEL_CLK}]
+
+# 2026-09-14（手势游戏 M0）：新增的跨域通路都是"两级同步 + 慢控制/每帧一次"的
+# 握手信号（见 isp/ctrl_sync.v、mode_sync.v）：
+#   * 像素域 → CSI 域：模式寄存器（display_mode + 门限档位，相机帧首提交）、
+#     CTRL_SYNC 下行的形状几何；
+#   * CSI 域 → 像素域：VIDEO_TAP 的每帧观测（tap 像素数 / 掩码统计 / 包围盒）、
+#     CTRL_SYNC 上行的判定结果。
+# 两组时钟在文件开头已声明为异步组，这里只按同一套路约束数据路径。
+set_max_delay -datapath_only 5.000 \
+    -from [get_clocks {HDMI_PIXEL_CLK}] \
+    -to   [get_clocks {MIPI_RX_BYTE_CLK}]
+
+set_max_delay -datapath_only 5.000 \
+    -from [get_clocks {MIPI_RX_BYTE_CLK}] \
+    -to   [get_clocks {HDMI_PIXEL_CLK}]

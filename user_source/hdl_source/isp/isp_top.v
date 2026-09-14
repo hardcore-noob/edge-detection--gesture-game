@@ -1,14 +1,13 @@
 module isp_top #(
-    // 边缘显示门限（噪声门限）与显示增益。做成参数，后续可直接接运行时可写寄存器。
-    // TH=16 对应"Δ≥4 灰阶就可见"，与旧公式 + 旧 TH16 的实际灵敏度一致。一度放大到
-    // 48 是把绝对灰度的压缩比当成了局部差分的压缩比，属于误判——上板对比时弱边缘被
-    // 整片拦掉（只剩强轮廓），已改回 16。增益 0 让饱和点落在 Δ≈64。
-    parameter [10:0]  EDGE_TH         = 11'd16,
+    // 边缘显示增益（显示灰度 = clamp((|gx|+|gy|) << shift)）。门限本身从 M0 起是
+    // **运行时**的（I_edge_th，由像素域的模式寄存器在相机帧首提交过来），不再编译期
+    // 写死。增益 0 让饱和点落在 Δ≈64；TH=16 对应"Δ≥4 灰阶就可见"。
     parameter integer EDGE_GAIN_SHIFT = 0
 )(
     input           axi4s_video_aclk,
     input           I_rst_n,
     input           I_alg_sel,
+    input  [10:0]   I_edge_th,
     input           I_tlast,
     input           I_tuser,
     input  [39:0]   I_tdata,
@@ -21,7 +20,19 @@ module isp_top #(
     output          O_tvalid,
     output          I_tready,
     output          O_edge_dbg_valid,
-    output          O_edge_dbg_nonzero
+    output          O_edge_dbg_nonzero,
+
+    // VIDEO_TAP（M0 新增）：识别支路取点就在本模块内部、RAW/EDGE MUX 之前，
+    // 这样 EDGE 模式下彩色流依然存在（肤色的 Plan B 要用），而且不用把 96 位流
+    // 拉到顶层（feedthrough 已经很紧）。对外只引出小宽度的观测与 CTRL_SYNC 端点。
+    input  [25:0]   I_ctrl_rx_data,
+    input           I_ctrl_rx_valid,
+    output [25:0]   O_ctrl_tx_data,
+    output          O_ctrl_tx_valid,
+    output [15:0]   O_tap_px_shift,
+    output [15:0]   O_mask_cnt_shift,
+    output [15:0]   O_bbox_x,
+    output [15:0]   O_bbox_y
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -135,12 +146,35 @@ module isp_top #(
         .I_tdata (awb_O_tdata),
         .I_tvalid(awb_O_tvalid),
         .I_tready(1'b1),
-        .I_thresh(EDGE_TH),
+        .I_thresh(I_edge_th),
         .O_tlast (edge_O_tlast),
         .O_tuser (edge_O_tuser),
         .O_tdata (edge_O_tdata),
         .O_tvalid(edge_O_tvalid),
         .O_tready()
+    );
+
+    // ---- 识别支路（M0：tap 监视 + 掩码统计 + CTRL_SYNC 端点）------------------
+    // 取点：AWB 输出的彩色 RAW 流与边缘流，都在上面的 MUX 之前。
+    recog_top u_recog_top (
+        .I_clk           (axi4s_video_aclk),
+        .I_rst_n         (I_rst_n),
+        .I_raw_tdata     (awb_O_tdata),
+        .I_raw_tuser     (awb_O_tuser),
+        .I_raw_tlast     (awb_O_tlast),
+        .I_raw_tvalid    (awb_O_tvalid),
+        .I_edge_tdata    (edge_O_tdata),
+        .I_edge_tuser    (edge_O_tuser),
+        .I_edge_tlast    (edge_O_tlast),
+        .I_edge_tvalid   (edge_O_tvalid),
+        .I_ctrl_rx_data  (I_ctrl_rx_data),
+        .I_ctrl_rx_valid (I_ctrl_rx_valid),
+        .O_ctrl_tx_data  (O_ctrl_tx_data),
+        .O_ctrl_tx_valid (O_ctrl_tx_valid),
+        .O_tap_px_shift  (O_tap_px_shift),
+        .O_mask_cnt_shift(O_mask_cnt_shift),
+        .O_bbox_x        (O_bbox_x),
+        .O_bbox_y        (O_bbox_y)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

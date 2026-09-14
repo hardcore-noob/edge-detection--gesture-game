@@ -131,12 +131,21 @@ module hdmi_mixer #(
     localparam CHAR_E            = 8'h45;
     localparam CHAR_G            = 8'h47;
     localparam CHAR_R            = 8'h52;
+    localparam CHAR_S            = 8'h53;
     localparam CHAR_W            = 8'h57;
     localparam STATUS_OSD_X      = 12'd1100;
     localparam STATUS_OSD_Y      = 12'd20;
     localparam STATUS_OSD_W      = 12'd112;
     localparam STATUS_OSD_H      = 12'd24;
     localparam COLOR_STATUS      = 24'h00ff88;
+
+    // 右上角状态字的 4 个字符（2026-09-14 M0 起扩成三态）：
+    //   I_debug_status[1] = game_mode  → "GES "（游戏层开）
+    //   I_debug_status[0] = display_mode：0 = "RAW "，1 = "EDGE"
+    wire [7:0] S_st_ch0 = I_debug_status[1] ? CHAR_G : (I_debug_status[0] ? CHAR_E : CHAR_R);
+    wire [7:0] S_st_ch1 = I_debug_status[1] ? CHAR_E : (I_debug_status[0] ? CHAR_D : CHAR_A);
+    wire [7:0] S_st_ch2 = I_debug_status[1] ? CHAR_S : (I_debug_status[0] ? CHAR_G : CHAR_W);
+    wire [7:0] S_st_ch3 = I_debug_status[1] ? 8'h00  : (I_debug_status[0] ? CHAR_E : 8'h00);
 
     function [4:0] F_logo_text_bits;
         input [3:0] I_char;
@@ -858,25 +867,25 @@ module hdmi_mixer #(
                 end
             end
 
-            // 算法状态显示（右上角）：RAW / EDGE
+            // 状态显示（右上角）：RAW / EDGE / GES
             if((S_x_2d >= STATUS_OSD_X) && (S_x_2d < (STATUS_OSD_X + STATUS_OSD_W)) &&
                (S_y_2d >= STATUS_OSD_Y) && (S_y_2d < (STATUS_OSD_Y + STATUS_OSD_H))) begin
                 S_st_local_x = S_x_2d - STATUS_OSD_X;
                 S_st_local_y = S_y_2d - STATUS_OSD_Y;
                 if(S_st_local_y < 5'd24) begin
                     if(S_st_local_x < 12'd24) begin
-                        S_pf_char = I_debug_status[0] ? CHAR_E : CHAR_R;
+                        S_pf_char = S_st_ch0;
                     end
                     else if(S_st_local_x < 12'd48) begin
-                        S_pf_char = I_debug_status[0] ? CHAR_D : CHAR_A;
+                        S_pf_char = S_st_ch1;
                         S_st_local_x = S_st_local_x - 12'd24;
                     end
                     else if(S_st_local_x < 12'd72) begin
-                        S_pf_char = I_debug_status[0] ? CHAR_G : CHAR_W;
+                        S_pf_char = S_st_ch2;
                         S_st_local_x = S_st_local_x - 12'd48;
                     end
                     else if(S_st_local_x < 12'd96) begin
-                        S_pf_char = I_debug_status[0] ? CHAR_E : 8'h00;
+                        S_pf_char = S_st_ch3;
                         S_st_local_x = S_st_local_x - 12'd72;
                     end
                     else begin

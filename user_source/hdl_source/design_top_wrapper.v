@@ -9,7 +9,12 @@ module design_top_wrapper (
     output wire       O_cam_24m,
     output wire       O_cam_rst,
       
-    input wire [2:0]  I_button,
+    input wire [3:0]  I_button,
+    input wire [3:0]  I_switch,
+    input wire        I_uart_rx,
+
+    output wire [3:0] O_led,
+    output wire       O_buzzer,
 
     output wire       O_screen_pwm,
     output wire       O_tmds_ch0_p,
@@ -242,12 +247,48 @@ module design_top_wrapper (
     reg [1:0]   S_dbg_edge_valid_seen_sync;
     reg [1:0]   S_dbg_edge_nonzero_seen_sync;
     wire        S_lane_error_any;
-    wire        S_alg_sel_24m;
-    reg         S_alg_sel_csi_1d;
-    reg         S_alg_sel_csi_2d;
-    reg         S_alg_status_hdmi_1d;
-    reg         S_alg_status_hdmi_2d;
-    reg         S_alg_status_hdmi_3d;
+    // ---- 模式寄存器 / PARAM_BUS / 四个插座（2026-09-14，手势游戏 M0）----------
+    // 模式与参数的唯一事实源是 param_ctrl（像素域）；display_mode 与边缘门限档位
+    // 经 mode_sync 在相机帧首提交到 CSI 域，避免切换时把一帧切成两种算法。
+    wire [3:0]  S_display_mode;
+    wire [3:0]  S_game_mode;
+    wire [3:0]  S_edge_th_sel;
+    wire [10:0] S_edge_th;
+    wire [15:0] S_mode_word;
+    wire [15:0] S_teach_cnt;
+    wire [15:0] S_param_wr_cnt;
+    wire [15:0] S_mode_commit_cnt;
+    wire [7:0]  S_key4_evt;
+    wire        S_teach_req;
+    wire        S_key1_short;
+    wire        S_key4_short;
+    wire        S_key4_long;
+    wire [7:0]  S_mode_committed;     // CSI 域：相机帧首提交后的生效值
+    wire [7:0]  S_mode_echo;          // 像素域：提交回执
+    wire        S_mode_echo_valid;
+    wire [7:0]  S_uart_byte;
+    wire        S_uart_byte_valid;
+    wire        S_cmd_we;
+    wire [7:0]  S_cmd_addr;
+    wire [15:0] S_cmd_data;
+
+    // VIDEO_TAP 观测（CSI 域产生，这里两级同步到像素域给 DBG 用；每帧才变一次，
+    // 多位同时跳变时可能短暂混采，对统计字段无影响，与 M 字段同一套做法）
+    wire [15:0] S_tap_px_shift, S_mask_cnt_shift, S_bbox_x, S_bbox_y;
+    reg  [15:0] S_tap_px_s1,     S_tap_px_s2;
+    reg  [15:0] S_mask_cnt_s1,   S_mask_cnt_s2;
+    reg  [15:0] S_bbox_x_s1,     S_bbox_x_s2;
+    reg  [15:0] S_bbox_y_s1,     S_bbox_y_s2;
+
+    // CTRL_SYNC 插座：下行（像素域→CSI 域）与上行（CSI 域→像素域）
+    wire [25:0] S_ctrl_down_rx_data;   // CSI 域
+    wire        S_ctrl_down_rx_valid;
+    wire [25:0] S_ctrl_up_tx_data;     // CSI 域
+    wire        S_ctrl_up_tx_valid;
+    wire [25:0] S_ctrl_up_rx_data;     // 像素域（回传结果）
+    wire        S_ctrl_up_rx_valid;
+    wire [15:0] S_ctrl_up_x;
+    wire [15:0] S_ctrl_up_y;
 
 
     assign O_screen_pwm = 1'b1;
@@ -447,8 +488,9 @@ module design_top_wrapper (
             S_dbg_edge_nonzero_seen_sync <= 2'b00;
         end
         else begin
-            S_dbg_alg_prev <= S_alg_status_hdmi_3d;
-            if(S_alg_status_hdmi_3d != S_dbg_alg_prev)
+            // 算法状态位改用像素域的模式寄存器值（M0 起它是唯一事实源）
+            S_dbg_alg_prev <= S_display_mode[0];
+            if(S_display_mode[0] != S_dbg_alg_prev)
                 S_dbg_video_nonzero_seen <= 1'b0;
             S_dbg_cam_cfg_seen_sync <= {S_dbg_cam_cfg_seen_sync[0], S_dbg_cam_cfg_seen};
             S_dbg_hs_seen_sync      <= {S_dbg_hs_seen_sync[0],      S_dbg_hs_seen};
@@ -476,29 +518,20 @@ module design_top_wrapper (
         end
     end
 
-    // 算法选择：24M 域按键电平 -> CSI 域（ISP 使用）
-    always @(posedge S_csi_rx_clk or negedge S_rst_n) begin
-        if(!S_rst_n) begin
-            S_alg_sel_csi_1d <= 1'b0;
-            S_alg_sel_csi_2d <= 1'b0;
-        end
-        else begin
-            S_alg_sel_csi_1d <= S_alg_sel_24m;
-            S_alg_sel_csi_2d <= S_alg_sel_csi_1d;
-        end
-    end
-
-    // 算法状态：24M 域 -> HDMI 像素域（OSD 显示）
+    // M0 起算法选择由模式寄存器决定（见 mode_sync 的帧首提交），不再从 24M 域的
+    // 按键电平直接过采样过来。这里只把 VIDEO_TAP 的帧锁存观测同步到像素域给 DBG。
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
-            S_alg_status_hdmi_1d <= 1'b0;
-            S_alg_status_hdmi_2d <= 1'b0;
-            S_alg_status_hdmi_3d <= 1'b0;
+            S_tap_px_s1     <= 16'd0;  S_tap_px_s2     <= 16'd0;
+            S_mask_cnt_s1   <= 16'd0;  S_mask_cnt_s2   <= 16'd0;
+            S_bbox_x_s1     <= 16'd0;  S_bbox_x_s2     <= 16'd0;
+            S_bbox_y_s1     <= 16'd0;  S_bbox_y_s2     <= 16'd0;
         end
         else begin
-            S_alg_status_hdmi_1d <= S_alg_sel_24m;
-            S_alg_status_hdmi_2d <= S_alg_status_hdmi_1d;
-            S_alg_status_hdmi_3d <= S_alg_status_hdmi_2d;
+            S_tap_px_s1     <= S_tap_px_shift;     S_tap_px_s2     <= S_tap_px_s1;
+            S_mask_cnt_s1   <= S_mask_cnt_shift;   S_mask_cnt_s2   <= S_mask_cnt_s1;
+            S_bbox_x_s1     <= S_bbox_x;           S_bbox_x_s2     <= S_bbox_x_s1;
+            S_bbox_y_s1     <= S_bbox_y;           S_bbox_y_s2     <= S_bbox_y_s1;
         end
     end
 
@@ -513,7 +546,9 @@ module design_top_wrapper (
     assign S_mc_dbg_wdf_rdy = S_mc_app_wdf_rdy;
     assign S_mc_dbg_cmd_pop = S_mc_app_en;
 
-    assign S_hdmi_debug_status = {3'b000, S_alg_status_hdmi_3d};
+    // mixer 的 I_debug_status：bit0 = display_mode（0=RAW, 1=EDGE，game_mode=0 时显示
+    // RAW/EDGE），bit1 = game_mode（显示 GES）
+    assign S_hdmi_debug_status = {2'b00, S_game_mode[0], S_display_mode[0]};
 
     assign S_debug_status_bus = {
         S_dbg_mc_init_seen_sync[1],
@@ -536,7 +571,7 @@ module design_top_wrapper (
         S_dbg_edge_nonzero_seen_sync[1],
         S_dbg_rd_nonzero_seen_sync[1],
         S_dbg_video_nonzero_seen,
-        S_alg_status_hdmi_3d,
+        S_display_mode[0],
         S_hdmi_out_de,
         S_hdmi_de,
         S_hdmi_window_rd_en
@@ -700,13 +735,124 @@ module design_top_wrapper (
       .O_ag(S_ag)
   );
 
-  // 算法切换：短按板载 KEY1 (I_button[1], D5) 在 RAW / EDGE 之间切换
-  alg_switch u_alg_switch (
-      .I_clk     ( S_24m_clk    ),
-      .I_rst_n   ( S_rst_n      ),
-      .I_key     ( I_button[1]  ),
-      .O_alg_sel ( S_alg_sel_24m )
+  // ===========================================================================
+  // 手势游戏 M0 基础设施：按键事件 → 参数寄存器 → 帧首提交 / 四个插座
+  // ===========================================================================
+  // KEY1（D5）：短按切 RAW/EDGE——M0 起也走模式寄存器，与 KEY4 同一条路，
+  //   于是切换在相机帧首生效（README 第 5 节记的"切换瞬间短暂撕裂"随之消失）。
+  // KEY4（C7）：短按开关游戏层，长按发一次一键示教请求。
+  key_event #(.CLK_HZ(75000000), .DEBOUNCE_MS(20), .LONG_MS(1000)) u_key1_event (
+      .I_clk  ( S_hdmi_pixel_clk ),
+      .I_rst_n( S_hdmi_rst_n     ),
+      .I_key  ( I_button[1]      ),
+      .O_short( S_key1_short     ),
+      .O_long (                  ),
+      .O_level(                  )
   );
+
+  key_event #(.CLK_HZ(75000000), .DEBOUNCE_MS(20), .LONG_MS(1000)) u_key4_event (
+      .I_clk  ( S_hdmi_pixel_clk ),
+      .I_rst_n( S_hdmi_rst_n     ),
+      .I_key  ( I_button[3]      ),
+      .O_short( S_key4_short     ),
+      .O_long ( S_key4_long      ),
+      .O_level(                  )
+  );
+
+  // PARAM_BUS：UART 命令 + 按键事件 + 拨码开关 → 参数寄存器（像素域唯一写口）
+  uart_rx #(.CLK_HZ(75000000), .BAUD(115200)) u_uart_rx (
+      .I_clk  ( S_hdmi_pixel_clk ),
+      .I_rst_n( S_hdmi_rst_n     ),
+      .I_rx   ( I_uart_rx        ),
+      .O_data ( S_uart_byte      ),
+      .O_valid( S_uart_byte_valid)
+  );
+
+  uart_cmd u_uart_cmd (
+      .I_clk        ( S_hdmi_pixel_clk ),
+      .I_rst_n      ( S_hdmi_rst_n     ),
+      .I_byte       ( S_uart_byte      ),
+      .I_byte_valid ( S_uart_byte_valid),
+      .O_we         ( S_cmd_we         ),
+      .O_addr       ( S_cmd_addr       ),
+      .O_data       ( S_cmd_data       )
+  );
+
+  param_ctrl #(.CLK_HZ(75000000), .SW_DEBOUNCE_MS(20)) u_param_ctrl (
+      .I_clk           ( S_hdmi_pixel_clk ),
+      .I_rst_n         ( S_hdmi_rst_n     ),
+      .I_key1_short    ( S_key1_short     ),
+      .I_key4_short    ( S_key4_short     ),
+      .I_key4_long     ( S_key4_long      ),
+      .I_sw_raw        ( I_switch         ),
+      .I_ext_we        ( S_cmd_we         ),
+      .I_ext_addr      ( S_cmd_addr       ),
+      .I_ext_data      ( S_cmd_data       ),
+      .I_commit_pulse  ( S_mode_echo_valid),
+      .I_rd_addr       ( 8'h00            ),
+      .O_rd_data       (                  ),
+      .O_display_mode  ( S_display_mode   ),
+      .O_game_mode     ( S_game_mode      ),
+      .O_edge_th_sel   ( S_edge_th_sel    ),
+      .O_edge_th       ( S_edge_th        ),
+      .O_teach_cnt     ( S_teach_cnt      ),
+      .O_param_wr_cnt  ( S_param_wr_cnt   ),
+      .O_mode_commit_cnt( S_mode_commit_cnt),
+      .O_key4_evt      ( S_key4_evt       ),
+      .O_teach_req     ( S_teach_req      ),
+      .O_mode_word     ( S_mode_word      ),
+      .O_led           ( O_led            )
+  );
+
+  // 模式寄存器 → CSI 域：挂在相机帧首提交（I_frame_start = ISP 输出 tuser）
+  mode_sync u_mode_sync (
+      .I_req_clk    ( S_hdmi_pixel_clk        ),
+      .I_req_rst_n  ( S_hdmi_rst_n            ),
+      .I_req_data   ( {S_display_mode, S_edge_th_sel} ),
+      .O_echo_data  ( S_mode_echo             ),
+      .O_echo_valid ( S_mode_echo_valid       ),
+      .I_ack_clk    ( S_csi_rx_clk            ),
+      .I_ack_rst_n  ( S_rst_n                 ),
+      .I_frame_start( S_ISP_O_tuser           ),
+      .O_committed  ( S_mode_committed        ),
+      .O_commit_pulse(                        )
+  );
+
+  // CSI 域实际生效的边缘门限：提交值的高 4 位是档位，TH = 16 + 4×sel
+  wire [10:0] S_edge_th_csi = 11'd16 + ({7'b0, S_mode_committed[7:4]} << 2);
+
+  // CTRL_SYNC 插座：下行（像素域 → CSI 域）与上行（CSI 域 → 像素域）各一条。
+  // M0 的下行由 game_top 每帧发测试常数、上行由 recog_top 原样回传，用来验证双向往返。
+  wire [25:0] S_ctrl_down_data;
+  wire        S_ctrl_down_valid;
+
+  ctrl_sync u_ctrl_down (
+      .I_tx_clk  ( S_hdmi_pixel_clk   ),
+      .I_tx_rst_n( S_hdmi_rst_n       ),
+      .I_tx_valid( S_ctrl_down_valid  ),
+      .I_tx_data ( S_ctrl_down_data   ),
+      .I_rx_clk  ( S_csi_rx_clk       ),
+      .I_rx_rst_n( S_rst_n            ),
+      .O_rx_data ( S_ctrl_down_rx_data),
+      .O_rx_valid( S_ctrl_down_rx_valid)
+  );
+
+  ctrl_sync u_ctrl_up (
+      .I_tx_clk  ( S_csi_rx_clk       ),
+      .I_tx_rst_n( S_rst_n            ),
+      .I_tx_valid( S_ctrl_up_tx_valid ),
+      .I_tx_data ( S_ctrl_up_tx_data  ),
+      .I_rx_clk  ( S_hdmi_pixel_clk   ),
+      .I_rx_rst_n( S_hdmi_rst_n       ),
+      .O_rx_data ( S_ctrl_up_rx_data  ),
+      .O_rx_valid( S_ctrl_up_rx_valid )
+  );
+
+  assign S_ctrl_up_x = {5'b0, S_ctrl_up_rx_data[25:15]};
+  assign S_ctrl_up_y = {5'b0, S_ctrl_up_rx_data[14:4]};
+
+  // 蜂鸣器低电平响：M0 不发声（碰撞音效在 M4c 才用），保持高电平。
+  assign O_buzzer = 1'b1;
   
     uicfgcs500 #(
       .CLK_DIV(24000000 / 100000 - 1)
@@ -860,7 +1006,8 @@ image_correction #(
 isp_top u_isp_top (
 .axi4s_video_aclk(S_csi_rx_clk),
 .I_rst_n         (S_rst_n),
-.I_alg_sel       (S_alg_sel_csi_2d),
+.I_alg_sel       (S_mode_committed[0]),
+.I_edge_th       (S_edge_th_csi),
 .I_tlast         (S_raw_tlast	),
 .I_tuser         (S_raw_tuser	),
 .I_tdata         (S_raw_tdata	),
@@ -873,7 +1020,15 @@ isp_top u_isp_top (
 .O_tvalid        (S_ISP_O_tvalid),
 .I_tready        (),
 .O_edge_dbg_valid (S_edge_dbg_valid),
-.O_edge_dbg_nonzero (S_edge_dbg_nonzero)
+.O_edge_dbg_nonzero (S_edge_dbg_nonzero),
+.I_ctrl_rx_data  (S_ctrl_down_rx_data),
+.I_ctrl_rx_valid (S_ctrl_down_rx_valid),
+.O_ctrl_tx_data  (S_ctrl_up_tx_data),
+.O_ctrl_tx_valid (S_ctrl_up_tx_valid),
+.O_tap_px_shift  (S_tap_px_shift),
+.O_mask_cnt_shift(S_mask_cnt_shift),
+.O_bbox_x        (S_bbox_x),
+.O_bbox_y        (S_bbox_y)
   );
 
 
@@ -1022,6 +1177,26 @@ isp_top u_isp_top (
         .O_vtc_last    ( S_hdmi_last      )
     );
 
+    // ---- RENDER_SLOT：DDR 读回 → 游戏层 → OSD/Logo 层 → HDMI ------------------
+    // 边界是 0 拍组合（见 game_top 头注释）：mixer 内部用 S_x_2d/S_y_2d 判 OSD 位置，
+    // 这里若插一拍寄存器，OSD 就会相对画面错开一个像素。
+    // M0 的 game_top 还是空壳（像素直通），旁路开关与 CTRL_SYNC 下行已经就位。
+    wire [23:0] S_game_pixel_out;
+
+    game_top u_game_top (
+        .I_clk          ( S_hdmi_pixel_clk  ),
+        .I_rst_n        ( S_hdmi_rst_n      ),
+        .I_vsync        ( S_hdmi_vsync      ),
+        .I_de           ( S_hdmi_de         ),
+        .I_pixel_in     ( S_video_rd_data   ),
+        .I_bypass       ( S_game_mode == 4'd0 ),
+        .I_game_mode    ( S_game_mode       ),
+        .I_display_mode ( S_display_mode    ),
+        .O_pixel_out    ( S_game_pixel_out  ),
+        .O_ctrl_tx_data ( S_ctrl_down_data  ),
+        .O_ctrl_tx_valid( S_ctrl_down_valid )
+    );
+
     hdmi_mixer #(
         .H_OFFSET   ( 0    ),
         .V_OFFSET   ( 0    ),
@@ -1038,7 +1213,7 @@ isp_top u_isp_top (
         .I_video_last    ( S_hdmi_last        ),
         .I_debug_status  ( S_hdmi_debug_status),
         .O_video_rd_en   ( S_hdmi_window_rd_en),
-        .I_video_rd_data ( S_video_rd_data    ),
+        .I_video_rd_data ( S_game_pixel_out   ),
         .O_hdmi_vsync    ( S_hdmi_out_vsync   ),
         .O_hdmi_hsync    ( S_hdmi_out_hsync   ),
         .O_hdmi_de       ( S_hdmi_out_de      ),
@@ -1096,6 +1271,15 @@ isp_top u_isp_top (
         .I_fifo_out_drop ( S_dbg_fifo_out_drop ),
         .I_fifo_in_used  ( S_dbg_fifo_in_used  ),
         .I_fifo_out_used ( S_dbg_fifo_out_used ),
+        // M0 追加的 8 个字段（见 debug_uart_logger.v 头部注释）
+        .I_mode_word     ( S_mode_word         ),
+        .I_edge_th       ( {5'b0, S_edge_th_csi} ),
+        .I_mask_cnt      ( S_mask_cnt_s2       ),
+        .I_bbox_x        ( S_bbox_x_s2         ),
+        .I_bbox_y        ( S_bbox_y_s2         ),
+        .I_tap_px        ( S_tap_px_s2         ),
+        .I_ctrl_x        ( S_ctrl_up_x         ),
+        .I_ctrl_y        ( S_ctrl_up_y         ),
         .O_tx           ( O_debug_tx         )
     );
 

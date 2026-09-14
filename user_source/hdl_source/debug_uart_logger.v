@@ -14,6 +14,15 @@
  *   V    video_out FIFO 上一帧最大占用 0..511     (HEX=9 位)
  *   D/E 恒为 0 表示这一秒没有因为 FIFO 满而丢数据；W/V 越接近 1FF 说明离写满越近。
  *
+ * 2026-09-14（手势游戏 M0）再追加 8 个字段，全部 16 位 HEX，同样只在行尾追加：
+ *   K    {8'h0, game_mode[3:0], display_mode[3:0]} —— 当前模式寄存器
+ *   S    生效的 EDGE 门限值（= 16 + 4×edge_th_sel，默认 0x0010）
+ *   P    融合/选定掩码的像素数 >> 4（掩码统计器输出，帧锁存）
+ *   Q    {x_min/16[7:0], x_max/16[7:0]} —— 掩码包围盒列范围
+ *   R    {y_min/16[7:0], y_max/16[7:0]} —— 掩码包围盒行范围
+ *   U    VIDEO_TAP 每帧像素数 >> 10（1280x720 期望 0x0384，用来证明抽头接的是完整一帧）
+ *   X/Y  CTRL_SYNC 上行每帧字的 x / y（M0 是往返自检常数 0x00A5 / 0x00D3）
+ *
  * T 位定义（bit 23 -> bit 0）：
  *  23 MC 初始化完成
  *  22 MC APP READY
@@ -60,6 +69,14 @@ module debug_uart_logger #(
     input  wire [15:0] I_fifo_out_drop,
     input  wire [8:0]  I_fifo_in_used,
     input  wire [8:0]  I_fifo_out_used,
+    input  wire [15:0] I_mode_word,
+    input  wire [15:0] I_edge_th,
+    input  wire [15:0] I_mask_cnt,
+    input  wire [15:0] I_bbox_x,
+    input  wire [15:0] I_bbox_y,
+    input  wire [15:0] I_tap_px,
+    input  wire [15:0] I_ctrl_x,
+    input  wire [15:0] I_ctrl_y,
     output reg         O_tx
 );
 
@@ -76,9 +93,10 @@ module debug_uart_logger #(
     localparam [2:0] TX_DATA  = 3'd2;
     localparam [2:0] TX_STOP  = 3'd3;
 
-    // 一行 96 字节：原来的 70 字节（到 L=xx 为止）+ 追加的 " D=xxxx E=xxxx W=xxx V=xxx"
-    // + CRLF。115200 下发一行约 8.3 ms，仍远小于 1 s 的发送周期。
-    localparam [6:0] LINE_LAST = 7'd95;
+    // 一行现在 152 字节：原来的 96 字节（到 V=xxx + CRLF）+ 追加的
+    // " K=xxxx S=xxxx P=xxxx Q=xxxx R=xxxx U=xxxx X=xxxx Y=xxxx" + CRLF。
+    // 115200 下发一行约 13.2 ms，仍远小于 1 s 的发送周期。
+    localparam [7:0] LINE_LAST = 8'd151;
 
     function [7:0] F_hex_nibble;
         input [3:0] I_n;
@@ -112,7 +130,7 @@ module debug_uart_logger #(
     // TD 面积表里 u_debug_uart_logger 那 201 个 LUT 大头就在这里。
     // 两张表由 tools 之外的一次性脚本从旧版 case 逐行转换而来，并做了 70 项穷举比对。
     function [7:0] F_tpl;
-        input [6:0] I_idx;
+        input [7:0] I_idx;
         begin
             case (I_idx)
                 7'd0 : F_tpl = 8'h44;   // 'D'
@@ -209,16 +227,73 @@ module debug_uart_logger #(
                 7'd91: F_tpl = 8'h00;   // 数字位，不使用
                 7'd92: F_tpl = 8'h00;   // 数字位，不使用
                 7'd93: F_tpl = 8'h00;   // 数字位，不使用
-                7'd94: F_tpl = 8'h0d;   // (0x0d)
-                7'd95: F_tpl = 8'h0a;   // (0x0a)
+                7'd94: F_tpl = 8'h20;   // ' '（原来这里是 CRLF，M0 把行继续往后接）
+                7'd95: F_tpl = 8'h4b;   // 'K'
+                7'd96: F_tpl = 8'h3d;   // '='
+                7'd97: F_tpl = 8'h00;   // 数字位，不使用
+                7'd98: F_tpl = 8'h00;   // 数字位，不使用
+                7'd99: F_tpl = 8'h00;   // 数字位，不使用
+                7'd100: F_tpl = 8'h00;  // 数字位，不使用
+                7'd101: F_tpl = 8'h20;  // ' '
+                7'd102: F_tpl = 8'h53;  // 'S'
+                7'd103: F_tpl = 8'h3d;  // '='
+                7'd104: F_tpl = 8'h00;  // 数字位，不使用
+                7'd105: F_tpl = 8'h00;  // 数字位，不使用
+                7'd106: F_tpl = 8'h00;  // 数字位，不使用
+                7'd107: F_tpl = 8'h00;  // 数字位，不使用
+                7'd108: F_tpl = 8'h20;  // ' '
+                7'd109: F_tpl = 8'h50;  // 'P'
+                7'd110: F_tpl = 8'h3d;  // '='
+                7'd111: F_tpl = 8'h00;  // 数字位，不使用
+                7'd112: F_tpl = 8'h00;  // 数字位，不使用
+                7'd113: F_tpl = 8'h00;  // 数字位，不使用
+                7'd114: F_tpl = 8'h00;  // 数字位，不使用
+                7'd115: F_tpl = 8'h20;  // ' '
+                7'd116: F_tpl = 8'h51;  // 'Q'
+                7'd117: F_tpl = 8'h3d;  // '='
+                7'd118: F_tpl = 8'h00;  // 数字位，不使用
+                7'd119: F_tpl = 8'h00;  // 数字位，不使用
+                7'd120: F_tpl = 8'h00;  // 数字位，不使用
+                7'd121: F_tpl = 8'h00;  // 数字位，不使用
+                7'd122: F_tpl = 8'h20;  // ' '
+                7'd123: F_tpl = 8'h52;  // 'R'
+                7'd124: F_tpl = 8'h3d;  // '='
+                7'd125: F_tpl = 8'h00;  // 数字位，不使用
+                7'd126: F_tpl = 8'h00;  // 数字位，不使用
+                7'd127: F_tpl = 8'h00;  // 数字位，不使用
+                8'd128: F_tpl = 8'h00;  // 数字位，不使用
+                8'd129: F_tpl = 8'h20;  // ' '
+                8'd130: F_tpl = 8'h55;  // 'U'
+                8'd131: F_tpl = 8'h3d;  // '='
+                8'd132: F_tpl = 8'h00;  // 数字位，不使用
+                8'd133: F_tpl = 8'h00;  // 数字位，不使用
+                8'd134: F_tpl = 8'h00;  // 数字位，不使用
+                8'd135: F_tpl = 8'h00;  // 数字位，不使用
+                8'd136: F_tpl = 8'h20;  // ' '
+                8'd137: F_tpl = 8'h58;  // 'X'
+                8'd138: F_tpl = 8'h3d;  // '='
+                8'd139: F_tpl = 8'h00;  // 数字位，不使用
+                8'd140: F_tpl = 8'h00;  // 数字位，不使用
+                8'd141: F_tpl = 8'h00;  // 数字位，不使用
+                8'd142: F_tpl = 8'h00;  // 数字位，不使用
+                8'd143: F_tpl = 8'h20;  // ' '
+                8'd144: F_tpl = 8'h59;  // 'Y'
+                8'd145: F_tpl = 8'h3d;  // '='
+                8'd146: F_tpl = 8'h00;  // 数字位，不使用
+                8'd147: F_tpl = 8'h00;  // 数字位，不使用
+                8'd148: F_tpl = 8'h00;  // 数字位，不使用
+                8'd149: F_tpl = 8'h00;  // 数字位，不使用
+                8'd150: F_tpl = 8'h0d;  // (0x0d)
+                8'd151: F_tpl = 8'h0a;  // (0x0a)
                 default: F_tpl = 8'h00;
             endcase
         end
     endfunction
 
     // 数字位返回 {1'b1, nib_no[5:0]}；非数字位返回 7'd0。
+    // 老字段（F/T/A/G/N/B/C/M/L/D/E/W/V）一共 52 个 nibble，编号 0..51 与本函数对应。
     function [6:0] F_nib;
-        input [6:0] I_idx;
+        input [7:0] I_idx;
         begin
             case (I_idx)
                 7'd6 : F_nib = {1'b1, 6'd0};   // I_frame_cnt[15:12]
@@ -278,8 +353,89 @@ module debug_uart_logger #(
         end
     endfunction
 
+    // M0 新追加的 8 个字段（K/S/P/Q/R/U/X/Y）各 4 个 nibble，单独编一套 0..31 的号，
+    // 再接一份 S_nibble_vec2——这样原来那 52 个 nibble 的编号、向量和 hex 编码器
+    // 一个字节都不用动（改老表是最容易改错的地方）。
+    function [6:0] F_nib2;
+        input [7:0] I_idx;
+        begin
+            case (I_idx)
+                7'd97:  F_nib2 = {1'b1, 6'd0};   // I_mode_word[15:12]
+                7'd98:  F_nib2 = {1'b1, 6'd1};   // I_mode_word[11:8]
+                7'd99:  F_nib2 = {1'b1, 6'd2};   // I_mode_word[7:4]
+                7'd100: F_nib2 = {1'b1, 6'd3};   // I_mode_word[3:0]
+                7'd104: F_nib2 = {1'b1, 6'd4};   // I_edge_th[15:12]
+                7'd105: F_nib2 = {1'b1, 6'd5};   // I_edge_th[11:8]
+                7'd106: F_nib2 = {1'b1, 6'd6};   // I_edge_th[7:4]
+                7'd107: F_nib2 = {1'b1, 6'd7};   // I_edge_th[3:0]
+                7'd111: F_nib2 = {1'b1, 6'd8};   // I_mask_cnt[15:12]
+                7'd112: F_nib2 = {1'b1, 6'd9};   // I_mask_cnt[11:8]
+                7'd113: F_nib2 = {1'b1, 6'd10};  // I_mask_cnt[7:4]
+                7'd114: F_nib2 = {1'b1, 6'd11};  // I_mask_cnt[3:0]
+                7'd118: F_nib2 = {1'b1, 6'd12};  // I_bbox_x[15:12]
+                7'd119: F_nib2 = {1'b1, 6'd13};  // I_bbox_x[11:8]
+                7'd120: F_nib2 = {1'b1, 6'd14};  // I_bbox_x[7:4]
+                7'd121: F_nib2 = {1'b1, 6'd15};  // I_bbox_x[3:0]
+                7'd125: F_nib2 = {1'b1, 6'd16};  // I_bbox_y[15:12]
+                7'd126: F_nib2 = {1'b1, 6'd17};  // I_bbox_y[11:8]
+                7'd127: F_nib2 = {1'b1, 6'd18};  // I_bbox_y[7:4]
+                8'd128: F_nib2 = {1'b1, 6'd19};  // I_bbox_y[3:0]
+                8'd132: F_nib2 = {1'b1, 6'd20};  // I_tap_px[15:12]
+                8'd133: F_nib2 = {1'b1, 6'd21};  // I_tap_px[11:8]
+                8'd134: F_nib2 = {1'b1, 6'd22};  // I_tap_px[7:4]
+                8'd135: F_nib2 = {1'b1, 6'd23};  // I_tap_px[3:0]
+                8'd139: F_nib2 = {1'b1, 6'd24};  // I_ctrl_x[15:12]
+                8'd140: F_nib2 = {1'b1, 6'd25};  // I_ctrl_x[11:8]
+                8'd141: F_nib2 = {1'b1, 6'd26};  // I_ctrl_x[7:4]
+                8'd142: F_nib2 = {1'b1, 6'd27};  // I_ctrl_x[3:0]
+                8'd146: F_nib2 = {1'b1, 6'd28};  // I_ctrl_y[15:12]
+                8'd147: F_nib2 = {1'b1, 6'd29};  // I_ctrl_y[11:8]
+                8'd148: F_nib2 = {1'b1, 6'd30};  // I_ctrl_y[7:4]
+                8'd149: F_nib2 = {1'b1, 6'd31};  // I_ctrl_y[3:0]
+                default: F_nib2 = 7'd0;
+            endcase
+        end
+    endfunction
+
     // 行内 nibble：nib0 = 最先发送的那个（F 的最高位），nib51 = 最后一个（V 的最低位）。
     // 向量按"高编号在前"书写：最上面一项是 nib51（= V 的最低 4 位），最下面一项是 nib0。
+    // M0 新字段的 nibble（编号 31..0，见 F_nib2）：单独一份向量，老字段继续用下面的
+    // S_nibble_vec——两套编号互不干扰，hex 编码器仍然只有一份。
+    wire [127:0] S_nibble_vec2 = {
+        I_ctrl_y[3:0],                // nib31
+        I_ctrl_y[7:4],                // nib30
+        I_ctrl_y[11:8],               // nib29
+        I_ctrl_y[15:12],              // nib28
+        I_ctrl_x[3:0],                // nib27
+        I_ctrl_x[7:4],                // nib26
+        I_ctrl_x[11:8],               // nib25
+        I_ctrl_x[15:12],              // nib24
+        I_tap_px[3:0],                // nib23
+        I_tap_px[7:4],                // nib22
+        I_tap_px[11:8],               // nib21
+        I_tap_px[15:12],              // nib20
+        I_bbox_y[3:0],                // nib19
+        I_bbox_y[7:4],                // nib18
+        I_bbox_y[11:8],               // nib17
+        I_bbox_y[15:12],              // nib16
+        I_bbox_x[3:0],                // nib15
+        I_bbox_x[7:4],                // nib14
+        I_bbox_x[11:8],               // nib13
+        I_bbox_x[15:12],              // nib12
+        I_mask_cnt[3:0],              // nib11
+        I_mask_cnt[7:4],              // nib10
+        I_mask_cnt[11:8],             // nib9
+        I_mask_cnt[15:12],            // nib8
+        I_edge_th[3:0],               // nib7
+        I_edge_th[7:4],               // nib6
+        I_edge_th[11:8],              // nib5
+        I_edge_th[15:12],             // nib4
+        I_mode_word[3:0],             // nib3
+        I_mode_word[7:4],             // nib2
+        I_mode_word[11:8],            // nib1
+        I_mode_word[15:12]            // nib0
+    };
+
     wire [207:0] S_nibble_vec = {
         I_fifo_out_used[3:0],          // nib51
         I_fifo_out_used[7:4],          // nib50
@@ -338,7 +494,7 @@ module debug_uart_logger #(
     reg [LOG_TICKS_W-1:0] S_period_cnt;
     reg        S_first_send;
     reg        S_send_busy;
-    reg [6:0]  S_line_idx;
+    reg [7:0]  S_line_idx;
     reg [7:0]  S_tx_byte;
     reg        S_tx_start;
 
@@ -349,14 +505,19 @@ module debug_uart_logger #(
 
     // 下一个要发送的字节序号：发送中就是 S_line_idx+1，新开一帧就是 0。两个分支
     // 共用这一个组合结果，模板逻辑因此只被例化一份。
-    wire [6:0] S_next_idx = S_send_busy ? (S_line_idx + 7'd1) : 7'd0;
+    wire [7:0] S_next_idx = S_send_busy ? (S_line_idx + 8'd1) : 8'd0;
 
-    // 行模板输出：F_nib 指出当前位是不是数字位、是第几个 nibble；是数字位就查
-    // nibble 向量并做一次 hex 编码，否则取常量字节表。
-    wire [6:0] S_sel       = F_nib(S_next_idx);
-    wire [5:0] S_nib_no    = S_sel[5:0];
-    wire [3:0] S_nib_val   = S_nibble_vec[{S_nib_no, 2'b00} +: 4];
-    wire [7:0] S_line_byte = S_sel[6] ? F_hex_nibble(S_nib_val) : F_tpl(S_next_idx);
+    // 行模板输出：F_nib / F_nib2 指出当前位是不是数字位、是哪个 nibble（老字段走
+    // F_nib + S_nibble_vec，M0 新字段走 F_nib2 + S_nibble_vec2）；是数字位就把
+    // 对应 nibble 取出来做一次 hex 编码，否则取常量字节表。
+    wire [6:0] S_sel_lo    = F_nib(S_next_idx);
+    wire [6:0] S_sel_hi    = F_nib2(S_next_idx);
+    wire       S_hi        = S_sel_hi[6];
+    wire       S_is_nib    = S_sel_lo[6] | S_sel_hi[6];
+    wire [5:0] S_nib_no    = S_hi ? S_sel_hi[5:0] : S_sel_lo[5:0];
+    wire [3:0] S_nib_val   = S_hi ? S_nibble_vec2[{S_nib_no, 2'b00} +: 4]
+                                  : S_nibble_vec [{S_nib_no, 2'b00} +: 4];
+    wire [7:0] S_line_byte = S_is_nib ? F_hex_nibble(S_nib_val) : F_tpl(S_next_idx);
 
     wire S_tx_done = (S_tx_state == TX_STOP) &&
                      (S_tx_div == CLK_PER_BIT - 1);

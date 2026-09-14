@@ -356,3 +356,53 @@ WNS 从 +820 ps 掉到 +621 ps 不是逻辑变多（只 +16 LUT），而是**最
 再加上板后的 `DBG:` 计数器 A/B（同一固定文字目标、同光照、固定曝光，各采 10 行取中
 位数，要求 `N/B/C` 相对差 ≤1%、`M/L` 无数量级偏差）。上板结论由用户回填到本节；
 README 第 9 节那条"整幅边缘图数值对比"欠账据此改写成"降级为计数器级对比"。
+
+### 阶段 3：四个插座 + 模式框架 + 在线调参（新增功能）
+
+新增 9 个模块（都在 M0 里冻结了接口，后续里程碑只填内容、不再改插座）：
+
+| 模块 | 位置 | 作用 |
+|---|---|---|
+| `isp/recog_top.v` | CSI 域 | VIDEO_TAP 消费者：tap 每帧字数监视 + 掩码统计 + CTRL_SYNC 上行端点 |
+| `isp/mask_stats.v` | CSI 域 | 通用二值掩码统计（像素数 / 包围盒 / Σ列Σ行），掩码源由调用方 mux |
+| `isp/ctrl_sync.v` | 跨域 | CTRL_SYNC 的单字传输（toggle 握手 + 两级同步），上下行各一个实例 |
+| `game/game_top.v` | 像素域 | RENDER_SLOT：DDR 读回与 OSD 之间的游戏层（M0 为直通空壳 + 每帧测试字） |
+| `key_event.v` | 像素域 | 20 ms 消抖 + 1 s 长按的按键事件（KEY1 / KEY4 各一个实例） |
+| `param_ctrl.v` | 像素域 | PARAM_BUS 寄存器文件 + 写仲裁（UART > KEY4 长按 > KEY4 短按 > KEY1 > 拨码）+ LED |
+| `mode_sync.v` | 跨域 | 模式寄存器 → CSI 域的**相机帧首提交**（消撕裂），提交后回执 |
+| `uart_rx.v` / `uart_cmd.v` | 像素域 | 115200-8-N-1 接收 + ASCII 命令 `W <addr> <data>`（只写不回显） |
+
+集成改动：`isp_top` 增加 `I_edge_th`（运行时门限）与 tap/CTRL_SYNC 端口；顶层端口扩到
+`I_button[3:0]` + `I_switch[3:0]` + `I_uart_rx` + `O_led[3:0]` + `O_buzzer`；
+`alg_switch` 被 `key_event + param_ctrl + mode_sync` 取代（KEY1 也走模式寄存器，于是
+README 第 5 节记的"切换瞬间撕裂"从设计上消失）；`hdmi_mixer` 的状态字扩成三态
+RAW / EDGE / GES；`debug_uart_logger` 追加 8 个字段（K/S/P/Q/R/U/X/Y，行长 96 → 152
+字节，115200 下约 13.2 ms）。
+
+构建结果（2026-09-14 19:38 起，一次通过、0 违例）：
+
+| 指标              | 基线      | 阶段 2 重构后 | **M0（阶段 3）** | 变化 vs 基线 |
+| --------------- | ------- | --------- | ------------ | -------- |
+| slices          | 13214（62.28%） | 13217     | **13693（64.54%）** | +479     |
+| LUT6 / 触发器      | 10809 / 14256 | 10825 / 14270 | **11351 / 15094** | +542 / +838 |
+| ERAM / DSP      | 70 / 8  | 70 / 8    | **70 / 8**   | 0 / 0    |
+| feedthrough     | 6767    | 6788      | **7036**     | +269     |
+| final Setup WNS | +820 ps | +621 ps   | **+589 ps**  | −231 ps  |
+| final Hold WNS  | +20 ps  | +20 ps    | +20 ps       | 0        |
+
+gate 阶段（综合后、布局前）：registers 14530 → 15094（+564）、luts 11151 → 11686（+535）、
+RAMs 70（未变）、DSPs 8（未变）——**没有新增 ERAM**，掩码统计器与四个插座纯逻辑实现。
+
+三个踩坑（都写进注释了）：
+
+1. **prj 的登记格式**：`.v` 必须登记在 `<Verilog>` 段内、且条目要带
+   `BelongTo="design_1"` + `CompileOrder`。插到 `</Source_Files>` 之前会落到
+   `<IP_FILE>` 段外（`PRJ-8641 ERROR: XML tag File is invalid`）；只写
+   UsedInSyn/UsedInP&R 两个 Attr 则报 `PRJ-8640 ... failed because of previous
+   error(s)`，且不给具体原因——最后是用只做 `open_project` 的探针脚本（`tmp/` 下，
+   秒级）逐个变体试出来的。
+2. `S_alg_status_hdmi_3d` 在旧代码里除了 OSD 还有一处"模式变化就清 video-nonzero
+   标志"的用法，删信号时要一起改（TD 报 `HDL-8007 '...' is not declared`）。
+3. `param_ctrl` 里 `S_sw_seen` 一度在两个 always 块里都赋值（复位 + 写入），TD 报
+   `HDL-8007 net 'S_sw_seen[3]' is constantly driven from multiple places`——寄存器的
+   复位只能出现在驱动它的那一个块里。
