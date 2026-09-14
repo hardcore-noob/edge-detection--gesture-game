@@ -406,3 +406,13 @@ RAMs 70（未变）、DSPs 8（未变）——**没有新增 ERAM**，掩码统�
 3. `param_ctrl` 里 `S_sw_seen` 一度在两个 always 块里都赋值（复位 + 写入），TD 报
    `HDL-8007 net 'S_sw_seen[3]' is constantly driven from multiple places`——寄存器的
    复位只能出现在驱动它的那一个块里。
+
+**M0 待烧录镜像**（2026-09-14 19:43 生成）：
+
+- `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`（1789547 B）
+  SHA256 `4B22F4901CFFD523C186D605B8198BDDAF3EAE7458DA34102865571CC8A3E4A4`
+- 回退镜像仍可用：`tmp/m0-baseline/camera_to_dsi_display.bit`（见阶段 1 的 SHA256），
+  git tag `m0-baseline-13214`
+
+上板自检清单见 README 第 12.4 节（基础四项 + 8 个新字段的期望值 + 拨码/串口/KEY4 三项
+在线调参）；本节的上板结论待用户回填。
