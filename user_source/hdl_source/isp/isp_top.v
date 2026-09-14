@@ -29,10 +29,11 @@ module isp_top #(
     input           I_ctrl_rx_valid,
     output [25:0]   O_ctrl_tx_data,
     output          O_ctrl_tx_valid,
-    output [15:0]   O_tap_px_shift,
+    output [11:0]   O_tap_px_shift,
     output [15:0]   O_mask_cnt_shift,
-    output [15:0]   O_bbox_x,
-    output [15:0]   O_bbox_y
+    output [13:0]   O_bbox_x,
+    output [11:0]   O_bbox_y,
+    output          O_status_toggle
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -174,7 +175,8 @@ module isp_top #(
         .O_tap_px_shift  (O_tap_px_shift),
         .O_mask_cnt_shift(O_mask_cnt_shift),
         .O_bbox_x        (O_bbox_x),
-        .O_bbox_y        (O_bbox_y)
+        .O_bbox_y        (O_bbox_y),
+        .O_status_toggle (O_status_toggle)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

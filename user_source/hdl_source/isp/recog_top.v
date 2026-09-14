@@ -37,11 +37,15 @@ module recog_top (
     output wire [25:0] O_ctrl_tx_data,
     output wire        O_ctrl_tx_valid,
 
-    // 观测输出（帧锁存，供 DBG 行；到像素域由顶层同步）
-    output wire [15:0] O_tap_px_shift,    // 每帧 tap 像素数 >>10
+    // 观测输出（帧锁存，供 DBG 行；到像素域由顶层用 toggle+整包捕获同步）
+    // 位宽按实际取值范围给足（不做成固定 16 位）：跨域线少一根就少一份走线压力。
+    output wire [11:0] O_tap_px_shift,    // 每帧 tap 像素数 >>10（1280x720 应为 900 = 0x384）
     output wire [15:0] O_mask_cnt_shift,  // 掩码像素数 >>4
-    output wire [15:0] O_bbox_x,          // {x_min/16[7:0], x_max/16[7:0]}
-    output wire [15:0] O_bbox_y           // {y_min/16[7:0], y_max/16[7:0]}
+    output wire [13:0] O_bbox_x,          // {x_min/16[6:0], x_max/16[6:0]}（x/16 ≤ 79）
+    output wire [11:0] O_bbox_y,          // {y_min/16[5:0], y_max/16[5:0]}（y/16 ≤ 44）
+    // 帧锁存值更新时翻转一次（用边沿流帧首），像素域据此"整包捕获"。
+    // 数据在 toggle 之前就已经锁存稳定，所以不存在逐位同步的混采问题。
+    output reg         O_status_toggle
 );
 
     // ---- tap 监视：每帧字数 -------------------------------------------------
@@ -97,8 +101,16 @@ module recog_top (
     );
 
     assign O_mask_cnt_shift = S_mcnt >> 4;
-    assign O_bbox_x         = {1'b0, S_xmin[10:4], 1'b0, S_xmax[10:4]};
-    assign O_bbox_y         = {1'b0, S_ymin[10:4], 1'b0, S_ymax[10:4]};
+    assign O_bbox_x         = {S_xmin[10:4], S_xmax[10:4]};
+    assign O_bbox_y         = {S_ymin[9:4],  S_ymax[9:4]};
+
+    // 用边沿流（比 raw 流晚 2 拍）的帧首翻 toggle：此刻 tap 计数与掩码统计都已锁存。
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n)
+            O_status_toggle <= 1'b0;
+        else if(I_edge_tvalid && I_edge_tuser)
+            O_status_toggle <= ~O_status_toggle;
+    end
 
     // 说明：S_sumx / S_sumy / S_empty 在 M0 里没有消费者（会综合掉），M1 接质心与
     // 丢失判定时自然回来——接口先冻结，省得 M1 再改一次模块端口。

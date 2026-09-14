@@ -449,3 +449,84 @@ ERAM 70 / DSP 8（未变）、feedthrough 7021、final Setup WNS **+654 ps**、H
 - `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`（1789547 B）
   SHA256 `074403707B7C5508705F0565F77AD401C821DF953A2D634D5A96C1BADA209400`
   （上面阶段 3 记的 `4B22F490…` 那版有同一个 bug，别再用）
+
+### 阶段 5：参数实验与 RTL 瘦身（2026-09-14）
+
+M0 初版实测 +546 LUT6、feedthrough +254、WNS 从 +820 掉到 +654 ps，而规划里 M0 的
+预算只写了 +0~100 LUT6。这一轮做了三件事：先记账，再用减法把能省的省回来，最后用
+布局参数把落点和 feedthrough 拉回。
+
+**① RTL 减法（不改变任何对外行为）**
+
+| 改动 | 省下 |
+|---|---|
+| `key_event` 加 `HAS_LONG` 参数，KEY1 实例不再生成 1 s 长按计数器与比较器 | 21 LUT / 29 FF（该实例 39→18 LUT、55→26 FF） |
+| CSI→像素域的 4 个观测值（tap/掩码/包围盒）从"逐位两级同步"改成"每帧 toggle + 整包捕获" | 约 60 FF、若干跨区走线（`recog_top` 167→155 FF、logger 83→76 FF） |
+| 观测字段位宽按实际取值收窄（tap 12 位、bbox_x 14 位、bbox_y 12 位，不再一律 16 位） | 十余 FF |
+| LED 心跳/事件闪烁从 2 个 25 位分频计数器改成"显示帧计数派生" | 41 FF（`param_ctrl` 93→52 FF） |
+
+**② 修掉一条被掩盖的 0.268 ns 路径（这才是初版 WNS 掉的真正原因之一）**
+
+初版把 logger 行模板从 96 字节加长到 152 字节后，24 MHz 的曝光值 `A`/`G` 变成
+`u_ae_set/r_ae_reg → logger 模板组合逻辑 → S_tx_byte` 这样一条 **6 级组合**的长路径，
+卡在 SDC 里原有的 `set_max_delay -datapath_only 5.000 -from pll_clk_24m -to HDMI_PIXEL_CLK`
+上，slack 只剩 **0.268 ns**，成了全设计最差 setup，把真正的片内最差路径盖住了。
+修法：在顶层把 `S_ae`/`S_ag` 先在像素域打一拍再送 logger，那条跨域路径退回 FF→FF。
+
+**顺带纠正一条 SDC 认知（重要，别再踩）**：我一开始给新加的 CSI↔像素域通路也写了
+`set_max_delay -datapath_only 5.000`，实测**TD 直接忽略**——报告
+`camera_to_dsi_display_exception.timing` 里这两条被标成 `Set Max Delay (Ignored)`，
+把 5.000 改成 15.000 后**所有时序数字一个都没变**。原因是这两个时钟在 SDC 开头就是
+两个异步组，组间路径本来就被切断。也就是说：**CSI 域 ↔ 像素域之间的时序 TD 根本不查**，
+那两条约束现在只起"记录意图"的作用（万一以后取消异步组就立刻生效），真正的保障只能是
+握手设计本身（toggle 两级同步 + 数据先稳定后整包捕获）。而 24m↔像素域虽然也"异步"，
+却在**同一个组**里，所以照常按普通路径算——那类路径必须靠打拍/RTL 去满足。
+
+**③ 布局参数实验（目标：压 feedthrough、找回时序余量）**
+
+每次只跑布局布线（`-Stage phy`，syn 的网表不变），参数写在 `phy_1/settings.cfg` 的
+`set phyWildParams {...}` 里：
+
+| 实验 | place 参数 | final Setup WNS | feedthrough | LUT6 | slices |
+|---|---|---|---|---|---|
+| E1′ | `opt_timing high`（原参数） | +856 ps | 6964 | 11222 | 13527 |
+| E2 | + `effort high` | +849 ps | 7059 | 11192 | 13525 |
+| E3 | + `hfn_opt_effort high` | +481 ps | 6973 | 11210 | 13528 |
+| **E4** | **+ `max_fanout 250`** | **+1084 ps** | **6927** | 11197 | 13511 |
+| E5 | + `max_fanout 120` | +420 ps | 6935 | 11224 | 13541 |
+| E6 | E4 + `route effort high` | +1084 ps（与 E4 完全相同 → 该参数无效果） | 6927 | 11197 | 13511 |
+
+结论：**`set phyWildParams {place opt_timing high place max_fanout 250}` 是最优组合**
+（默认 `max_fanout 999999` 等于不限；限到 250 让 TD 拆开高扇出网络，长线变短，WNS 一次
+涨 228 ps）。`effort high` 和 `hfn_opt_effort high` 都是"更努力但落点更差"，`max_fanout`
+再往下压（120）反而把 TMDS 串行域压到 0.420 ns，属于过头。
+
+**④ feedthrough 的账要记清楚**
+
+基线（M0 之前）就已经是 **6767**——它主要来自既有设计的长线（ISP 的 96 位通路、DDR 的
+128 位通路、TMDS 输出到 pad 环），不是 M0 加的。M0 初版把它推到 7021（+254），这一轮
+瘦身 + 参数实验收回到 **6927**（+160）。也就是说：**参数只能在 ±2% 里挪，想让 feedthrough
+再明显下降，必须动既有的长线布局（换位宽/换流水线/改 I/O），那是独立于 M0 的课题。**
+
+**⑤ 最终结果（2026-09-14 23:51，一次通过、0 违例）**
+
+| 指标 | 基线 `m0-baseline-13214` | M0 初版 | **M0 优化后** | 净变化 vs 基线 |
+|---|---|---|---|---|
+| slices | 13214（62.28%） | 13678（64.47%） | **13511（63.68%）** | +297 |
+| LUT6 | 10809 | 11355 | **11197** | +388 |
+| 触发器 | 14256 | 14767 | **14663** | +407 |
+| feedthrough | 6767 | 7021 | **6927** | +160 |
+| ERAM / DSP | 70 / 8 | 70 / 8 | **70 / 8** | 0 / 0 |
+| final Setup WNS | +820 ps | +654 ps | **+1084 ps** | **+264 ps** |
+| final Hold WNS | +20 ps | +20 ps | +20 ps | 0 |
+
+最紧路径回到熟悉的那条：`u_hdmi_mixer/sub2 → O_hdmi_data_reg[21]`（17 级、cell 46% /
+net 54%），说明报告的"地形"恢复正常，不再被 CDC 约束口径干扰。
+
+镜像：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`（1789547 B）
+SHA256 `C090D90A5BD164C81154A8B85A963032AEA6E11BD7AC38CC12B4CC4E692F0789`
+
+**记账结论**：M0 的真实成本是 **+388 LUT6 / +297 slices / +407 FF / +160 feedthrough**，
+规划里"+0~100 LUT6"低估了——当时只算了"重构 + 插座"，把模式寄存器、在线调参、UART
+收发、参数寄存器文件、KEY4 长按、LED、8 个 DBG 字段都漏了。按 §2.5.3 的账本，这部分
+从总预算里扣掉即可；到 85% 仍有约 3300 LUT6 余量。

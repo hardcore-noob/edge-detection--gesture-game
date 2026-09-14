@@ -185,8 +185,9 @@ if (Test-Path -LiteralPath $phySettings) {
     $cfg = [IO.File]::ReadAllText($phySettings)
     if ($cfg.IndexOf('phyWildParams') -lt 0) {
         $cfg = $cfg.TrimEnd("`r", "`n") + "`r`n" +
-               "# 布局时序优化提到 high（2026-09-12）：TD 默认 medium，TMDS 串行域有一条 91% 走线的路径`r`n" +
-               "set phyWildParams {place opt_timing high}`r`n"
+               "# 布局参数（2026-09-14 参数实验选出的最优组合，见 CHANGELOG《参数实验》）：`r`n" +
+               "#   opt_timing high + max_fanout 250`r`n" +
+               "set phyWildParams {place opt_timing high place max_fanout 250}`r`n"
         [IO.File]::WriteAllText($phySettings, $cfg, $utf8NoBom)
         $patched = $true
     }

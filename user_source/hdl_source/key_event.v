@@ -13,7 +13,10 @@
 module key_event #(
     parameter integer CLK_HZ      = 75000000,
     parameter integer DEBOUNCE_MS = 20,
-    parameter integer LONG_MS     = 1000
+    parameter integer LONG_MS     = 1000,
+    // HAS_LONG = 0 时整块长按检测都不生成（KEY1 只需要短按，省掉一个 27 位计数器与
+    // 比较器：M0 优化实测每个实例约 20 LUT / 27 FF）。
+    parameter integer HAS_LONG    = 1
 )(
     input  wire I_clk,
     input  wire I_rst_n,
@@ -64,15 +67,35 @@ module key_event #(
     wire S_press   = ~S_level &  S_level_d;   // 消抖后按下沿
     wire S_release =  S_level & ~S_level_d;   // 消抖后松开沿
 
-    reg                S_pressed;
-    reg                S_long_sent;
-    reg [LONG_W-1:0]   S_long_cnt;
+    reg  S_pressed;
+    reg  S_long_seen;     // 本次按下已判定为长按（松手时不再补短按）
+    wire S_long_now;      // 本拍达到长按阈值
+
+    generate
+    if (HAS_LONG) begin : g_long
+        reg [LONG_W-1:0] S_long_cnt;
+
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)
+                S_long_cnt <= {LONG_W{1'b0}};
+            else if(!S_pressed)
+                S_long_cnt <= {LONG_W{1'b0}};
+            else if(S_long_cnt != LONG_TICKS - 1)
+                S_long_cnt <= S_long_cnt + 1'b1;
+        end
+
+        // 计数停在阈值上，所以 S_long_now 会一直是 1；一次性由 S_long_seen 保证。
+        assign S_long_now = (S_pressed && (S_long_cnt == LONG_TICKS - 1));
+    end
+    else begin : g_no_long
+        assign S_long_now = 1'b0;
+    end
+    endgenerate
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             S_pressed   <= 1'b0;
-            S_long_sent <= 1'b0;
-            S_long_cnt  <= {LONG_W{1'b0}};
+            S_long_seen <= 1'b0;
             O_short     <= 1'b0;
             O_long      <= 1'b0;
             O_level     <= 1'b1;
@@ -84,23 +107,19 @@ module key_event #(
 
             if(S_press) begin
                 S_pressed   <= 1'b1;
-                S_long_sent <= 1'b0;
-                S_long_cnt  <= {LONG_W{1'b0}};
+                S_long_seen <= 1'b0;
             end
-            else if(S_pressed && !S_long_sent) begin
-                if(S_long_cnt == LONG_TICKS - 1) begin
-                    S_long_sent <= 1'b1;
-                    O_long      <= 1'b1;
-                end
-                else
-                    S_long_cnt <= S_long_cnt + 1'b1;
+
+            if(S_long_now && !S_long_seen) begin
+                S_long_seen <= 1'b1;
+                O_long      <= 1'b1;
             end
 
             if(S_release) begin
-                if(S_pressed && !S_long_sent)
+                if(S_pressed && !S_long_seen)
                     O_short <= 1'b1;
                 S_pressed   <= 1'b0;
-                S_long_sent <= 1'b0;
+                S_long_seen <= 1'b0;
             end
         end
     end

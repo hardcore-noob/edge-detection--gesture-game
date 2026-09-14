@@ -240,6 +240,8 @@ module design_top_wrapper (
     reg  [8:0]  S_fifo_in_used_max,  S_fifo_out_used_max;
     reg         S_hdmi_user_1d;
     reg         S_dbg_alg_prev;
+    // 曝光/增益先落到像素域打一拍再进 logger（见下面 logger 实例处的说明）
+    reg [15:0]  S_ae_px, S_ag_px;
     wire        S_edge_dbg_valid;
     wire        S_edge_dbg_nonzero;
     reg         S_dbg_edge_valid_seen;
@@ -276,13 +278,19 @@ module design_top_wrapper (
     wire [7:0]  S_cmd_addr;
     wire [15:0] S_cmd_data;
 
-    // VIDEO_TAP 观测（CSI 域产生，这里两级同步到像素域给 DBG 用；每帧才变一次，
-    // 多位同时跳变时可能短暂混采，对统计字段无影响，与 M 字段同一套做法）
-    wire [15:0] S_tap_px_shift, S_mask_cnt_shift, S_bbox_x, S_bbox_y;
-    reg  [15:0] S_tap_px_s1,     S_tap_px_s2;
-    reg  [15:0] S_mask_cnt_s1,   S_mask_cnt_s2;
-    reg  [15:0] S_bbox_x_s1,     S_bbox_x_s2;
-    reg  [15:0] S_bbox_y_s1,     S_bbox_y_s2;
+    // VIDEO_TAP 观测（CSI 域 → 像素域）：用 recog_top 的"每帧 toggle"做**整包捕获**，
+    // 而不是逐位两级同步——数据在 toggle 之前就已经锁存稳定，捕获时一次搬 52 位；
+    // 比逐位 2FF（4×16×2 = 128 FF）省 70 多个触发器，跨区走线也同比减少。
+    wire [11:0] S_tap_px_shift;      // 每帧 tap 像素数 >>10（应为 900）
+    wire [15:0] S_mask_cnt_shift;    // 掩码像素数 >>4
+    wire [13:0] S_bbox_x;            // {x_min/16, x_max/16}
+    wire [11:0] S_bbox_y;            // {y_min/16, y_max/16}
+    wire        S_obs_toggle;
+    reg  [1:0]  S_obs_sync;
+    reg  [11:0] S_tap_px_hold;
+    reg  [15:0] S_mask_cnt_hold;
+    reg  [13:0] S_bbox_x_hold;
+    reg  [11:0] S_bbox_y_hold;
 
     // CTRL_SYNC 插座：下行（像素域→CSI 域）与上行（CSI 域→像素域）
     wire [25:0] S_ctrl_down_rx_data;   // CSI 域
@@ -523,19 +531,41 @@ module design_top_wrapper (
     end
 
     // M0 起算法选择由模式寄存器决定（见 mode_sync 的帧首提交），不再从 24M 域的
-    // 按键电平直接过采样过来。这里只把 VIDEO_TAP 的帧锁存观测同步到像素域给 DBG。
+    // 按键电平直接过采样过来。这里只把 VIDEO_TAP 的帧锁存观测"整包捕获"到像素域。
     always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
         if(!S_hdmi_rst_n) begin
-            S_tap_px_s1     <= 16'd0;  S_tap_px_s2     <= 16'd0;
-            S_mask_cnt_s1   <= 16'd0;  S_mask_cnt_s2   <= 16'd0;
-            S_bbox_x_s1     <= 16'd0;  S_bbox_x_s2     <= 16'd0;
-            S_bbox_y_s1     <= 16'd0;  S_bbox_y_s2     <= 16'd0;
+            S_obs_sync      <= 2'b00;
+            S_tap_px_hold   <= 12'd0;
+            S_mask_cnt_hold <= 16'd0;
+            S_bbox_x_hold   <= 14'd0;
+            S_bbox_y_hold   <= 12'd0;
         end
         else begin
-            S_tap_px_s1     <= S_tap_px_shift;     S_tap_px_s2     <= S_tap_px_s1;
-            S_mask_cnt_s1   <= S_mask_cnt_shift;   S_mask_cnt_s2   <= S_mask_cnt_s1;
-            S_bbox_x_s1     <= S_bbox_x;           S_bbox_x_s2     <= S_bbox_x_s1;
-            S_bbox_y_s1     <= S_bbox_y;           S_bbox_y_s2     <= S_bbox_y_s1;
+            // 两级同步 + 边沿检测：toggle 稳定后再一次性把整包数据搬进 hold
+            S_obs_sync <= {S_obs_sync[0], S_obs_toggle};
+            if(S_obs_sync[0] ^ S_obs_sync[1]) begin
+                S_tap_px_hold   <= S_tap_px_shift;
+                S_mask_cnt_hold <= S_mask_cnt_shift;
+                S_bbox_x_hold   <= S_bbox_x;
+                S_bbox_y_hold   <= S_bbox_y;
+            end
+        end
+    end
+
+    // A/G（曝光/增益）来自 24 MHz 域，先在像素域打一拍再送 logger：
+    //   ① 24m→像素域那条 set_max_delay 5.000 是**真实生效**的约束（这两个时钟在 SDC 里
+    //      属于同一个异步组，组内路径照常算），如果不打这一拍，路径会一直穿到 logger 的
+    //      模板组合逻辑里——M0 把行模板从 96 字节加长到 152 字节后，这条路径实测 4.668 ns，
+    //      slack 只剩 0.268 ns，成了全设计最差 setup；
+    //   ② 打一拍后这条跨域路径只剩 FF→FF，模板逻辑落到像素域自己的 13.3 ns 预算里。
+    always @(posedge S_hdmi_pixel_clk or negedge S_hdmi_rst_n) begin
+        if(!S_hdmi_rst_n) begin
+            S_ae_px <= 16'd0;
+            S_ag_px <= 16'd0;
+        end
+        else begin
+            S_ae_px <= S_ae;
+            S_ag_px <= S_ag;
         end
     end
 
@@ -747,7 +777,8 @@ module design_top_wrapper (
   // KEY1（D5）：短按切 RAW/EDGE——M0 起也走模式寄存器，与 KEY4 同一条路，
   //   于是切换在相机帧首生效（README 第 5 节记的"切换瞬间短暂撕裂"随之消失）。
   // KEY4（C7）：短按开关游戏层，长按发一次一键示教请求。
-  key_event #(.CLK_HZ(75000000), .DEBOUNCE_MS(20), .LONG_MS(1000)) u_key1_event (
+  // KEY1 只需要短按：HAS_LONG=0 让长按计数器整块不生成（省 27 FF 与比较器）
+  key_event #(.CLK_HZ(75000000), .DEBOUNCE_MS(20), .LONG_MS(1000), .HAS_LONG(0)) u_key1_event (
       .I_clk  ( S_hdmi_pixel_clk ),
       .I_rst_n( S_hdmi_rst_n     ),
       .I_key  ( I_button[1]      ),
@@ -764,6 +795,10 @@ module design_top_wrapper (
       .O_long ( S_key4_long      ),
       .O_level(                  )
   );
+
+  // 显示帧同步脉冲（帧首 1 拍）：LED 的心跳与事件闪烁都从它派生，
+  // 比另开 25 位分频计数器省 30 多个触发器。
+  wire S_frame_strobe = S_hdmi_user & ~S_hdmi_user_1d;
 
   // PARAM_BUS：UART 命令 + 按键事件 + 拨码开关 → 参数寄存器（像素域唯一写口）
   uart_rx #(.CLK_HZ(75000000), .BAUD(115200)) u_uart_rx (
@@ -790,6 +825,7 @@ module design_top_wrapper (
       .I_key1_short    ( S_key1_short     ),
       .I_key4_short    ( S_key4_short     ),
       .I_key4_long     ( S_key4_long      ),
+      .I_frame_strobe  ( S_frame_strobe   ),
       .I_sw_raw        ( I_switch         ),
       .I_ext_we        ( S_cmd_we         ),
       .I_ext_addr      ( S_cmd_addr       ),
@@ -1038,7 +1074,8 @@ isp_top u_isp_top (
 .O_tap_px_shift  (S_tap_px_shift),
 .O_mask_cnt_shift(S_mask_cnt_shift),
 .O_bbox_x        (S_bbox_x),
-.O_bbox_y        (S_bbox_y)
+.O_bbox_y        (S_bbox_y),
+.O_status_toggle (S_obs_toggle)
   );
 
 
@@ -1269,8 +1306,8 @@ isp_top u_isp_top (
         .I_clk          ( S_hdmi_pixel_clk   ),
         .I_rst_n        ( S_hdmi_rst_n       ),
         .I_status       ( S_debug_status_bus ),
-        .I_ae           ( S_ae               ),
-        .I_ag           ( S_ag               ),
+        .I_ae           ( S_ae_px            ),
+        .I_ag           ( S_ag_px            ),
         .I_frame_cnt    ( S_frame_cnt_dbg    ),
         .I_nonzero_cnt  ( S_dbg_nonzero_hold ),
         .I_bright_cnt   ( S_dbg_bright_hold  ),
@@ -1284,10 +1321,10 @@ isp_top u_isp_top (
         // M0 追加的 8 个字段（见 debug_uart_logger.v 头部注释）
         .I_mode_word     ( S_mode_word         ),
         .I_edge_th       ( {5'b0, S_edge_th_csi} ),
-        .I_mask_cnt      ( S_mask_cnt_s2       ),
-        .I_bbox_x        ( S_bbox_x_s2         ),
-        .I_bbox_y        ( S_bbox_y_s2         ),
-        .I_tap_px        ( S_tap_px_s2         ),
+        .I_mask_cnt      ( S_mask_cnt_hold     ),
+        .I_bbox_x        ( {2'b0, S_bbox_x_hold} ),
+        .I_bbox_y        ( {4'b0, S_bbox_y_hold} ),
+        .I_tap_px        ( {4'b0, S_tap_px_hold} ),
         .I_ctrl_x        ( S_ctrl_up_x         ),
         .I_ctrl_y        ( S_ctrl_up_y         ),
         .O_tx           ( O_debug_tx         )

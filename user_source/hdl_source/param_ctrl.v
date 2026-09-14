@@ -34,6 +34,9 @@ module param_ctrl #(
     input  wire        I_key4_short,
     input  wire        I_key4_long,
 
+    // 显示帧同步脉冲（帧首 1 拍）：LED 心跳与事件闪烁都从帧计数派生
+    input  wire        I_frame_strobe,
+
     // 拨码开关（原始电平，内部同步 + 消抖）
     input  wire [3:0]  I_sw_raw,
 
@@ -193,26 +196,28 @@ module param_ctrl #(
     assign O_mode_word = {8'h00, O_game_mode, O_display_mode};
 
     // ---- 板载 4 个独立 LED ---------------------------------------------------
-    // {KEY4 事件闪 0.3 s, 心跳 ~1.1 Hz, game_mode 指示, display_mode 指示}
-    reg [24:0] S_hb_cnt;
-    reg [24:0] S_flash_cnt;
+    // {KEY4 事件闪 ~0.33 s, 心跳 ~0.9 Hz, game_mode 指示, display_mode 指示}
+    // 从显示帧计数派生（60 Hz）：位 5 每 32 帧翻转一次 ≈ 0.53 s，闪烁数 20 帧 ≈ 0.33 s。
+    reg [9:0] S_frame_cnt;
+    reg [4:0] S_flash_frames;
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
-            S_hb_cnt    <= 25'd0;
-            S_flash_cnt <= 25'd0;
+            S_frame_cnt    <= 10'd0;
+            S_flash_frames <= 5'd0;
         end
         else begin
-            S_hb_cnt <= S_hb_cnt + 1'b1;      // 位 24：75 MHz / 2^25 ≈ 0.45 s 翻转
+            if(I_frame_strobe)
+                S_frame_cnt <= S_frame_cnt + 1'b1;
 
             if(I_key4_short | I_key4_long)
-                S_flash_cnt <= 25'd22500000;  // 75 MHz × 0.3 s
-            else if(S_flash_cnt != 25'd0)
-                S_flash_cnt <= S_flash_cnt - 1'b1;
+                S_flash_frames <= 5'd20;
+            else if(I_frame_strobe && (S_flash_frames != 5'd0))
+                S_flash_frames <= S_flash_frames - 1'b1;
         end
     end
 
-    assign O_led = { (S_flash_cnt != 25'd0), S_hb_cnt[24],
+    assign O_led = { (S_flash_frames != 5'd0), S_frame_cnt[5],
                      (O_game_mode != 4'd0), O_display_mode[0] };
 
     // ---- 读回 ---------------------------------------------------------------

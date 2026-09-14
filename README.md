@@ -450,18 +450,21 @@ System.IO.Ports`（PowerShell 5.1 会先报 `ASSEMBLY_NOT_FOUND` 再继续跑）
 
 | 资源               | 用量    | 占比         | 说明                       |
 | ---------------- | ----- | ---------- | ------------------------ |
-| slices           | 13678 | **64.47%** | 器件共 21216 个 slice（M0 前是 13214 / 62.28%） |
-| LUT6             | 11355 | 53.52%     | TD 的 `#lut6` 口径（M0 前 10809） |
-| 触发器              | 15094 | 35.58%     | 分母 42432（每 slice 2 个 FF） |
+| slices           | 13511 | **63.68%** | 器件共 21216 个 slice（M0 前是 13214 / 62.28%） |
+| LUT6             | 11197 | 52.78%     | TD 的 `#lut6` 口径（M0 前 10809） |
+| 触发器              | 14663 | 34.56%     | 分母 42432（每 slice 2 个 FF） |
 | 分布式 RAM（占 slice） | 408   | —          | 296 LUTRAM + 112 SRL     |
 | ERAM             | 70    | 64.81%     | 还剩 38 块（已成新的约束项）          |
 | DSP              | 8     | 20.00%     | 还剩 32 个                  |
-| feedthrough      | 7021  | —          | 官方 720P 例程约 2400（M0 前 6767） |
-| final Setup WNS  | +654 ps | 0 违例      | M0 前是 +820 ps（门禁 ≥ +300 ps） |
+| feedthrough      | 6927  | —          | 官方 720P 例程约 2400（M0 前 6767） |
+| final Setup WNS  | +1084 ps | 0 违例     | M0 前是 +820 ps（门禁 ≥ +300 ps） |
 | final Hold WNS   | +20 ps  | 0 违例      | —                        |
 
-M0 新增的逻辑（四个插座 + 掩码统计 + 模式/参数/UART）合计约 +542 LUT6 / +838 FF、
-**ERAM 与 DSP 一个没多**；对照 11.4 的余量规则，到 85% 还剩约 3300 LUT6。
+M0 全部交付（四个插座 + 掩码统计 + 模式框架 + 在线调参 + 8 个 DBG 字段 + 引脚登记）净成本
+**+388 LUT6 / +297 slices / +407 FF / +160 feedthrough**，**ERAM 与 DSP 一个没多**；
+WNS 反而比 M0 之前高 264 ps。压这部分成本用的三轮手段（RTL 减法、A/G 打拍、布局参数）
+见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)《手势游戏 M0》阶段 5。对照 11.4 的余量规则，
+到 85% 还剩约 3300 LUT6。
 
 slice 的构成：408（分布式 RAM）+ 7059（带 LUT 的逻辑）+ 3342（加法器/进位链）+ 2405
 （只有 FF 的 slice）= 13214，其中 2405 个是打包开销，占 18.2%——比优化前（11.7%）高，
@@ -551,6 +554,20 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 - 想加功能又不想吃 slice 时，优先用富余的块资源：**ERAM 还剩 38 块（70/108 已用）、
   DSP 还剩 32 个**。“把逻辑换成 ERAM”这条路走通了两遍（Logo ROM、edge 行缓存），
   合计省下 3835 slices；但 ERAM 已经从 36% 用到 65%，**再搬存储要先算 ERAM 余量**。
+- **布局参数**（Run 目录 `phy_1/settings.cfg` 的 `set phyWildParams {...}`，换 worktree 时
+  由 `tools/new_worktree_runs.ps1` 从仓库模板带过去）现在是
+  `{place opt_timing high place max_fanout 250}`：
+  - `opt_timing high`（2026-09-12 加）把 TMDS 串行域那条 91% 走线的路径从 0.226 ns 拉到 1.12 ns；
+  - `max_fanout 250`（2026-09-14 参数实验）限制高扇出网的扇出（默认 999999 = 不限），
+    让 TD 拆开高扇出网络、长线变短，final Setup WNS 一次涨 228 ps、feedthrough 也小幅回落。
+  - 试过但**没采用**的：`place effort high`（feedthrough 反而 +95）、`place hfn_opt_effort high`
+    （WNS 掉到 +481 ps）、`max_fanout 120`（TMDS 域掉到 0.420 ns）、`route effort high`（无效）。
+    完整对比见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)《手势游戏 M0》阶段 5。
+- **TD 对"已声明为异步的时钟对"会直接忽略 `set_max_delay`**（`camera_to_dsi_display_exception.timing`
+  里标成 `Set Max Delay (Ignored)`）：`MIPI_RX_BYTE_CLK`（CSI）与 `HDMI_PIXEL_CLK` 是两个
+  异步组，所以这两个方向之间的路径**TD 根本不查**——验证手段只能是握手设计本身
+  （toggle 两级同步 + 数据先稳定、再整包捕获）。相反，24m 与像素域在**同一个组**里，
+  那里的路径照常按普通路径算，必须靠打拍/RTL 满足（A/G 进 logger 前就是靠这个修掉的）。
 
 ## 12. 手势游戏地基（M0 交付，2026-09-14）
 
@@ -569,6 +586,12 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 
 数据流顺序固定：**DDR → RENDER_SLOT → OSD 文字/Logo 层 → HDMI**。游戏层永远在文字层
 下面，安路 Logo 与状态字在任何模式下都盖不住（基础要求 4 天然满足）。
+
+**跨域通路怎么保证正确**：CSI↔像素域之间的时序 TD 一律不查（见 11.4 最后一条），所以
+这两条通路的正确性靠设计本身：①发送侧把数据和 toggle 同拍锁存——数据在 toggle 渡越之前
+就已经稳定；②接收侧先两级同步 toggle、再边沿检测，最后**整包捕获**数据（不做逐位同步，
+避免多位同时跳变时的混采）；③上板用 `DBG:` 的 `X`/`Y`（CTRL_SYNC 往返测试常数
+`0x00a5`/`0x00d3`）和 `S`（模式提交后的生效门限）验证。**再加跨域信号时照这三条做**。
 
 ### 12.2 地址表（M0 已落地 0x00~0x07）
 
