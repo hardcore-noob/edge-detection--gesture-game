@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Project Version="3" Minor="2" Path="D:/amd_project/ai_test/lab_ex4_integrated/lab_ex4_integrated/td_project">
+<Project Version="3" Minor="2" Path=".">
     <Project_Created_Time></Project_Created_Time>
     <TD_Encoding>UTF-8</TD_Encoding>
     <TD_Version>6.2.200067</TD_Version>

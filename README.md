@@ -251,11 +251,18 @@ worktree 后若没有 Run 目录，直接跑一条命令铺好：
 pwsh -NoProfile -File tools/new_worktree_runs.ps1
 ```
 
-它会从主 worktree 复制 `settings.cfg`、`camera_to_dsi_display.prj`、
-`camera_to_dsi_display.tcl`、`run.bat`（`phy_1` 另需 `.bitgen_param.f`）到
-`td_project/camera_to_dsi_display_Runs/` 下对应的目录，并**以 `.al` 的 `Source_Files`
-为唯一事实源**把缺失的源文件登记幂等补进两个 `prj`、确保 `phy_1/settings.cfg` 带着
-`set phyWildParams {place opt_timing high}`。新增 `.v` 之后跑 `-SyncOnly` 就只做登记同步。
+骨架来自**仓库内**的 `tools/run_skeleton/`（`settings.cfg`、`camera_to_dsi_display.prj`、
+`camera_to_dsi_display.tcl`、`run.bat`，`phy_1` 另加 `.bitgen_param.f`）——clone 下来就能用，
+不依赖任何机器上的其它 worktree；`run.bat` 里的 TD 路径按 `-TdPath`（默认 `D:\TangDynasty`）
+落地。脚本随后**以 `.al` 的 `Source_Files` 为唯一事实源**把缺失的源文件登记幂等补进两个
+`prj`、确保 `phy_1/settings.cfg` 带着布局参数（见 11.4 与 CHANGELOG《参数实验》）。新增
+`.v` 之后跑 `-SyncOnly` 就只做登记同步；想抄一台"已知可用"的 Run 目录时用
+`-SourceWorktree <路径>` 覆盖骨架源。
+
+**为什么骨架放 `tools/run_skeleton/` 而不是把 Run 目录纳入版本库**：TD 每次构建都会改写
+Run 目录里的 `settings.cfg` / `camera_to_dsi_display.prj`（时间戳、行尾、`CompileOrder`
+都会动），纳入版本库会让工作区每次构建后都变脏，而 `.prj` 正是"只能由一个人登记"的那个
+文件，最容易冲突。模板不参与 TD 读写，既进版本库又不脏。
 
 **新增源文件时（2026-09-12 起）**：新加的 `.v` 必须同时登记进
 `td_project/camera_to_dsi_display.al` 和两个 Run 目录的 `camera_to_dsi_display.prj`

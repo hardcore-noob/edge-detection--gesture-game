@@ -3,21 +3,34 @@
   为一台新的 worktree 铺好 TD Run 目录（syn_1 / phy_1），并把源文件登记同步到最新。
 
 .DESCRIPTION
-  Run 目录被 .gitignore 排除，新 worktree 必须从别处复制；历史上为此踩过两次坑：
+  Run 目录被 .gitignore 排除，新 worktree 必须重新生成；历史上为此踩过两次坑：
     1) 新加的 .v 漏登记进两个 camera_to_dsi_display.prj → 综合报 HDL-8007 black box
-       （eram_spram.v 就是这么丢的）；
+        （eram_spram.v 就是这么丢的）；
     2) phy_1/settings.cfg 缺 `set phyWildParams {place opt_timing high}` → 布局的时序
        优化退回默认 medium，final Setup WNS 从 +820 ps 掉到 +226 ps 量级。
-  本脚本把这两件事变成"每次都自动做"：从 -SourceWorktree 复制 Run 目录骨架文件，然后
-  以 td_project/camera_to_dsi_display.al 的 <Source_Files> 列表为唯一事实源，把两个
-  prj 里缺失的 user_source 条目幂等补齐（.al 里是 ../user_source/...，Run 目录在
-  td_project/.../syn_1/ 下，所以要用三跳 ../../../user_source/...）。以后新增模块只要
-  按规矩登记进 .al，跑一次 -SyncOnly 就同步到两个 Run 目录，不用手改 XML。
+  本脚本把这两件事变成"每次都自动做"：
+
+  * 骨架来自**仓库内**的 tools/run_skeleton/{syn_1,phy_1}/（settings.cfg、.prj、.tcl、
+    run.bat，phy_1 另加 .bitgen_param.f）——不依赖任何机器上的其它 worktree，clone 下来
+    就能用；run.bat 里的 __TD_PATH__ 会换成 -TdPath（默认 D:/TangDynasty）。
+  * 以 td_project/camera_to_dsi_display.al 的 <Source_Files> 列表为唯一事实源，把两个
+    prj 里缺失的 user_source 条目幂等补齐（.al 里是 ../user_source/...，Run 目录在
+    td_project/.../syn_1/ 下，所以要用三跳 ../../../user_source/...）。以后新增模块只要
+    按规矩登记进 .al，跑一次 -SyncOnly 就同步到两个 Run 目录，不用手改 XML。
+
+  为什么模板放 tools/ 而不是直接把 Run 目录纳入版本库：TD 每次构建都会改写 Run 目录里的
+  settings.cfg / .prj（时间戳、行尾、CompileOrder 都会动），纳入版本库会让工作区每次
+  构建后都变脏，而且 .prj 正是"只能由一个人登记"的那个文件，最容易冲突。模板在 tools/
+  下不参与 TD 读写，既进版本库又不脏。
 
 .PARAMETER SourceWorktree
-  从哪个已有 worktree 复制 Run 目录骨架文件。默认主 worktree（有已知可用的 Run 目录）。
-  只复制 settings.cfg / .prj / .tcl / run.bat（phy_1 另加 .bitgen_param.f），不复制
-  几 MB 的数据库与日志。
+  可选：从某个已有 worktree 的 Run 目录复制骨架（想抄一台"已知可用"的 Run 目录时用）。
+  不给就用仓库内的 tools/run_skeleton/。只复制 settings.cfg / .prj / .tcl / run.bat
+  （phy_1 另加 .bitgen_param.f），不复制几 MB 的数据库与日志。
+
+.PARAMETER TdPath
+  TangDynasty 安装路径，默认 D:\TangDynasty。用来替换骨架 run.bat 里的 __TD_PATH__，
+  并检查 td_commands_prompt.exe 是否存在。
 
 .PARAMETER SyncOnly
   不复制，只做登记同步与已知补丁检查。新增 .v 并登记进 .al 之后跑这个即可。
@@ -29,7 +42,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$SourceWorktree = 'D:\competition\example\lab_ex4_integrated\lab_ex4_integrated',
+    [string]$SourceWorktree = '',
+    [string]$TdPath = 'D:\TangDynasty',
     [switch]$SyncOnly
 )
 
@@ -42,6 +56,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $root    = Split-Path -Parent $PSScriptRoot
 $runsDir = Join-Path $root 'td_project\camera_to_dsi_display_Runs'
 $alPath  = Join-Path $root 'td_project\camera_to_dsi_display.al'
+$repoSkeleton = Join-Path $PSScriptRoot 'run_skeleton'
 
 $skeletonFiles = @{
     'syn_1' = @('settings.cfg', 'camera_to_dsi_display.prj', 'camera_to_dsi_display.tcl', 'run.bat')
@@ -63,20 +78,37 @@ if ($wantPaths.Count -eq 0) { throw "没从 $alPath 里解析出 user_source 条
 # ---- 2. 复制 Run 目录骨架 ------------------------------------------------------
 $copied = @()
 if (-not $SyncOnly) {
+    # 骨架源：显式给了 -SourceWorktree 就用那台 worktree，否则用仓库内的模板
+    $useExternal = ($SourceWorktree -ne '')
+    $srcRoot = if ($useExternal) { Join-Path $SourceWorktree 'td_project\camera_to_dsi_display_Runs' } else { $repoSkeleton }
+    $tdExe   = Join-Path $TdPath 'bin\td_commands_prompt.exe'
+    if (-not (Test-Path -LiteralPath $tdExe)) {
+        Write-Host "提示：$tdExe 不存在——run.bat 仍会按 -TdPath 生成，但本机跑不了 TD。" -ForegroundColor Yellow
+    }
+
     foreach ($dir in $skeletonFiles.Keys) {
-        $srcDir = Join-Path (Join-Path $SourceWorktree 'td_project\camera_to_dsi_display_Runs') $dir
+        $srcDir = Join-Path $srcRoot $dir
         $dstDir = Join-Path $runsDir $dir
-        if (-not (Test-Path -LiteralPath $srcDir)) { throw "源 Run 目录不存在：$srcDir" }
+        if (-not (Test-Path -LiteralPath $srcDir)) { throw "骨架源目录不存在：$srcDir" }
         if (-not (Test-Path -LiteralPath $dstDir)) {
             New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
         }
         foreach ($f in $skeletonFiles[$dir]) {
             $s = Join-Path $srcDir $f
-            if (-not (Test-Path -LiteralPath $s)) { throw "源文件缺失：$s" }
+            if (-not (Test-Path -LiteralPath $s)) { throw "骨架文件缺失：$s" }
             Copy-Item -LiteralPath $s -Destination (Join-Path $dstDir $f) -Force
             $copied += "$dir\$f"
         }
+
+        # run.bat 里的 TD 路径按 -TdPath 落地（模板里写的是 __TD_PATH__ 占位符）
+        $dstBat = Join-Path $dstDir 'run.bat'
+        $bat = [IO.File]::ReadAllText($dstBat)
+        if ($bat.IndexOf('__TD_PATH__') -ge 0) {
+            $bat = $bat.Replace('__TD_PATH__', ($TdPath -replace '\\', '/'))
+            [IO.File]::WriteAllText($dstBat, $bat, $utf8NoBom)
+        }
     }
+    $copied += "（骨架源：$(if ($useExternal) { $SourceWorktree } else { 'tools\run_skeleton' })）"
 }
 
 # ---- 3. 把 prj 里缺失的登记幂等补齐 -------------------------------------------
@@ -162,7 +194,7 @@ if (Test-Path -LiteralPath $phySettings) {
 
 # ---- 5. 汇报 ------------------------------------------------------------------
 if ($copied.Count -gt 0) {
-    Write-Host "已复制 Run 目录骨架（源：$SourceWorktree）：" -ForegroundColor Cyan
+    Write-Host "已复制 Run 目录骨架：" -ForegroundColor Cyan
     $copied | ForEach-Object { "  $_" }
 }
 foreach ($dir in $added.Keys) {
