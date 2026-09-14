@@ -277,3 +277,39 @@ Hold WNS +20 ps / 0 违例**，slices 16957（79.93%）、RAM 39、DSP 8。时�
 
 1. **时序余量对布线落点极敏感**：同一套逻辑从 +728 ps 到 +9 ps 都出现过，所以“这次能过”不等于“下次也能过”，改动后必须重新跑构建。
 2. **遇到余量薄，先看分时钟域余量和最紧路径的 net 占比**（`tools/build_td.ps1` 会打印），再决定是改逻辑还是改落点——`place opt_timing high` 那次纯靠落点把 375 MHz 域从 0.226 ns 拉到 1.120 ns，代价接近零。
+
+## 手势游戏 M0（2026-09-14）
+
+### 阶段 1：基线复现与存档（分支 `feat/m0-infra`）
+
+本 worktree（`D:\vibe coding_worktree\2190\lab_ex4_integrated`）开始时没有 Run 目录
+（被 `.gitignore` 排除），先用新写的 `tools/new_worktree_runs.ps1` 从主 worktree 复制
+骨架并同步登记，再跑 `pwsh -NoProfile -File tools/build_td.ps1`（syn 1m44s + phy 3m30s，
+一次通过、0 违例）复现基线：
+
+| 指标                          | 本次实测（2026-09-14） | 2026-09-13 复现值 | README §11.1 |
+| --------------------------- | --------------- | -------------- | ------------ |
+| slices                      | **13214（62.28%）** | 13214（62.28%）  | 一致           |
+| LUT6 / 触发器                  | 10809 / 14256   | 10809 / 14256  | 一致           |
+| 分布式 RAM（dram lut / shifter） | 296 / 112       | —              | 一致           |
+| ERAM / DSP                  | 70（64.81%）/ 8  | 70 / 8         | 一致           |
+| feedthrough                 | 6767            | 6767           | 一致           |
+| final Setup WNS             | **+820 ps**     | +820 ps        | 一致           |
+| final Hold WNS              | +20 ps          | +20 ps         | 一致           |
+
+最紧路径与上次同一条：`u_hdmi_mixer/S_x_2d_reg[2]` → `u_hdmi_mixer/O_hdmi_data_reg[8]`，
+15 级逻辑、cell 42% / net 58%。TD 的布局布线是确定性的，这次逐项复现正是证据。
+
+回退镜像（本地、被 `.gitignore` 排除）与校验和：
+
+- `tmp/m0-baseline/camera_to_dsi_display.bit`（1789547 B）
+  SHA256 `8A0C36C6F2CCC672A1BF16855ED42FBE3A48E50A608215B6352546086DB2CE1A`
+- `tmp/m0-baseline/camera_to_dsi_display_compress.bit`（1478281 B）
+  SHA256 `DCC307E91D70CB6F68F2C7C77A5AA15500C69DC7E209BC1E1538DB7FE0C8C581`
+- 同目录另存 `camera_to_dsi_display_phy.ts` / `_phy.area` / `_gate.area` 作为这次构建的原始证据。
+- git tag：`m0-baseline-13214`。
+
+**操作坑（写脚本时踩到）**：在交互式终端（PTY）里跑 `td_commands_prompt.exe`，流程
+跑完后 TD 会停在 `td >` 提示符不退出，`tools/build_td.ps1` 的 `Start-Process -Wait`
+就会一直等；此时给终端发一行 `exit` 即可让流程收尾并打印汇总。后台/重定向方式运行时
+stdin 是 EOF，没这个问题。

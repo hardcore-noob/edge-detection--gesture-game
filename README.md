@@ -227,16 +227,24 @@ D:\TangDynasty\bin\td_commands_prompt.exe D:/TangDynasty/scripts/DefaultFlow.tcl
 
 注意：Run 目录里的 `settings.cfg` 和 `camera_to_dsi_display.prj` 都用**相对路径**
 引用 `../../../user_source/`，所以编译的一定是**当前 worktree** 的源码。新建
-worktree 后若没有 Run 目录，先从已有 worktree 复制 `settings.cfg`、
-`camera_to_dsi_display.prj`、`camera_to_dsi_display.tcl`、`run.bat`
-（`phy_1` 另需 `.bitgen_param.f`）到 `td_project/camera_to_dsi_display_Runs/`
-下对应的目录，再从该目录运行上面的命令。
+worktree 后若没有 Run 目录，直接跑一条命令铺好：
+
+```powershell
+pwsh -NoProfile -File tools/new_worktree_runs.ps1
+```
+
+它会从主 worktree 复制 `settings.cfg`、`camera_to_dsi_display.prj`、
+`camera_to_dsi_display.tcl`、`run.bat`（`phy_1` 另需 `.bitgen_param.f`）到
+`td_project/camera_to_dsi_display_Runs/` 下对应的目录，并**以 `.al` 的 `Source_Files`
+为唯一事实源**把缺失的源文件登记幂等补进两个 `prj`、确保 `phy_1/settings.cfg` 带着
+`set phyWildParams {place opt_timing high}`。新增 `.v` 之后跑 `-SyncOnly` 就只做登记同步。
 
 **新增源文件时（2026-09-12 起）**：新加的 `.v` 必须同时登记进
 `td_project/camera_to_dsi_display.al` 和两个 Run 目录的 `camera_to_dsi_display.prj`
 （照抄相邻条目的 `<File Path=...>` + `CompileOrder`），否则综合时找不到模块。
 Run 目录被 `.gitignore` 排除，所以从别处复制 Run 目录时也要重新补这一条
-（`eram_spram.v` 就是这么加进去的）。
+（`eram_spram.v` 就是这么加进去的）。现在这一步由上面那条 `pwsh -NoProfile -File
+tools/new_worktree_runs.ps1 -SyncOnly` 自动完成：只要登记进 `.al`，两个 `prj` 会被补齐。
 
 **改 place / route 的流程参数时**：Run 目录的 `settings.cfg` 支持"通配参数"，流程脚本
 （`camera_to_dsi_display.tcl` 的 `prepare`）会把它展开成
