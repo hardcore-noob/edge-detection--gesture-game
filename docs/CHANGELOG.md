@@ -313,3 +313,46 @@ Hold WNS +20 ps / 0 违例**，slices 16957（79.93%）、RAM 39、DSP 8。时�
 跑完后 TD 会停在 `td >` 提示符不退出，`tools/build_td.ps1` 的 `Start-Process -Wait`
 就会一直等；此时给终端发一行 `exit` 即可让流程收尾并打印汇总。后台/重定向方式运行时
 stdin 是 EOF，没这个问题。
+
+### 阶段 2：3x3 窗口生成器拆分（重构，等价性）
+
+`edge_detect_96.v` 拆成两个模块，**端口、延迟、输出格式逐拍不变**（`isp_top` 的例化
+一个字都没改）：
+
+- 新增 `user_source/hdl_source/isp/edge_win_3x3_96.v`：灰度（`R/4+G/2+B/4`）→ 逐像素
+  `[1 2 1]/4` 平滑 → 3 块 48bit×320 ERAM 行轮转 → 6 列×3 行窗口 + 与之对齐的
+  `O_x/O_y/O_valid/O_user/O_last`；1 拍延迟。
+- `edge_detect_96.v` 只留 Sobel 级：消费窗口 + `I_thresh` + `EDGE_GAIN_SHIFT`，输出
+  与拆分前一致（总延迟仍是 2 拍，输出仍是列 4k-1..4k+2）。
+- **等价性论证**（逐拍映射）：`gray0..3`、`S_sm0..3`、`S_win_cur`、三块 `eram_spram`
+  实例、`mid_r/top_r` 的相位选择、以及原来第一个 `always` 块里的每一个赋值
+  （`x_grp/y_pos/row_phase/row_phase_d1/gray_h1,h2/sm_h1,h2/cur_r/x_r/y_r/valid_d1/...`）
+  都按原表达式照搬，只是搬到了新模块的端口上；Sobel 级只把 `top_r/mid_r/cur_r/x_r/y_r/valid_d1`
+  换成了对应端口名，没有动任何表达式与位宽。
+
+层次面积表（`syn_1/camera_to_dsi_display_rtl.area` 与 `phy_1/*_phy.area`）确认 ERAM
+归属正确：`u_edge_win_3x3_96` 下挂 `u_line_mem0/1/2` 三块 `eram_spram`（每块 2 个
+ERAM20K，合计 6 块），`u_edge_detect_96` 只剩纯逻辑（phy 级 `u_edge_win_3x3_96`
+119 LUT / 132 FF，`u_edge_detect_96` 合计 397 LUT / 174 FF）。
+
+重构后完整构建（2026-09-14 19:23 起，一次通过，0 违例）：
+
+| 指标                | 基线（tag `m0-baseline-13214`） | 重构后      | 变化    |
+| ----------------- | ------------------------- | -------- | ----- |
+| slices            | 13214（62.28%）             | 13217（62.30%） | +3    |
+| LUT6 / 触发器        | 10809 / 14256             | 10825 / 14270 | +16 / +14 |
+| ERAM / DSP        | 70 / 8                    | 70 / 8   | 0 / 0 |
+| feedthrough       | 6767                      | 6788     | +21   |
+| final Setup WNS   | +820 ps                   | **+621 ps** | −199 ps |
+| final Hold WNS    | +20 ps                    | +20 ps   | 0     |
+
+WNS 从 +820 ps 掉到 +621 ps 不是逻辑变多（只 +16 LUT），而是**最紧路径换了地方**：
+基线是 `u_hdmi_mixer/S_x_2d_reg[2] → O_hdmi_data_reg[8]`（15 级、net 58%），这次是
+`u_hdmi_tx/.../S_load_en_1d_reg → S_oddr_data_reg[0]`（0 级逻辑、net 89%，TMDS 串行域）。
+层次变了之后 TD 的落点跟着变，这在 README 第 9 节记过是常态；仍高于 M0 门禁的
++300 ps。
+
+**边缘质量证据按方案 c（不做逐像素对比）**：拆分是纯结构搬移 + 上表 + 层次面积表，
+再加上板后的 `DBG:` 计数器 A/B（同一固定文字目标、同光照、固定曝光，各采 10 行取中
+位数，要求 `N/B/C` 相对差 ≤1%、`M/L` 无数量级偏差）。上板结论由用户回填到本节；
+README 第 9 节那条"整幅边缘图数值对比"欠账据此改写成"降级为计数器级对比"。

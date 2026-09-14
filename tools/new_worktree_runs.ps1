@@ -87,32 +87,61 @@ foreach ($dir in $skeletonFiles.Keys) {
         throw "缺少 $prj —— 先不带 -SyncOnly 跑一次，把 Run 目录骨架复制过来"
     }
 
-    $text    = [IO.File]::ReadAllText($prj)
+    $text = [IO.File]::ReadAllText($prj)
+
+    # 已经登记过就不动它，且**必须按原样保留所在段落**：prj 里不同后缀的文件分属不同
+    # 段（.v/.sv 在 <Verilog>、.xml/.ipc 在 <IP_FILE>、.adc 在 <ADC_FILE>、.sdc 在
+    # <SDC_FILE>）。把 .xml 之类搬进 <Verilog> 会被 TD 拒绝，2026-09-14 的自愈逻辑
+    # 就是这么踩的坑——所以这里只做"缺什么补什么"，不移动已有条目。
     $missing = @()
     foreach ($p in $wantPaths) {
-        if ($text.IndexOf('<File Path="' + $p + '">') -lt 0) { $missing += $p }
+        $n = ([regex]::Matches($text, [regex]::Escape('<File Path="' + $p + '">'))).Count
+        if ($n -eq 0) { $missing += $p }
+        elseif ($n -gt 1) { throw "$prj 里 $p 登记了 $n 次，先手工去掉重复条目" }
     }
     if ($missing.Count -eq 0) { continue }
 
-    $nl  = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $idx = $text.IndexOf('</Source_Files>')
-    if ($idx -lt 0) { throw "$prj 里找不到 </Source_Files>，格式与预期不一致" }
+    # 新条目只可能是 Verilog 源（.v）：<Verilog> 段里逐条登记。放进 </Source_Files>
+    # 之前会落到 <IP_FILE> 段外，TD 报 `PRJ-8641 ERROR: XML tag File is invalid`。
+    $nonVerilog = @($missing | Where-Object { -not $_.EndsWith('.v') })
+    if ($nonVerilog.Count -gt 0) {
+        throw ("这些新条目不是 .v，脚本不知道它们该进哪一段，请手工登记：`n  " + ($nonVerilog -join "`n  "))
+    }
 
-    # 插在 </Source_Files> 那一行之前，保持 TD 自己的缩进风格。
-    $lineStart = $text.LastIndexOf($nl, $idx)
-    $lineStart = if ($lineStart -lt 0) { 0 } else { $lineStart + $nl.Length }
+    $nl     = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $vStart = $text.IndexOf('<Verilog>')
+    $vEnd   = $text.IndexOf('</Verilog>')
+    if ($vStart -lt 0 -or $vEnd -le $vStart) { throw "$prj 里找不到 <Verilog> 段，格式与预期不一致" }
+
+    $head = $text.Substring(0, $vStart)
+    $body = $text.Substring($vStart, $vEnd - $vStart).TrimEnd("`r", "`n", " ") + $nl
+    $tail = $text.Substring($vEnd)
+
+    # 版本段里每一个设计源条目都带 BelongTo + CompileOrder，两个 Attr 缺一不可：
+    # 只写 UsedInSyn/UsedInP&R 时 TD 不报具体原因，只说
+    # `PRJ-8640 ERROR: Open project file ... failed because of previous error(s)`
+    # （2026-09-14 用只做 open_project 的探针逐个变体试出来的）。
+    # CompileOrder 取现有最大值 +1 后逐条递增。
+    $maxOrder = 0
+    foreach ($m in [regex]::Matches($text, 'CompileOrder" Val="(\d+)"')) {
+        $v = [int]$m.Groups[1].Value
+        if ($v -gt $maxOrder) { $maxOrder = $v }
+    }
 
     $blocks = ''
     foreach ($p in $missing) {
+        $maxOrder++
         $blocks += "            <File Path=""$p"">$nl" +
                    "                <FileInfo>$nl" +
                    "                    <Attr Name=""UsedInSyn"" Val=""true""/>$nl" +
                    "                    <Attr Name=""UsedInP&R"" Val=""true""/>$nl" +
+                   "                    <Attr Name=""BelongTo"" Val=""design_1""/>$nl" +
+                   "                    <Attr Name=""CompileOrder"" Val=""$maxOrder""/>$nl" +
                    "                </FileInfo>$nl" +
                    "            </File>$nl"
     }
 
-    $newText = $text.Substring(0, $lineStart) + $blocks + $text.Substring($lineStart)
+    $newText = $head + $body + $blocks + $tail
     [IO.File]::WriteAllText($prj, $newText, $utf8NoBom)
     $added[$dir] = $missing
 }
