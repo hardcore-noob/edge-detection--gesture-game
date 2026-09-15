@@ -52,20 +52,27 @@ module recog_top (
     reg [19:0] S_tap_cnt;
     reg [15:0] S_tap_hold;
 
+    // **帧首必须与 I_tvalid 解耦**（2026-09-15 上板踩到）：awb.v 里 `assign O_tuser = I_tuser`
+    // 是**不带延迟直通**的（而 valid 是流水后的，中间还有行间空隙——同文件里
+    // `O_tlast = (valid_d1==0)&&(valid_d2==1)` 就是靠 valid 的空隙检测出每个行首的）。
+    // 所以 tuser 脉冲可能落在 valid=0 的拍上：如果把它闸在 valid 里，脉冲会被整帧吞掉，
+    // 计数与锁存永远不会发生（现象就是 U/P/Q/R 四个观测字段恒 0，而 X/Y 这种走 ctrl_sync
+    // 的通路照常正常）。
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             S_tap_cnt  <= 20'd0;
             S_tap_hold <= 16'd0;
         end
-        else if(I_raw_tvalid) begin
+        else begin
+            if(I_raw_tvalid && (S_tap_cnt != 20'hFFFFF))
+                S_tap_cnt <= S_tap_cnt + 1'b1;
+
             if(I_raw_tuser) begin
                 // 帧首：锁存上一帧的字数。像素数 = 字数×4，所以
                 // "像素数 >> 10" 就是 "字数 >> 8"（1280x720 → 230400 >> 8 = 900）。
                 S_tap_hold <= S_tap_cnt >> 8;
-                S_tap_cnt  <= 20'd1;
+                S_tap_cnt  <= 20'd0;
             end
-            else if(S_tap_cnt != 20'hFFFFF)
-                S_tap_cnt <= S_tap_cnt + 1'b1;
         end
     end
 
@@ -105,10 +112,11 @@ module recog_top (
     assign O_bbox_y         = {S_ymin[9:4],  S_ymax[9:4]};
 
     // 用边沿流（比 raw 流晚 2 拍）的帧首翻 toggle：此刻 tap 计数与掩码统计都已锁存。
+    // 同样**不能闸在 tvalid 上**——理由见上面 tap 计数器那段的注释。
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n)
             O_status_toggle <= 1'b0;
-        else if(I_edge_tvalid && I_edge_tuser)
+        else if(I_edge_tuser)
             O_status_toggle <= ~O_status_toggle;
     end
 

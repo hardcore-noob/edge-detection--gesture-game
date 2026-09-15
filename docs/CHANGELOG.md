@@ -530,3 +530,36 @@ SHA256 `C090D90A5BD164C81154A8B85A963032AEA6E11BD7AC38CC12B4CC4E692F0789`
 规划里"+0~100 LUT6"低估了——当时只算了"重构 + 插座"，把模式寄存器、在线调参、UART
 收发、参数寄存器文件、KEY4 长按、LED、8 个 DBG 字段都漏了。按 §2.5.3 的账本，这部分
 从总预算里扣掉即可；到 85% 仍有约 3300 LUT6 余量。
+
+### 阶段 6：观测字段恒 0——tuser 被错误地闸在 valid 里（2026-09-15 上板发现并修复）
+
+**现象**（用户上板抓的一行行 `DBG:`）：`F/A/G/T/N/B/C/M/L/D/E/W/V/K/S/X/Y` 全部正常，
+唯独 `U=P=Q=R=0000`。CTRL_SYNC 往返（`X/Y`）与模式提交（`K/S`）都对，说明 logger 的
+字段机制和跨域通路都没问题，问题出在 VIDEO_TAP 那一包。
+
+**根因**：`awb.v` 里 tuser 是**不带延迟直通**的（`assign O_tuser = I_tuser;`），而 valid
+是流水后的、并且行间有空隙——同一个文件里 `assign O_tlast = (valid_d1==0)&&(valid_d2==1)`
+就是靠 valid 的空隙检测出"每个行首"的。所以 tuser 脉冲经常落在 valid=0 的拍上。而我在
+`recog_top` 里把三处帧锁存**都闸在了 tvalid 上**：
+
+- toggle 写成 `I_edge_tvalid && I_edge_tuser` → 脉冲被吞 → toggle 不翻转 → 像素域的
+  "整包捕获"从不触发；
+- tap 写成 `if(I_raw_tvalid) … if(I_raw_tuser)` → 计数与锁存都不发生；
+- `mask_stats` 整块写成 `else if(I_valid)` → 帧首锁存与清零都不发生。
+
+三处叠加，`U/P/Q/R` 就恒为 0；而 `X/Y` 走 ctrl_sync（不经过这个闸门）所以照常正常——
+这正是把线索指向"闸门"而不是"数据"的关键。
+
+**修法**：帧锁存一律与 valid 解耦——toggle 只看 `tuser`；tap 的**计数按 valid、锁存按
+tuser**；`mask_stats` 的帧首分支移出 `if(I_valid)`（帧首那拍若同时有有效像素，仍按第 0 组
+累加，用 `S_new` 选择初值）。
+
+**教训**：这是典型"只有上板才暴露"的问题——构建、时序、资源全正常，`U=0x384` 的理论值也
+算得出来，但没有真机数据就发现不了；而且它不影响画面，只让观测字段失效，很容易被忽略。
+**新增任何帧级计数/锁存时，先把 tuser 与 valid 的相位关系确认清楚（见 README 第 12.4 节）。**
+
+构建（2026-09-15 09:46，一次通过、0 违例）：slices **13481（63.54%）**、LUT6 11192、
+feedthrough **6862**、ERAM 70 / DSP 8 不变、final Setup WNS **+876 ps**、Hold +20 ps。
+
+镜像：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`（1789547 B）
+SHA256 `5CA1FEB8CC387FBB7D7C3D3761B6C965EFCA683B595890A3259952CA672803DE`

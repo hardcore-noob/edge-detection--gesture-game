@@ -52,7 +52,9 @@ module mask_stats #(
     wire [2:0]  S_jsum  = (I_mask[1] ? 3'd1 : 3'd0) + (I_mask[2] ? 3'd2 : 3'd0) +
                           (I_mask[3] ? 3'd3 : 3'd0);
 
-    wire        S_new   = I_valid && I_user;             // 帧首
+    // 帧首**只认 I_user**、不闸 I_valid：上层流的 tuser 可能落在 valid 的空隙里
+    // （2026-09-15 上板踩到，详见 recog_top.v 里 tap 计数器那段注释）。
+    wire        S_new   = I_user;
     wire [10:0] S_cx    = S_new ? 11'd0 : x_grp;         // 当拍组号
     wire [10:0] S_cy    = S_new ? 11'd0 : y_pos;
     wire        S_xlast = (S_cx == IMG_WIDTH_GRP - 1);
@@ -83,44 +85,47 @@ module mask_stats #(
             O_sumy <= 29'd0;
             O_empty <= 1'b1;
         end
-        else if(I_valid) begin
+        else begin
             // 帧首：把上一帧的累加结果锁存到输出，再清零继续统计本帧。
+            // 放在 I_valid 之外——帧首那一拍可能没有有效像素。
             if(S_new) begin
                 O_cnt   <= a_cnt;
                 O_xmin  <= (a_cnt == 20'd0) ? 11'd0 : a_xmin;
-                O_xmax  <= a_xmax;
+                O_xmax  <= (a_cnt == 20'd0) ? 11'd0 : a_xmax;
                 O_ymin  <= (a_cnt == 20'd0) ? 11'd0 : a_ymin;
-                O_ymax  <= a_ymax;
+                O_ymax  <= (a_cnt == 20'd0) ? 11'd0 : a_ymax;
                 O_sumx  <= a_sumx;
                 O_sumy  <= a_sumy;
                 O_empty <= ~a_any;
+                a_cnt   <= 20'd0;
+                a_xmin  <= 11'h7FF;
+                a_xmax  <= 11'd0;
+                a_ymin  <= 11'h7FF;
+                a_ymax  <= 11'd0;
+                a_sumx  <= 31'd0;
+                a_sumy  <= 29'd0;
+                a_any   <= 1'b0;
+                x_grp   <= 11'd0;
+                y_pos   <= 11'd0;
             end
 
-            x_grp <= S_xlast ? 11'd0 : (S_cx + 11'd1);
-            y_pos <= S_xlast ? (S_cy + 11'd1) : S_cy;
+            if(I_valid) begin
+                x_grp <= S_xlast ? 11'd0 : (S_cx + 11'd1);
+                y_pos <= S_xlast ? (S_cy + 11'd1) : S_cy;
 
-            if(S_n != 3'd0) begin
-                a_cnt <= (S_new ? 20'd0 : a_cnt) + {17'b0, S_n};
+                if(S_n != 3'd0) begin
+                    a_cnt <= (S_new ? 20'd0 : a_cnt) + {17'b0, S_n};
 
-                if(S_new || (S_col_min < a_xmin)) a_xmin <= S_col_min;
-                if(S_new || (S_col_max > a_xmax)) a_xmax <= S_col_max;
-                if(S_new || (S_cy      < a_ymin)) a_ymin <= S_cy;
-                if(S_new || (S_cy      > a_ymax)) a_ymax <= S_cy;
+                    if(S_new || (S_col_min < a_xmin)) a_xmin <= S_col_min;
+                    if(S_new || (S_col_max > a_xmax)) a_xmax <= S_col_max;
+                    if(S_new || (S_cy      < a_ymin)) a_ymin <= S_cy;
+                    if(S_new || (S_cy      > a_ymax)) a_ymax <= S_cy;
 
-                a_sumx <= (S_new ? 31'd0 : a_sumx) +
-                          (S_n * S_col_base) + {28'b0, S_jsum};
-                a_sumy <= (S_new ? 30'd0 : a_sumy) + (S_n * S_cy);
-                a_any  <= 1'b1;
-            end
-            else if(S_new) begin
-                a_cnt  <= 20'd0;
-                a_xmin <= 11'h7FF;
-                a_xmax <= 11'd0;
-                a_ymin <= 11'h7FF;
-                a_ymax <= 11'd0;
-                a_sumx <= 31'd0;
-                a_sumy <= 29'd0;
-                a_any  <= 1'b0;
+                    a_sumx <= (S_new ? 31'd0 : a_sumx) +
+                              (S_n * S_col_base) + {28'b0, S_jsum};
+                    a_sumy <= (S_new ? 30'd0 : a_sumy) + (S_n * S_cy);
+                    a_any  <= 1'b1;
+                end
             end
         end
     end

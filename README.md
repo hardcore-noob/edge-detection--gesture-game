@@ -450,21 +450,21 @@ System.IO.Ports`（PowerShell 5.1 会先报 `ASSEMBLY_NOT_FOUND` 再继续跑）
 
 | 资源               | 用量    | 占比         | 说明                       |
 | ---------------- | ----- | ---------- | ------------------------ |
-| slices           | 13511 | **63.68%** | 器件共 21216 个 slice（M0 前是 13214 / 62.28%） |
-| LUT6             | 11197 | 52.78%     | TD 的 `#lut6` 口径（M0 前 10809） |
-| 触发器              | 14663 | 34.56%     | 分母 42432（每 slice 2 个 FF） |
+| slices           | 13481 | **63.54%** | 器件共 21216 个 slice（M0 前是 13214 / 62.28%） |
+| LUT6             | 11192 | 52.75%     | TD 的 `#lut6` 口径（M0 前 10809） |
+| 触发器              | 14661 | 34.55%     | 分母 42432（每 slice 2 个 FF） |
 | 分布式 RAM（占 slice） | 408   | —          | 296 LUTRAM + 112 SRL     |
 | ERAM             | 70    | 64.81%     | 还剩 38 块（已成新的约束项）          |
 | DSP              | 8     | 20.00%     | 还剩 32 个                  |
-| feedthrough      | 6927  | —          | 官方 720P 例程约 2400（M0 前 6767） |
-| final Setup WNS  | +1084 ps | 0 违例     | M0 前是 +820 ps（门禁 ≥ +300 ps） |
+| feedthrough      | 6862  | —          | 官方 720P 例程约 2400（M0 前 6767） |
+| final Setup WNS  | +876 ps | 0 违例      | M0 前是 +820 ps（门禁 ≥ +300 ps） |
 | final Hold WNS   | +20 ps  | 0 违例      | —                        |
 
 M0 全部交付（四个插座 + 掩码统计 + 模式框架 + 在线调参 + 8 个 DBG 字段 + 引脚登记）净成本
-**+388 LUT6 / +297 slices / +407 FF / +160 feedthrough**，**ERAM 与 DSP 一个没多**；
-WNS 反而比 M0 之前高 264 ps。压这部分成本用的三轮手段（RTL 减法、A/G 打拍、布局参数）
-见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)《手势游戏 M0》阶段 5。对照 11.4 的余量规则，
-到 85% 还剩约 3300 LUT6。
+**+383 LUT6 / +267 slices / +405 FF / +95 feedthrough**，**ERAM 与 DSP 一个没多**；
+WNS 反而比 M0 之前高 56 ps。压这部分成本用的手段（RTL 减法、A/G 打拍、布局参数、
+观测包整包捕获）见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)《手势游戏 M0》阶段 5、6。
+对照 11.4 的余量规则，到 85% 还剩约 3300 LUT6。
 
 slice 的构成：408（分布式 RAM）+ 7059（带 LUT 的逻辑）+ 3342（加法器/进位链）+ 2405
 （只有 FF 的 slice）= 13214，其中 2405 个是打包开销，占 18.2%——比优化前（11.7%）高，
@@ -622,6 +622,13 @@ W 03 0001      # 发一次一键示教请求（teach_cnt 加 1）
 ```
 
 ### 12.4 M0 上板自检清单
+
+> **tuser 与 valid 不同相（2026-09-15 上板踩到的坑）**：`awb.v` 里 tuser 是**直通**的
+> （`assign O_tuser = I_tuser;`），valid 是流水后的、而且行间有空隙（同文件里
+> `O_tlast = (valid_d1==0)&&(valid_d2==1)` 就是靠这个空隙检测行首）。所以 **tuser 脉冲
+> 经常落在 valid=0 的拍上**。任何帧级计数/锁存都不能写成 `if(tvalid && tuser)`，要
+> **计数按 valid、锁存按 tuser**；跨域的每帧 toggle 也只能看 tuser。M1 的每帧统计照这条做，
+> 否则会重演"观测字段恒 0、画面却完全正常"的坑（见 CHANGELOG《手势游戏 M0》阶段 6）。
 
 烧 `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit` 后逐项看：
 
