@@ -14,7 +14,7 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 2. `参考资料/SC500CS_数据手册_V1.8-整理.md`：摄像头寄存器、曝光/增益和图像配置。
 3. `参考资料/DS1300_PH1P_Datasheet.md`：PH1P 器件和 DDR/外设接口资料。
 4. `参考资料/TangDynasty_CLI编译流程.md`：TD 命令行综合、布局布线和 bitgen 流程。
-5. 回到本 README 的第 1～11 节，理解当前数据流、按键、边缘基线和已知风险；要查历史改动、实测数字或上板结论时看 `docs/CHANGELOG.md`。
+5. 回到本 README 的第 1～12 节，理解当前数据流、按键、边缘基线和已知风险；要查历史改动、实测数字或上板结论时看 `docs/CHANGELOG.md`。
 
 `参考资料/` 中的 PDF、PPTX 是原始资料；上面的 md 文件是便于 AI 阅读的整理版。
 如果 md 和原始资料存在冲突，以赛题原始文件和硬件手册为准，并在代码提交说明中
@@ -29,7 +29,7 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
   `data_96bit_to_128bit` 的依赖，改动前先读第 4 节。
 - **整条链路已从 1024x600 升级到 1280x720（720P），改造完成并已上板确认**（见第
   10 节）：摄像头寄存器表、PLL、HDMI 时序、ISP/边缘/OSD 参数和时序约束已一起改完，
-  TD 综合与布局布线通过（final Setup WNS +271ps），上板实测画面、RAW/EDGE 切换、
+  TD 综合与布局布线通过（当时 final Setup WNS +271 ps；最新数字见 11.1），上板实测画面、RAW/EDGE 切换、
   曝光按键和 OSD 全部合格。
 - **资源优化已完成（2026-09-12，已合并进 `main`）**：slices 从 16957（79.93%）压到
   **13214（62.28%）**、final Setup WNS 从 +242 ps 提到 **+820 ps**（都 0 违例），
@@ -37,7 +37,7 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
   余量规则见 11.4。
 - **当前工作方向（2026-09-13 起）：开发手势操控游戏** —— 在已经稳定的 720P 采集 →
   ISP/边缘 → OSD → HDMI 链路上，用摄像头画面识别手势并驱动一个能在 HDMI 上玩的小游戏
-  （按键只做兜底）。**M0（模块重构 + 四个插座 + 模式框架 + 在线调参）已完成**，
+  （手势是唯一游戏输入；KEY4 短按进/出模式、长按一键示教；KEY1~KEY3 保持基础功能）。**M0（模块重构 + 四个插座 + 模式框架 + 在线调参）已完成并合并进 `main`**（tag `m0-infra-done`），
   接口与地址表见第 12 节；下一步是 M1 融合掩码跟踪链路，识别支路直接填进
   `isp/recog_top.v`，不动顶层与插座。
 - 调整边缘参数时，用 `tools/read_debug_uart.ps1` 读 `DBG:` 日志做客观对比，不要只凭
@@ -48,7 +48,7 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 - 先执行 `git status`，不要覆盖或提交会话外产生的未提交改动。
 - `tmp/` 是本地临时诊断目录，不纳入提交；TD Run、bitstream、日志由 `.gitignore`
   排除。
-- 当前按键定义为：KEY1 切换 RAW/EDGE，KEY2 降低曝光，KEY3 提高曝光。
+- **新克隆 / 新 worktree 先跑 `pwsh -NoProfile -File tools/new_worktree_runs.ps1` 铺好 Run 目录再构建**（Run 目录不在版本库里；命令见第 6 节，四步上手见规划 §2.5.4）。
 - **任何 RTL / 约束改动后都要跑构建**（用户 2026-09-12 明确要求）：
   `pwsh -NoProfile -File tools/build_td.ps1` 一条命令走完综合 + 布局布线 +
   bitgen，末尾自动打印时序、资源占用和 bit 流路径；跑完要把 bitstream 路径与
@@ -171,7 +171,7 @@ KEY1 / KEY4 都在 HDMI 像素域里做 20 ms 消抖（`key_event.v`），KEY4 �
 - `data96_128` 的 128 位打包计数器不会被帧起始单独复位。
 
 任何进一步的数值“修正”都必须保持 `O_tuser` / `O_tlast` 与数据对齐，
-并用固定文字目标做整幅边缘图对比后再替换，不能只比较“是否能检测到边缘”。
+并用固定文字目标做对比后再替换（**M0 拍板：边缘质量按"方案 c 计数器级对比"**——同光照、固定曝光下 `DBG:` 的 `N/B/C` 相对差 ≤1%；逐像素对比需先补"抓一帧导出"通路，见规划 §3 M0），不能只比较“是否能检测到边缘”。
 
 ## 5. OSD 与画面状态
 
@@ -236,7 +236,7 @@ td_project/camera_to_dsi_display_Runs/phy_1
 完整流程：
 
 ```bat
-cd /d D:\competition\example\lab_ex4_integrated\lab_ex4_integrated\td_project\camera_to_dsi_display_Runs\syn_1
+cd /d <你的 worktree>\td_project\camera_to_dsi_display_Runs\syn_1
 D:\TangDynasty\bin\td_commands_prompt.exe D:/TangDynasty/scripts/DefaultFlow.tcl
 
 cd /d ..\phy_1
@@ -488,7 +488,7 @@ FIFO 观测增强（+227，把 `D/E/W/V` 加进 DBG 行）。每轮的做法、�
 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)《资源优化》。
 bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`
 
-### 11.2 横向对比（都在 `official_example/`，同一器件）
+### 11.2 横向对比（`official_example/` 是本地资料、**不在版本库**，同一器件）
 
 | 设计                                | slices | 占比     | LUT6  | FF    | 分布式 RAM slice |
 | --------------------------------- | ------ | ------ | ----- | ----- | ------------- |
