@@ -15,6 +15,7 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 3. `参考资料/DS1300_PH1P_Datasheet.md`：PH1P 器件和 DDR/外设接口资料。
 4. `参考资料/TangDynasty_CLI编译流程.md`：TD 命令行综合、布局布线和 bitgen 流程。
 5. 回到本 README 的第 1～12 节，理解当前数据流、按键、边缘基线和已知风险；要查历史改动、实测数字或上板结论时看 `docs/CHANGELOG.md`。
+6. **当前开发计划在 `docs/手势游戏实现路线规划.md`**（里程碑 M1~M6、成员 A/B/C 的文件所有权、四个插座、资源账本、上手四步）——动手前先读它；接口细则以本 README 第 12 节为准。
 
 `参考资料/` 中的 PDF、PPTX 是原始资料；上面的 md 文件是便于 AI 阅读的整理版。
 如果 md 和原始资料存在冲突，以赛题原始文件和硬件手册为准，并在代码提交说明中
@@ -49,6 +50,7 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 - `tmp/` 是本地临时诊断目录，不纳入提交；TD Run、bitstream、日志由 `.gitignore`
   排除。
 - **新克隆 / 新 worktree 先跑 `pwsh -NoProfile -File tools/new_worktree_runs.ps1` 铺好 Run 目录再构建**（Run 目录不在版本库里；命令见第 6 节，四步上手见规划 §2.5.4）。
+- 当前按键/开关：KEY1 切 RAW/EDGE、KEY2/KEY3 调曝光（基础功能，任何时候可用）；KEY4 短按进/出手势模式、长按 ≥1 s 一键示教；SW1~SW4 直接给边缘门限档位；串口在线调参见第 12.3 节。
 - **任何 RTL / 约束改动后都要跑构建**（用户 2026-09-12 明确要求）：
   `pwsh -NoProfile -File tools/build_td.ps1` 一条命令走完综合 + 布局布线 +
   bitgen，末尾自动打印时序、资源占用和 bit 流路径；跑完要把 bitstream 路径与
