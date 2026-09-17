@@ -178,16 +178,24 @@ foreach ($dir in $skeletonFiles.Keys) {
     $added[$dir] = $missing
 }
 
-# ---- 4. 已知补丁：phy_1 的 place opt_timing high ------------------------------
+# ---- 4. 已知补丁：phy_1 的布局参数（必须同时含 opt_timing high 与 max_fanout 250）----
+# 这里以前是"只要出现 phyWildParams 就算过"，于是只带 opt_timing high 的旧值会被放过，
+# 构建出来 final Setup WNS 只有 +654 ps 而不是 +876 ps（2026-09-17 在本 worktree 踩到）。
 $phySettings = Join-Path $runsDir 'phy_1\settings.cfg'
 $patched     = $false
+$wantWild    = 'set phyWildParams {place opt_timing high place max_fanout 250}'
 if (Test-Path -LiteralPath $phySettings) {
     $cfg = [IO.File]::ReadAllText($phySettings)
-    if ($cfg.IndexOf('phyWildParams') -lt 0) {
-        $cfg = $cfg.TrimEnd("`r", "`n") + "`r`n" +
-               "# 布局参数（2026-09-14 参数实验选出的最优组合，见 CHANGELOG《参数实验》）：`r`n" +
-               "#   opt_timing high + max_fanout 250`r`n" +
-               "set phyWildParams {place opt_timing high place max_fanout 250}`r`n"
+    if ($cfg.IndexOf($wantWild) -lt 0) {
+        if ($cfg.IndexOf('phyWildParams') -ge 0) {
+            # 有这一行但不全：按值替换（保留文件其余内容与行尾风格）
+            $cfg = [regex]::Replace($cfg, 'set\s+phyWildParams\s*\{[^}]*\}', $wantWild)
+        } else {
+            $cfg = $cfg.TrimEnd("`r", "`n") + "`r`n" +
+                   "# 布局参数（2026-09-14 参数实验选出的最优组合，见 CHANGELOG《参数实验》）：`r`n" +
+                   "#   opt_timing high + max_fanout 250`r`n" +
+                   $wantWild + "`r`n"
+        }
         [IO.File]::WriteAllText($phySettings, $cfg, $utf8NoBom)
         $patched = $true
     }
@@ -202,7 +210,7 @@ foreach ($dir in $added.Keys) {
     Write-Host "已补登记 $dir（$($added[$dir].Count) 条）：" -ForegroundColor Yellow
     $added[$dir] | ForEach-Object { "  $_" }
 }
-if ($patched) { Write-Host '已给 phy_1/settings.cfg 补上 set phyWildParams {place opt_timing high}' -ForegroundColor Yellow }
+if ($patched) { Write-Host '已修正 phy_1/settings.cfg 的布局参数（opt_timing high + max_fanout 250）' -ForegroundColor Yellow }
 
 $total = 0
 foreach ($dir in $skeletonFiles.Keys) {
