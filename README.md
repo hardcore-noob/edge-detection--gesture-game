@@ -584,8 +584,9 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 | VIDEO_TAP   | CSI ~59 MHz | 96bit/4px + tuser/tlast/tvalid，取点在 `isp_top` 内部、RAW/EDGE **MUX 之前**（EDGE 模式下彩色流也在）   | `isp/recog_top.v`（M1 往这里填肤色/运动/融合掩码与跟踪）                        |
 | RENDER_SLOT | 像素域 75 MHz  | DDR 读回 → 游戏层 → OSD；边界 **0 拍组合**（插寄存器会让 OSD 错开一像素）                                    | `game/game_top.v`（M3 往这里填逐像素判属渲染）                              |
 | PARAM_BUS   | 像素域         | 写 `param_we / param_addr[7:0] / param_data[15:0]`（单拍脉冲），读回 `param_addr → param_data` | `param_ctrl.v`（唯一写口；源优先级 UART > KEY4 长按 > KEY4 短按 > KEY1 > 拨码） |
-| CTRL_SYNC   | 跨域          | 每帧一个字 `{x[10:0], y[10:0], state[3:0]}`，上下行各一条                                        | `isp/ctrl_sync.v`（toggle 握手 + 两级同步）                            |
+| CTRL_SYNC   | 跨域          | 每帧一个字 **26 位**，"每帧一次"由 toggle 表示。**下行 = 形状描述子** `{shape_type[2:0], progress[7:0], hole_w[5:0], hole_h[5:0], variant[2:0]}`；**上行 = 判定结果** `{verdict[1:0], viol_cnt[11:0], fill[11:0]}`。墙/洞坐标由共享 `shape_gen.v` 两域各算一次，不传 x/y/w/h | `isp/ctrl_sync.v`（toggle 握手 + 两级同步）+ `hdl_source/shape_gen.v`（M4c 新建，共享只读） |
 
+> M0 时 CTRL_SYNC 二字是往返测试常数；M4c 起按上表改为"形状描述子 / 判定结果"，`DBG:` 的 `X`/`Y` 字段随之改语义。
 数据流顺序固定：**DDR → RENDER_SLOT → OSD 文字/Logo 层 → HDMI**。游戏层永远在文字层
 下面，安路 Logo 与状态字在任何模式下都盖不住（基础要求 4 天然满足）。
 
