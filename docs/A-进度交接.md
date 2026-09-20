@@ -73,3 +73,48 @@
   - `.../camera_to_dsi_display_compress.bit`，1481225 B，sha256 前 16 位 `95A127F2FFD366B8`
 
 **结论**：A 线 worktree 环境可用，基线可信，可以开始写 M1 的 RTL。
+
+## 2026-09-20（第三次追加）　Step 1 开工包（交接给执行对话）
+
+**角色分工（2026-09-20 定）**：宏观计划 / 评审 / 与队友同步 → 主对话；
+具体写码、编译、上板 → **M0 执行对话**。**两边不要同时改 `.worktrees/m1`**；
+执行对话每轮收工往本文件**追加**进度。
+
+### Step 1a：肤色掩码（本次要写的代码）
+
+1. **新增 `user_source/hdl_source/isp/skin_mask.v`**
+   - 输入 `I_tdata[95:0]`（AWB 彩色流，4 像素/拍），输出 `O_mask[3:0]`
+   - 每像素：`Y = R/4+G/2+B/4`（位切片加法，**不用 DSP**）；`d1 = B−Y`、`d2 = R−Y`（有符号 9 位）
+   - 判定：`d1 ∈ [D1_MIN, D1_MAX] && d2 ∈ [D2_MIN, D2_MAX]` → 该像素算肤色
+   - 第一版阈值取**偏宽**：`D1_MIN=−100 / D1_MAX=−5 / D2_MIN=0 / D2_MAX=70`
+     （这几个是参数，Step 1b 打通后再改成运行时可调）
+   - 纯组合（0 拍延迟）、CSI 域、不跨域、**0 ERAM / 0 DSP**；位序与 `mask_stats` 对齐（bit0 = 一拍里最左的像素字段）
+2. **改 `user_source/hdl_source/isp/recog_top.v`**
+   - 加 `parameter MASK_SRC`（`0`=edge、`1`=skin，默认 `1`）
+   - 实例化 `skin_mask`（接 `I_raw_tdata`）；`mask_stats` 的 `I_mask/I_valid/I_user/I_last` 按 `MASK_SRC` 选源
+     （skin 用 `I_raw_*`，edge 用 `I_edge_*`，便于 A/B 对比同一套 P/Q/R 读数）
+   - ⚠️ `I_raw_tuser` 是**直通**的、可能落在 `valid=0` 的拍上；`mask_stats` 已按"帧首只认 user、不闸 valid"实现，
+     **外面不要再加 `valid && user`**
+3. **编译**：`pwsh -NoProfile -File tools/build_td.ps1` → 记录 slices/LUT6/ERAM/DSP/WNS/feedthrough 相对基线的增量 → 出 bit
+
+**已知小差异（先接受，M2 再对齐）**：`mask_stats` 的列映射是按边缘流 `4k-1..4k+2` 写的，
+而我们喂 RAW 流的像素是 `4k..4k+3`，名义上 x 有 1 像素偏移（16 像素粒度下不影响 Step 1 结论）。
+
+### Step 1b：给 C 的参数通道申请（可直接转给 C）
+
+> **申请：A 段阈值在线可调**
+> `param_ctrl` 里 A 段（`0x40~0x7F`）的肤色 d1/d2 上下限、运动阈值、quiet_th，需要经"帧首提交"送到 CSI 域
+> （与现有 `edge_th` 走 `mode_sync` 的机制相同）。建议提交字 **32 位**（4×8 位），帧首整包提交，
+> 接收侧只消费稳定值。地址分配建议：`0x40/0x41` = d1_min/d1_max，`0x42/0x43` = d2_min/d2_max，
+> `0x44/0x45` = motion_th/quiet_th。
+
+### Step 1 上板验收矩阵（执行对话出 bit 后，主对话负责分析数据）
+
+| # | 场景 | 期望 |
+|---|------|------|
+| 1 | 手入镜（近景，约占画面 1/4） | `P` 明显抬升；`Q/R` 框住手 |
+| 2 | 只有脸 | `P` 也会抬升（肤色！）——正是 Step 2 运动掩码要解决的问题 |
+| 3 | 只有背景（木桌 / 白墙） | `P` 尽量小 |
+| 4 | 手 + 脸同框 | `P` 明显大于单目标，`Q/R` 变宽 |
+
+每组录 20 行 `DBG:`，日志贴回交接文档或发回主对话。
