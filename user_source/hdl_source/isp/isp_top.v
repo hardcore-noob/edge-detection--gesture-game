@@ -8,6 +8,7 @@ module isp_top #(
     input           I_rst_n,
     input           I_alg_sel,
     input  [10:0]   I_edge_th,
+    input  [25:0]   I_mode_committed,   // mode_sync 的提交字（CSI 域）：透传给 recog_top（M1 用它选算法）
     input           I_tlast,
     input           I_tuser,
     input  [39:0]   I_tdata,
@@ -168,6 +169,7 @@ module isp_top #(
         .I_edge_tuser    (edge_O_tuser),
         .I_edge_tlast    (edge_O_tlast),
         .I_edge_tvalid   (edge_O_tvalid),
+        .I_mode_word     (I_mode_committed),
         .I_ctrl_rx_data  (I_ctrl_rx_data),
         .I_ctrl_rx_valid (I_ctrl_rx_valid),
         .O_ctrl_tx_data  (O_ctrl_tx_data),

@@ -14,9 +14,17 @@
 //   0x05 key4_evt[7:0]      RO   {长按次数[3:0], 短按次数[3:0]}
 //   0x06 param_wr_cnt[15:0] RO   成功写入次数（UART 命令是否真的落地，看这个）
 //   0x07 mode_commit_cnt    RO   模式在相机帧首提交的次数
+//   0x08 recog_algo[3:0]    R/W  0 = 识别停 / 1 = 手势识别（M1 消费）
+//                               KEY4 短按进 game_mode 时自动置 1、退出置 0
 //
 // 模式值本身要跨到 CSI 域、在帧首提交（见 mode_sync），所以这里输出的 display_mode /
 // edge_th_sel 是"请求值"，DBG 行的 S 字段显示的是提交后的生效值。
+
+//
+// 跨域判据（2026-09-17 定）：**算法类**（display_mode / game_mode / recog_algo）经 mode_sync
+// 在相机帧首提交到 CSI 域（26 位字，布局见 mode_sync 头注释）；**系数类**（肤色上下限 /
+// 运动阈值 / quiet_th）**不走这里**——A 的阈值由 CSI 域自己的示教逻辑用 min/max 包络
+// 产生并保存，A 段 0x40~0x7F 只保留"读回来复盘"的语义。
 //
 // 延迟：写 1 拍生效；拨码消抖 20 ms。
 // 时钟域：像素域单时钟；按键/拨码是异步输入，内部两级同步。
@@ -55,6 +63,7 @@ module param_ctrl #(
     // 对外状态
     output reg  [3:0]  O_display_mode,
     output reg  [3:0]  O_game_mode,
+    output reg  [3:0]  O_recog_algo,
     output reg  [3:0]  O_edge_th_sel,
     output wire [10:0] O_edge_th,
     output reg  [15:0] O_teach_cnt,
@@ -142,6 +151,7 @@ module param_ctrl #(
         if(!I_rst_n) begin
             O_display_mode    <= 4'd0;
             O_game_mode       <= 4'd0;
+            O_recog_algo      <= 4'd0;
             O_edge_th_sel     <= 4'd0;
             O_teach_cnt       <= 16'd0;
             O_param_wr_cnt    <= 16'd0;
@@ -166,6 +176,10 @@ module param_ctrl #(
                         O_game_mode    <= S_wdata[3:0];
                         O_param_wr_cnt <= O_param_wr_cnt + 1'b1;
                     end
+                    8'h08: begin
+                        O_recog_algo   <= S_wdata[3:0];
+                        O_param_wr_cnt <= O_param_wr_cnt + 1'b1;
+                    end
                     8'h02: begin
                         O_edge_th_sel  <= S_wdata[3:0];
                         O_param_wr_cnt <= O_param_wr_cnt + 1'b1;
@@ -178,6 +192,11 @@ module param_ctrl #(
                     default: ;   // 未登记地址：忽略
                 endcase
             end
+
+            // KEY4 短按：进 game_mode 就用默认手势算法（1），退出就停识别（0，省功耗）。
+            // 同一拍 UART 显式写 0x08 时不覆盖——UART 优先级最高。
+            if(I_key4_short && !(I_ext_we && (I_ext_addr == 8'h08)))
+                O_recog_algo <= O_game_mode[0] ? 4'd0 : 4'd1;
 
             if(I_key4_short)
                 O_key4_evt[3:0] <= O_key4_evt[3:0] + 1'b1;
@@ -193,7 +212,7 @@ module param_ctrl #(
     assign O_edge_th = 11'd16 + ({7'b0, O_edge_th_sel} << 2);
 
     // 给 OSD / DBG 的模式字：{8'h0, game_mode[3:0], display_mode[3:0]}
-    assign O_mode_word = {8'h00, O_game_mode, O_display_mode};
+    assign O_mode_word = {4'h00, O_recog_algo, O_game_mode, O_display_mode};   // 请求侧快照；DBG 的 K 用已提交值
 
     // ---- 板载 4 个独立 LED ---------------------------------------------------
     // {KEY4 事件闪 ~0.33 s, 心跳 ~0.9 Hz, game_mode 指示, display_mode 指示}
@@ -231,6 +250,7 @@ module param_ctrl #(
             8'h05:   O_rd_data = {8'b0, O_key4_evt};
             8'h06:   O_rd_data = O_param_wr_cnt;
             8'h07:   O_rd_data = O_mode_commit_cnt;
+            8'h08:   O_rd_data = {12'b0, O_recog_algo};
             default: O_rd_data = 16'hFFFF;
         endcase
     end
