@@ -326,7 +326,7 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 2026-09-14（手势游戏 M0）行尾再追加 8 个字段，全部 16 位 HEX，行 96 → 152 字节
 （115200 下一行约 13.2 ms，仍远小于 1 s 周期）：
 
-- `K`：模式字 `{8'h0, game_mode[3:0], display_mode[3:0]}`——例 `K=0001` = EDGE、游戏层关
+- `K`：**已提交的**模式字 `{4'h0, recog_algo[3:0], game_mode[3:0], display_mode[3:0]}`（`recog_algo`：0 = 识别停 / 1 = 手势识别）。例 `K=0111` = display_mode=1（EDGE）+ game_mode=1（游戏层开）+ recog_algo=1（手势识别开）。它取自 mode_sync 的**回执**（走 ctrl_sync 握手同步回像素域），所以"K 变了"就证明跨域提交成功；请求值看 UART 读回。
 - `S`：**已生效**的边缘门限（提交到 CSI 域之后的值，默认 `0x0010`；拨码或串口改档位后看这个）
 - `P`：掩码统计器的像素数 >> 4（M0 的掩码源是"边缘非零"，所以与 `N>>4` 同量级）
 - `Q`：`{x_min/16, x_max/16}`（掩码包围盒列范围，各 8 位）
@@ -585,6 +585,7 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 | RENDER_SLOT | 像素域 75 MHz  | DDR 读回 → 游戏层 → OSD；边界 **0 拍组合**（插寄存器会让 OSD 错开一像素）                                    | `game/game_top.v`（M3 往这里填逐像素判属渲染）                              |
 | PARAM_BUS   | 像素域         | 写 `param_we / param_addr[7:0] / param_data[15:0]`（单拍脉冲），读回 `param_addr → param_data` | `param_ctrl.v`（唯一写口；源优先级 UART > KEY4 长按 > KEY4 短按 > KEY1 > 拨码） |
 | CTRL_SYNC   | 跨域          | 每帧一个字 **26 位**，"每帧一次"由 toggle 表示。**下行 = 形状描述子** `{shape_type[2:0], progress[7:0], hole_w[5:0], hole_h[5:0], variant[2:0]}`；**上行 = 判定结果** `{verdict[1:0], viol_cnt[11:0], fill[11:0]}`。墙/洞坐标由共享 `shape_gen.v` 两域各算一次，不传 x/y/w/h | `isp/ctrl_sync.v`（toggle 握手 + 两级同步）+ `hdl_source/shape_gen.v`（M4c 新建，共享只读） |
+| MODE_SYNC（M0 已建，2026-09-17 扩到 26 位） | 像素域 → CSI 域 | 只在值变化时发一次、在**相机帧首**提交：`bit[3:0] edge_th_sel` / `bit[7:4] display_mode` / `bit[11:8] game_mode` / `bit[15:12] recog_algo` / `bit[19:16] teach_cnt[3:0]`。CSI 域消费直接用提交寄存器；像素域（OSD 状态字、DBG 的 K）必须用**回执** | `mode_sync.v`（下行请求 + 上行回执，两条 `ctrl_sync`） |
 
 > M0 时 CTRL_SYNC 二字是往返测试常数；M4c 起按上表改为"形状描述子 / 判定结果"，`DBG:` 的 `X`/`Y` 字段随之改语义。
 数据流顺序固定：**DDR → RENDER_SLOT → OSD 文字/Logo 层 → HDMI**。游戏层永远在文字层
@@ -596,7 +597,7 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 避免多位同时跳变时的混采）；③上板用 `DBG:` 的 `X`/`Y`（CTRL_SYNC 往返测试常数
 `0x00a5`/`0x00d3`）和 `S`（模式提交后的生效门限）验证。**再加跨域信号时照这三条做**。
 
-### 12.2 地址表（M0 已落地 0x00~0x07）
+### 12.2 地址表（0x00~0x08）
 
 | 地址   | 名称                   | 读写  | 说明                                      |
 | ---- | -------------------- | --- | --------------------------------------- |
@@ -608,8 +609,12 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 | 0x05 | `key4_evt[7:0]`      | RO  | `{长按次数[3:0], 短按次数[3:0]}`                |
 | 0x06 | `param_wr_cnt[15:0]` | RO  | 成功写入次数——串口命令有没有落地，看这个                   |
 | 0x07 | `mode_commit_cnt`    | RO  | 模式在相机帧首提交的次数                            |
+| 0x08 | `recog_algo[3:0]`    | R/W | 0 = 识别停 / 1 = 手势识别（M1 消费）。KEY4 短按进 game_mode 时自动置 1、退出置 0；也可串口 `W 08 0001` 单独开 |
 
 0x40~0x7F 归 A（视觉）、0x80~0xBF 归 B（游戏）、0xC0~0xFF 归 C（集成）；用之前先在
+
+
+> **跨域判据（2026-09-17 定）**：**算法类**（0x00 display_mode / 0x01 game_mode / 0x08 recog_algo）经 mode_sync 的 26 位提交字在**相机帧首**一起提交到 CSI 域；**系数类**（0x40~0x7F 段的肤色上下限 / 运动阈值 / quiet_th）**不跨域**——A 的阈值由 CSI 域的示教逻辑用 min/max 包络产生并保存，A 段寄存器只保留"读回来复盘"的语义，别指望用 UART 改它能影响识别。
 本节登记。
 
 ### 12.3 串口在线调参
@@ -641,4 +646,5 @@ W 03 0001      # 发一次一键示教请求（teach_cnt 加 1）
 4. `P` 与 `N>>4` 同量级；`Q`/`R` 满足 x_min≤x_max、y_min≤y_max（包围盒各 16 像素粒度）。
 5. 拨 SW1~SW4：`S` 随之变化（16/20/24/…），EDGE 画面灵敏度肉眼可见地变。
 6. 串口发 `W 02 0003`：`S` 变 `001c`、`param_wr_cnt` 自增（不发命令时它不动）。
-7. KEY4 短按：`K` 的 game_mode 位翻转、状态字变 `GES`、LED 同步；长按 ≥1 s：`teach_cnt` 增 1。
+7. KEY4 短按：`K` 的 game_mode 位翻转、**recog_algo 位同时 0↔1**（进游戏置 1 = 手势识别、退出归 0）、状态字变 `GES`、LED 同步；注意 `K` 是**已提交值**，会在**下一个相机帧首**才变（约 1 帧延迟）。长按 ≥1 s：`teach_cnt` 增 1。
+8. 串口 `W 08 0001`：`K` 的 algo 位变 1——**不进游戏模式也能单独开识别**，M1 调算法时用这条。

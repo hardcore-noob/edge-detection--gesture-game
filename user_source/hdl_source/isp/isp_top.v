@@ -2,28 +2,13 @@ module isp_top #(
     // 边缘显示增益（显示灰度 = clamp((|gx|+|gy|) << shift)）。门限本身从 M0 起是
     // **运行时**的（I_edge_th，由像素域的模式寄存器在相机帧首提交过来），不再编译期
     // 写死。增益 0 让饱和点落在 Δ≈64；TH=16 对应"Δ≥4 灰阶就可见"。
-    parameter integer EDGE_GAIN_SHIFT = 0,
-
-    // 调试预览：1 = 把识别支路的**实时掩码**用红色叠在 RAW 画面上（命中像素涂红，
-    // 其余保持摄像头画面），用来在 HDMI 上直接看 Step1/Step2 的掩码效果。
-    // 0 = 正常画面（正式 bit 用这个）。参数为 0 时下面的 mux 会被综合整段消掉。
-    parameter integer MASK_PREVIEW = 0,
-
-    // 叠加门控：**只认 I_recog_en**（= KEY4 的游戏模式，由 C 经 mode_sync 接过来）。
-    // 2026-09-23 用户明确：KEY1 归边缘检测，不能拿 EDGE 模式当识别开关（合并时会冲突）。
-    // 因此这个参数固定 0；调试看效果请用 MASK_PREVIEW=1 的调试图。
-    parameter integer OVL_GATE_MODE = 0
+    parameter integer EDGE_GAIN_SHIFT = 0
 )(
     input           axi4s_video_aclk,
     input           I_rst_n,
     input           I_alg_sel,
     input  [10:0]   I_edge_th,
-
-    // 识别/叠加使能（由顶层接 game_mode"帧首提交"后的值）：1 = 允许把识别结果画在画面上。
-    // 现在**故意悬空**（TD 把未驱动输入当 0）：于是开机就是**原摄像头画面**，满足"必须按 KEY4
-    // 才进手势检测"。C 把 `game_mode[0]` 经 mode_sync 接到这里之后，KEY4 就是硬件开关。
-    // 与 MASK_PREVIEW 是"或"关系：调试图（MASK_PREVIEW=1）不看这个口，永远画。
-    input           I_recog_en,
+    input  [25:0]   I_mode_committed,   // mode_sync 的提交字（CSI 域）：透传给 recog_top（M1 用它选算法）
     input           I_tlast,
     input           I_tuser,
     input  [39:0]   I_tdata,
@@ -85,43 +70,10 @@ module isp_top #(
     wire [ 95:0] sel_tdata;
     wire         sel_tvalid;
 
-    // ---- 调试图：识别支路的实时掩码 + Step 3 准星 ---------------------------
-    // O_ovl_sel 每像素 2 bit：0 = 保持原像素、1 = 掩码（红 0xFF0000）、
-    // 2 = 准星（黄 0xFFFF00）。像素格式 R[23:16] G[15:8] B[7:0]，
-    // bit0 对应字内最左像素 [95:72]。
-    // MASK_PREVIEW=0 时整段被常量折叠消掉，正式 bit 与加这个参数之前等价。
-    wire [7:0] S_ovl_sel;
-    wire [3:0] S_mask_px;       // 实时掩码（本调试图不用，留作后续叠加用）
-
-    function [23:0] F_ovl_pix;
-        input [23:0] I_pix;
-        input [1:0]  I_sel;
-        begin
-            // 掩码不涂实心红（会把画面盖糊），改成"淡红着色"：R 保持、G/B 各减半，
-            // 命中区域一眼可见但底下的细节还在。准星黄、包围盒绿仍是实色（细线不影响观感）。
-            F_ovl_pix = (I_sel == 2'd1) ? {8'hFF, I_pix[15:9], 1'b0, I_pix[7:1], 1'b0} :
-                        (I_sel == 2'd2) ? 24'hFFFF00 :   // 准星：黄
-                        (I_sel == 2'd3) ? 24'h00FF00 :   // 包围盒：绿
-                        I_pix;
-        end
-    endfunction
-
-    wire [95:0] S_preview_tdata = {
-        F_ovl_pix(awb_O_tdata[95:72], S_ovl_sel[1:0]),   // 字内最左像素
-        F_ovl_pix(awb_O_tdata[71:48], S_ovl_sel[3:2]),
-        F_ovl_pix(awb_O_tdata[47:24], S_ovl_sel[5:4]),
-        F_ovl_pix(awb_O_tdata[23:0],  S_ovl_sel[7:6])
-    };
-
-    // 叠加使能：调试图恒开；正式版由 I_recog_en（= KEY4 的游戏模式）决定。
-    // MASK_PREVIEW=0 且 I_recog_en=0 时这条通路仍是硬件 mux（不是常量折叠），
-    // 所以接上 game_mode 后不需要重编，KEY4 立刻生效。
-    wire S_ovl_en = MASK_PREVIEW | I_recog_en | (OVL_GATE_MODE & I_alg_sel);
-
-    assign sel_tdata  = S_ovl_en ? S_preview_tdata : (I_alg_sel ? edge_O_tdata  : awb_O_tdata);
-    assign sel_tvalid = S_ovl_en ? awb_O_tvalid    : (I_alg_sel ? edge_O_tvalid : awb_O_tvalid);
-    assign sel_tlast  = S_ovl_en ? awb_O_tlast     : (I_alg_sel ? edge_O_tlast  : awb_O_tlast);
-    assign sel_tuser  = S_ovl_en ? awb_O_tuser     : (I_alg_sel ? edge_O_tuser  : awb_O_tuser);
+    assign sel_tdata  = I_alg_sel ? edge_O_tdata  : awb_O_tdata;
+    assign sel_tvalid = I_alg_sel ? edge_O_tvalid : awb_O_tvalid;
+    assign sel_tlast  = I_alg_sel ? edge_O_tlast  : awb_O_tlast;
+    assign sel_tuser  = I_alg_sel ? edge_O_tuser  : awb_O_tuser;
 
     // 下游 data_96bit_to_128bit 无反压，awb/edge 的输入 ready 直接接 1；
     // 它们的输出 ready（模块内部为直通）悬空不接，避免组合环路。
@@ -217,6 +169,7 @@ module isp_top #(
         .I_edge_tuser    (edge_O_tuser),
         .I_edge_tlast    (edge_O_tlast),
         .I_edge_tvalid   (edge_O_tvalid),
+        .I_mode_word     (I_mode_committed),
         .I_ctrl_rx_data  (I_ctrl_rx_data),
         .I_ctrl_rx_valid (I_ctrl_rx_valid),
         .O_ctrl_tx_data  (O_ctrl_tx_data),
@@ -225,12 +178,7 @@ module isp_top #(
         .O_mask_cnt_shift(O_mask_cnt_shift),
         .O_bbox_x        (O_bbox_x),
         .O_bbox_y        (O_bbox_y),
-        .O_status_toggle (O_status_toggle),
-        .O_mask_px       (S_mask_px),
-        .O_track_x       (),
-        .O_track_y       (),
-        .O_track_locked  (),
-        .O_ovl_sel       (S_ovl_sel)
+        .O_status_toggle (O_status_toggle)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

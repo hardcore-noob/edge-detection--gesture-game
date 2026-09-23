@@ -122,6 +122,10 @@ module recog_top #(
     output wire [25:0] O_ctrl_tx_data,
     output wire        O_ctrl_tx_valid,
 
+    // 模式提交字（像素域在相机帧首提交到 CSI 域，布局见 mode_sync.v）：M0.1 只接入并锁存，
+    // M1 起用它选算法（bit[15:12] recog_algo：0=停/1=手势；bit[11:8] game_mode）。
+    input  wire [25:0] I_mode_word,
+
     // 观测输出（帧锁存，供 DBG 行；到像素域由顶层用 toggle+整包捕获同步）
     // 位宽按实际取值范围给足（不做成固定 16 位）：跨域线少一根就少一份走线压力。
     output wire [11:0] O_tap_px_shift,    // 每帧 tap 像素数 >>10（1280x720 应为 900 = 0x384）
@@ -144,6 +148,15 @@ module recog_top #(
     output wire        O_track_locked,   // 已锁定（连续命中 ≥ LOCK_FRAMES）
     output wire [7:0]  O_ovl_sel         // 每像素 2 bit：0=原像素 1=掩码(红) 2=准星(黄)
 );
+
+    // ---- 模式提交字锁存（同域，无需两级同步）--------------------------------
+    // M0.1 只锁存不消费——综合会把没人用的寄存器裁掉，等 M1 真正用它时才产生资源。
+    reg [25:0] S_mode_word;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) S_mode_word <= 26'd0;
+        else         S_mode_word <= I_mode_word;
+    end
+    // M1 消费：algo = S_mode_word[15:12]、game = S_mode_word[11:8]
 
     // ---- tap 监视：每帧字数 -------------------------------------------------
     reg [19:0] S_tap_cnt;

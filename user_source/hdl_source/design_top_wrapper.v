@@ -265,13 +265,19 @@ module design_top_wrapper (
     wire        S_key1_short;
     wire        S_key4_short;
     wire        S_key4_long;
-    wire [7:0]  S_mode_committed;     // CSI 域：相机帧首提交后的生效值
-    wire [7:0]  S_mode_echo;          // 像素域：提交回执
+    wire [25:0] S_mode_committed;     // CSI 域：相机帧首提交后的生效值
+    wire [25:0] S_mode_echo;          // 像素域：提交回执
     wire        S_mode_echo_valid;
-    // 提交字布局：{display_mode[3:0], edge_th_sel[3:0]}（见 mode_sync.v 头注释）。
+    // 提交字布局（26 位，见 mode_sync.v 头注释）：bit[3:0] edge_th_sel / bit[7:4] display_mode /
+    // bit[11:8] game_mode / bit[15:12] recog_algo / bit[19:16] teach_cnt[3:0]。
     // 消费侧一律用这两个具名线网取位，别再手写下标——2026-09-14 就是把两段取反了。
     wire [3:0]  S_committed_display;
     wire [3:0]  S_committed_th_sel;
+    wire [3:0]  S_committed_game;
+    wire [3:0]  S_committed_algo;
+    wire [3:0]  S_recog_algo;
+    wire [25:0] S_mode_req;
+    wire [15:0] S_mode_dbg;
     wire [7:0]  S_uart_byte;
     wire        S_uart_byte_valid;
     wire        S_cmd_we;
@@ -581,10 +587,10 @@ module design_top_wrapper (
     assign S_mc_dbg_cmd_pop = S_mc_app_en;
 
     // mixer 的 I_debug_status：bit0 = **已提交的** display_mode（0=RAW, 1=EDGE），
-    // bit1 = game_mode（显示 GES）。用提交值而不是请求值，这样"右上角字样"永远等于
+    // bit1 = **已提交的** game_mode（显示 GES）。用提交值而不是请求值，理由同上。
     // 屏幕上真正在放的那一路——2026-09-14 位序取反那次，字样变了画面没变，正是这两者
     // 不一致造成的误导。
-    assign S_hdmi_debug_status = {2'b00, S_game_mode[0], S_committed_display[0]};
+    assign S_hdmi_debug_status = {2'b00, S_committed_game[0], S_committed_display[0]};
 
     assign S_debug_status_bus = {
         S_dbg_mc_init_seen_sync[1],
@@ -835,6 +841,7 @@ module design_top_wrapper (
       .O_rd_data       (                  ),
       .O_display_mode  ( S_display_mode   ),
       .O_game_mode     ( S_game_mode      ),
+      .O_recog_algo    ( S_recog_algo     ),
       .O_edge_th_sel   ( S_edge_th_sel    ),
       .O_edge_th       ( S_edge_th        ),
       .O_teach_cnt     ( S_teach_cnt      ),
@@ -850,7 +857,7 @@ module design_top_wrapper (
   mode_sync u_mode_sync (
       .I_req_clk    ( S_hdmi_pixel_clk        ),
       .I_req_rst_n  ( S_hdmi_rst_n            ),
-      .I_req_data   ( {S_display_mode, S_edge_th_sel} ),
+      .I_req_data   ( S_mode_req             ),
       .O_echo_data  ( S_mode_echo             ),
       .O_echo_valid ( S_mode_echo_valid       ),
       .I_ack_clk    ( S_csi_rx_clk            ),
@@ -860,12 +867,27 @@ module design_top_wrapper (
       .O_commit_pulse(                        )
   );
 
-  // 提交字拆位（布局见 mode_sync.v 头注释）：高 4 位是 display_mode、低 4 位是门限档位
-  assign S_committed_display = S_mode_committed[7:4];
-  assign S_committed_th_sel  = S_mode_committed[3:0];
+  // 提交字拆位（布局见 mode_sync.v 头注释）：一律用具名线网，别手写下标——M0 踩过位序取反。
+  // ⚠ 域归属（2026-09-17 修正 M0 的一处跨域隐患）：
+  //   * CSI 域（isp_top 的 alg mux、边缘门限）用 **S_csi_*** —— 与 mode_sync 的提交寄存器同域，直接用；
+  //   * 像素域（OSD 状态字、DBG 的 K、LED）必须用 **S_committed_*** —— 它们来自 mode_sync 的**回执**
+  //     （CSI 域经 ctrl_sync 的 toggle 握手 + 两级同步送回来的），不能直接采 CSI 域的寄存器。
+  wire [3:0] S_csi_display = S_mode_committed[7:4];
+  wire [3:0] S_csi_th_sel  = S_mode_committed[3:0];
+  assign S_committed_display = S_mode_echo[7:4];
+  assign S_committed_th_sel  = S_mode_echo[3:0];
+  assign S_committed_game    = S_mode_echo[11:8];
+  assign S_committed_algo    = S_mode_echo[15:12];
+
+  // 请求字（像素域 → CSI 域）：**算法类**字段走这一条，相机帧首一起提交；
+  // 系数类（A 的肤色上下限/运动阈值/quiet_th）不跨域，由 CSI 域的示教逻辑自己产生并保存。
+  assign S_mode_req = {6'b0, S_teach_cnt[3:0], S_recog_algo, S_game_mode, S_display_mode, S_edge_th_sel};
+
+  // DBG 的 K 字段显示**已提交**值（由 CSI 域回执证明跨域成功），不是请求值
+  assign S_mode_dbg = {4'h0, S_committed_algo, S_committed_game, S_committed_display};
 
   // CSI 域实际生效的边缘门限：TH = 16 + 4×档位
-  wire [10:0] S_edge_th_csi = 11'd16 + ({7'b0, S_committed_th_sel} << 2);
+  wire [10:0] S_edge_th_csi = 11'd16 + ({7'b0, S_csi_th_sel} << 2);
 
   // CTRL_SYNC 插座：下行（像素域 → CSI 域）与上行（CSI 域 → 像素域）各一条。
   // M0 的下行由 game_top 每帧发测试常数、上行由 recog_top 原样回传，用来验证双向往返。
@@ -1052,8 +1074,9 @@ image_correction #(
 isp_top u_isp_top (
 .axi4s_video_aclk(S_csi_rx_clk),
 .I_rst_n         (S_rst_n),
-.I_alg_sel       (S_committed_display[0]),
+.I_alg_sel       (S_csi_display[0]),
 .I_edge_th       (S_edge_th_csi),
+.I_mode_committed(S_mode_committed),
 .I_tlast         (S_raw_tlast	),
 .I_tuser         (S_raw_tuser	),
 .I_tdata         (S_raw_tdata	),
@@ -1319,7 +1342,7 @@ isp_top u_isp_top (
         .I_fifo_in_used  ( S_dbg_fifo_in_used  ),
         .I_fifo_out_used ( S_dbg_fifo_out_used ),
         // M0 追加的 8 个字段（见 debug_uart_logger.v 头部注释）
-        .I_mode_word     ( S_mode_word         ),
+        .I_mode_word     ( S_mode_dbg         ),
         .I_edge_th       ( {5'b0, S_edge_th_csi} ),
         .I_mask_cnt      ( S_mask_cnt_hold     ),
         .I_bbox_x        ( {2'b0, S_bbox_x_hold} ),
