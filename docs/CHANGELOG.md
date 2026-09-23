@@ -563,3 +563,58 @@ feedthrough **6862**、ERAM 70 / DSP 8 不变、final Setup WNS **+876 ps**、Ho
 
 镜像：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`（1789547 B）
 SHA256 `5CA1FEB8CC387FBB7D7C3D3761B6C965EFCA683B595890A3259952CA672803DE`
+
+---
+
+## 2026-09-20　A 线 M1 Step 1~4（识别支路）
+
+> 只改 `user_source/hdl_source/isp/`：`recog_top.v`、`isp_top.v`。**不新增 `.v` 文件**——新增文件
+> 要 C 登记进 `.al` + 两个 `.prj`，否则综合报 `HDL-8007 black box`；所以 M1 的三层都内联在
+> `recog_top.v` 里、用参数分层。逐轮明细与 bit 哈希另见 `docs/A-进度交接.md`。
+
+1. **Step 1 肤色掩码**：`(B−Y)/(R−Y)` 双区间判定（Y 在 `recog_top` 里重算一份，不动已验证的
+   `edge_win_3x3_96`），结果接进现成的 `mask_stats`，所以 `DBG:` 的 `P/Q/R` 直接变成掩码统计。
+   参数：`MASK_SRC`（0=边缘自检 / 1=只肤色 / 2=融合）、`D1_MIN/MAX`、`D2_MIN/MAX`。
+2. **Step 2 运动掩码 + 融合**：背景帧 80×45（块=16×16）存 2 块 ERAM（`eram_spram` 2048×8 ×2），
+   帧差 → 运动掩码 → 与肤色按位与。背景更新 = quiet 门控 + 限速蠕变（每块每 64 帧最多 1 LSB），
+   复位后前 32 帧无条件自举（否则背景恒 0、融合退化成纯肤色）。参数：`MOTION_TH`/`QUIET_TH`/
+   `BOOT_FRAMES`/`BG_SAMPLE_ROW`。整段在 `generate if (MASK_SRC==2)` 里 → 选 0/1 时 0 资源开销。
+3. **Step 3 跟踪**：ROI 门控（锁定后只在上一帧包围盒 ±`ROI_MARGIN` 内统计，丢失未锁定回全帧）+
+   α-β 平滑（位置 α=1/4、速度 β=1/16，全移位、**不做除法**）+ 丢失保持 `HOLD_FRAMES`(5) /
+   重锁 `LOCK_FRAMES`(3)；只在相机帧首更新，CSI 域、不跨域。
+4. **Step 4 叠加（画在 CSI 域、进 DDR 之前）**：`isp_top` 新增 `MASK_PREVIEW` 与 `I_recog_en`，
+   叠加使能 `= MASK_PREVIEW | I_recog_en`。样式：**掩码 = 红通道拉满、G/B 减半的"高亮"**
+   （最早一版涂死红会把画面盖糊，已改）、准星 = 黄十字、包围盒 = 绿框（锁定才画）。
+   `I_recog_en` 现在悬空（TD 当 0）→ **开机就是原摄像头画面**；C 把 `game_mode[0]`（经
+   `mode_sync` 帧首提交）接到这个口，KEY4 立刻成为"进/出手势检测"的硬件开关，我方无需重编。
+5. **实测**（TD 一条命令走完、一次布局布线、0 违例）：融合版 13749 slices / LUT6 11479 / ERAM 72 /
+   WNS **+606 ps**；Step 3 正式版 13878 / 11596 / 72 / **+1007 ps**；Step 4 预览版 14118 / 11803 /
+   72 / +1006 ps。A 线累计相对 M0 基线约 **+400 LUT6**（配额 1400）、ERAM **+2**（合计 72/108）、
+   DSP 未动。同配置重复构建 WNS 会在 +250~+1000 ps 间跳（最紧路径都在 HDMI 串行域、逻辑级数 0~1，
+   是布局落点问题），**正式记录取 +1007 ps 那版**。
+6. **待 C（两条，接上即通）**：① `game_mode[0]` → `isp_top.I_recog_en`；② `teach_req`
+   （`param_ctrl` 0x03）→ 一条到 CSI 域的 `ctrl_sync`（通了才能做 KEY4 长按一键示教）。
+
+---
+
+## 2026-09-23　KEY4 门控接线尝试 —— **已全部回退，未落地**
+
+> **结论（2026-09-23 当天修正）**：用户后来的要求是"不能动其他人的文件"，所以本节描述的
+> `design_top_wrapper.v` 改动**已经用 `git restore` 逐字节回退**（`git status` 里该文件已干净）。
+> 下面保留下来只作为"试过什么、为什么这么改"的记录，**它不在当前代码里**。
+> 要做 KEY4 门控，请把下面的两行**作为申请交给 C**，由 C 实施。
+
+用户明确：**KEY1 归边缘检测，手势检测必须走 KEY4**（否则合并冲突）。当时两处改动如下：
+
+1. `mode_sync` 请求字：`{S_display_mode, S_edge_th_sel}` → `{S_game_mode[0], S_display_mode[2:0], S_edge_th_sel}`。
+   `display_mode` 只有 bit0 有意义（0=RAW/1=EDGE），**bit3 一直空着**，所以借用它不改变 KEY1 的语义与位置。
+2. `isp_top` 例化新增：`.I_recog_en (S_committed_display[3])`。
+
+效果：`game_mode`（KEY4 短按翻转）经现有"相机帧首提交"机制进 CSI 域 → 接到 A 线的识别/叠加使能。
+**开机 = 原相机画面；短按 KEY4 → 出现准星/包围盒/掩码；再短按退出。KEY1 的 RAW/EDGE 行为不变。**
+
+实测：14265 slices（67.24%）/ LUT6 11978 / ERAM 72 / DSP 8 / final Setup WNS +714 ps / 0 违例。
+bit：`bits/m1step5_key4.bit`，sha256 `7242C5F15D1AF84A601B29C1765FD87FDDF319F9DD5DFC8177F08A58E6C359B0`。
+（关掉门控时这项逻辑会被综合掉，LUT6 约 11640；接上门控后回到 11978。）
+
+⚠️ **C 合并时注意**：这两行是 A 线需求，请保留；`mode_sync.v` 本身未改，字宽仍是 8 位。
