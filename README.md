@@ -39,8 +39,9 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 - **当前工作方向（2026-09-13 起）：开发手势操控游戏** —— 在已经稳定的 720P 采集 →
   ISP/边缘 → OSD → HDMI 链路上，用摄像头画面识别手势并驱动一个能在 HDMI 上玩的小游戏
   （手势是唯一游戏输入；KEY4 短按进/出模式、长按一键示教；KEY1~KEY3 保持基础功能）。**M0（模块重构 + 四个插座 + 模式框架 + 在线调参）已完成并合并进 `main`**（tag `m0-infra-done`），
-  接口与地址表见第 12 节；下一步是 M1 融合掩码跟踪链路，识别支路直接填进
-  `isp/recog_top.v`，不动顶层与插座。
+  接口与地址表见第 12 节。**基线以 2026-09-23 实测的 `main` @ `f55ee2b` 为准：slices 13565 / 63.94%、final Setup WNS +930 ps**（§11.1，
+  以后加功能都按它算余量）。下一步：A 线的 M1 融合掩码跟踪链路（识别支路直接填进 `isp/recog_top.v`，
+  不动顶层与插座）；B 线按 `B-游戏引擎实现规划.md` 先做切水果（Pong 顺延）。
 - 调整边缘参数时，用 `tools/read_debug_uart.ps1` 读 `DBG:` 日志做客观对比，不要只凭
   主观印象反复编译；“稳定性、可复现对比、赛题要求覆盖”仍然是底线。
 
@@ -49,10 +50,10 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 - 先执行 `git status`，不要覆盖或提交会话外产生的未提交改动。
 - `tmp/` 是本地临时诊断目录，不纳入提交；TD Run、bitstream、日志由 `.gitignore`
   排除。
-- **新克隆 / 新 worktree 先跑 `pwsh -NoProfile -File tools/new_worktree_runs.ps1` 铺好 Run 目录再构建**（Run 目录不在版本库里；命令见第 6 节，四步上手见 `docs/手势游戏实现路线规划.md` §2.5.4）。
+- **新克隆 / 新 worktree 先跑 `pwsh -NoProfile -File tools/new_worktree_runs.ps1 -TdPath <TD 安装目录>` 铺好 Run 目录再构建**（Run 目录不在版本库里；**本机 TD 在 `D:\anlu`**，所以完整命令是 `-TdPath D:\anlu`；命令见第 6 节，四步上手见 `docs/手势游戏实现路线规划.md` §2.5.4）。
 - 当前按键/开关：KEY1 切 RAW/EDGE、KEY2/KEY3 调曝光（基础功能，任何时候可用）；KEY4 短按进/出手势模式、长按 ≥1 s 一键示教；SW1~SW4 直接给边缘门限档位；串口在线调参见第 12.3 节。
 - **任何 RTL / 约束改动后都要跑构建**（用户 2026-09-12 明确要求）：
-  `pwsh -NoProfile -File tools/build_td.ps1` 一条命令走完综合 + 布局布线 +
+  `pwsh -NoProfile -File tools/build_td.ps1 -TdPath D:\anlu` 一条命令走完综合 + 布局布线 +
   bitgen，末尾自动打印时序、资源占用和 bit 流路径；跑完要把 bitstream 路径与
   时序结果报告出来给用户烧录验证。只改文档不用跑。
 - 没有用户明确指令时，不自动 push、合并 PR 或改写 Git 历史。
@@ -228,34 +229,39 @@ ERAM（25 位 × 16384 深；器件 108 块，原本已用 39 块）。改这个
 td_project/camera_to_dsi_display.al
 ```
 
-命令行编译时，TD 安装在 `D:\TangDynasty`，两个 Run 目录分别是：
+命令行编译时，TD 的安装目录**按机器给**（命令行工具与流程脚本都从它下面取），两个 Run 目录分别是：
 
 ```text
 td_project/camera_to_dsi_display_Runs/syn_1
 td_project/camera_to_dsi_display_Runs/phy_1
 ```
 
-完整流程：
+完整流程（`<TD>` 换成机器上的安装目录；**Tcl 只吃正斜杠，反斜杠会被当转义吃掉**）：
 
 ```bat
 cd /d <你的 worktree>\td_project\camera_to_dsi_display_Runs\syn_1
-D:\TangDynasty\bin\td_commands_prompt.exe D:/TangDynasty/scripts/DefaultFlow.tcl
+<TD>\bin\td_commands_prompt.exe <TD>/scripts/DefaultFlow.tcl
 
 cd /d ..\phy_1
-D:\TangDynasty\bin\td_commands_prompt.exe D:/TangDynasty/scripts/DefaultFlow.tcl
+<TD>\bin\td_commands_prompt.exe <TD>/scripts/DefaultFlow.tcl
 ```
+
+**本机（2026-09-23 实测）TD 装在 `D:\anlu`**（Tang Dynasty Release_2026.1_SP2），
+本机**没有** `D:\TangDynasty`：所以手敲上面的命令时把 `<TD>` 换成 `D:\anlu`，用脚本时给
+`-TdPath D:\anlu`。`tools/build_td.ps1` 的 `-TdPath` 默认值仍是 `D:\TangDynasty`（为了兼容别的机器），
+**本机必须显式给**，否则脚本会直接报"找不到 TD 命令行工具"。除这一处外没有别的安装路径假设。
 
 注意：Run 目录里的 `settings.cfg` 和 `camera_to_dsi_display.prj` 都用**相对路径**
 引用 `../../../user_source/`，所以编译的一定是**当前 worktree** 的源码。新建
 worktree 后若没有 Run 目录，直接跑一条命令铺好：
 
 ```powershell
-pwsh -NoProfile -File tools/new_worktree_runs.ps1
+pwsh -NoProfile -File tools/new_worktree_runs.ps1 -TdPath D:\anlu
 ```
 
 骨架来自**仓库内**的 `tools/run_skeleton/`（`settings.cfg`、`camera_to_dsi_display.prj`、
 `camera_to_dsi_display.tcl`、`run.bat`，`phy_1` 另加 `.bitgen_param.f`）——clone 下来就能用，
-不依赖任何机器上的其它 worktree；`run.bat` 里的 TD 路径按 `-TdPath`（默认 `D:\TangDynasty`）
+不依赖任何机器上的其它 worktree；`run.bat` 里的 TD 路径按 `-TdPath`（默认 `D:\TangDynasty`，**本机要显式给 `D:\anlu`**）
 落地。脚本随后**以 `.al` 的 `Source_Files` 为唯一事实源**把缺失的源文件登记幂等补进两个
 `prj`、确保 `phy_1/settings.cfg` 带着布局参数（见 11.4 与 CHANGELOG《参数实验》）。新增
 `.v` 之后跑 `-SyncOnly` 就只做登记同步；想抄一台"已知可用"的 Run 目录时用
@@ -408,14 +414,15 @@ System.IO.Ports`（PowerShell 5.1 会先报 `ASSEMBLY_NOT_FOUND` 再继续跑）
   数据），`W`/`V` 是上一帧的最大占用（离写满还有多少余量），见第 7 节。长时间运行
   或加大算法负载时先看这四个字段，再看帧计数和 N/B/C；
 - 时序余量一直很薄：720P 上出现过 Setup **-99 ps**（只差一个端点）的版本。而且
-   TD 的布局布线是确定性的——同一份网表重跑，HPWL、拥塞和时序数字完全一样，
-  不能指望“再跑一次就好了”，只能改逻辑或改约束。去掉 `hdmi_mixer` 里那个 DSP
-  乘法器后，TH48 那版是 Setup +728 ps；`main` 上的 TH16 版是 +596 ps（0 违例）。
-  余量对布局落点很敏感，继续加功能后必须重新确认；
-- 当前配置是“新公式 + TH16 + 增益 0”，已通过 TD（final Setup WNS +596 ps、0 违例）
-  并已上板确认（2026-09-12），效果优秀：弱边缘与旧版相当、旧公式的回绕假边消失，
-  这一版是当前基线。增益 0/1 的取舍（饱和点 Δ≥64 vs Δ≥32）还没做板级 A/B 对比，
-  只是可选的调优方向，不影响当前基线；
+  TD 的布局布线是确定性的——同一份网表重跑，HPWL、拥塞和时序数字完全一样，
+  不能指望“再跑一次就好了”，只能改逻辑或改约束。资源优化之前，去掉 `hdmi_mixer`
+  里那个 DSP 乘法器后 TH48 那版是 +728 ps、`main` 的 TH16 版只有 +596 ps（都是
+  2026-09-11 前后的历史值，`feat/resource-opt` 把余量抬到 +820 ps）；**当前基线是
+  `main` @ `f55ee2b` 的 final Setup WNS +930 ps**（见 11.1）。余量对布局落点很敏感，
+  继续加功能后必须重新确认；
+- 当前配置是“新公式 + TH16 + 增益 0”，已通过 TD（0 违例）并已上板确认（2026-09-12），
+  效果优秀：弱边缘与旧版相当、旧公式的回绕假边消失，这一版是当前基线。增益 0/1 的取舍
+  （饱和点 Δ≥64 vs Δ≥32）还没做板级 A/B 对比，只是可选的调优方向，不影响当前基线；
 - 调 TH / 增益时**不要按灰度公式换算**：公式改的是绝对亮度，Sobel 只看局部差分，
   两者不是一回事——TH 48 那一版就是这么踩的坑，弱边缘被整片拦掉。
 
@@ -448,34 +455,43 @@ System.IO.Ports`（PowerShell 5.1 会先报 `ASSEMBLY_NOT_FOUND` 再继续跑）
 
 ## 11. 资源占用与优化方向
 
-### 11.1 现在的占用（`main`，2026-09-14 手势游戏 M0 完成后的构建）
+### 11.1 现在的占用（`main` @ `f55ee2b`，2026-09-23 本机实测）
 
 | 资源               | 用量      | 占比         | 说明                                      |
 | ---------------- | ------- | ---------- | --------------------------------------- |
-| slices           | 13481   | **63.54%** | 器件共 21216 个 slice（M0 前是 13214 / 62.28%） |
-| LUT6             | 11192   | 52.75%     | TD 的 `#lut6` 口径（M0 前 10809）             |
-| 触发器              | 14661   | 34.55%     | 分母 42432（每 slice 2 个 FF）                |
+| slices           | 13565   | **63.94%** | 器件共 21216 个 slice（M0 时 13481 / 63.54%，资源优化后 13214 / 62.28%） |
+| LUT6             | 11270   | 53.12%     | TD 的 `#lut6` 口径（M0 时 11192、资源优化后 10809） |
+| 触发器              | 14732   | 34.72%     | 分母 42432（M0 时 14661）；其中 reg-only slice 2295 |
 | 分布式 RAM（占 slice） | 408     | —          | 296 LUTRAM + 112 SRL                    |
 | ERAM             | 70      | 64.81%     | 还剩 38 块（已成新的约束项）                        |
 | DSP              | 8       | 20.00%     | 还剩 32 个                                 |
-| feedthrough      | 6862    | —          | 官方 720P 例程约 2400（M0 前 6767）             |
-| final Setup WNS  | +876 ps | 0 违例       | M0 前是 +820 ps（门禁 ≥ +300 ps）             |
+| feedthrough      | 6879    | —          | 官方 720P 例程约 2400（M0 时 6862）             |
+| final Setup WNS  | +930 ps | 0 违例       | M0 时 +876 ps、资源优化后 +820 ps（门禁 ≥ +300 ps） |
 | final Hold WNS   | +20 ps  | 0 违例       | —                                       |
+
+证据是**本次运行**的 `phy_1/td_20260923_224835.log` 与 `*.area`——`pwsh -NoProfile -File
+tools/build_td.ps1 -Stage summary -TdPath D:\anlu` 可以直接把这组数字复读出来，不用重编。
+2026-09-26 改过一处注释后整链复跑（`phy_1/td_20260926_172957.log`，0 ERROR、0 违例，
+bit 17:33:44）数字**逐项一致**——TD 的布局布线是确定性的，同一份网表重跑得到同样的结果。
+比 M0 多出的 **+84 slices / +78 LUT6 / +71 FF / +17 feedthrough / +54 ps** 来自 `f55ee2b`：
+`MODE_SYNC` 扩到 26 位提交字、`recog_algo`/`game_mode` 一起进跨域提交，属于正常增量。
 
 M0 全部交付（四个插座 + 掩码统计 + 模式框架 + 在线调参 + 8 个 DBG 字段 + 引脚登记）净成本
 **+383 LUT6 / +267 slices / +405 FF / +95 feedthrough**，**ERAM 与 DSP 一个没多**；
 WNS 反而比 M0 之前高 56 ps。压这部分成本用的手段（RTL 减法、A/G 打拍、布局参数、
 观测包整包捕获）见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)《手势游戏 M0》阶段 5、6。
-对照 11.4 的余量规则，到 85% 还剩约 3300 LUT6。
+对照 11.4 的余量规则，到 85% 还剩约 3700 LUT6。
 
-slice 的构成：408（分布式 RAM）+ 7059（带 LUT 的逻辑）+ 3342（加法器/进位链）+ 2405
+slice 的构成（**资源优化后、M0 前那一版 13214 的拆分**，M0 之后没有再单独拆过）：408
+（分布式 RAM）+ 7059（带 LUT 的逻辑）+ 3342（加法器/进位链）+ 2405
 （只有 FF 的 slice）= 13214，其中 2405 个是打包开销，占 18.2%——比优化前（11.7%）高，
 因为 LUT 砍掉四千多而触发器基本没动。官方 lab_ex1 / lab_ex2 / lab_ex3 的 720P 版本
 分别是 20.2% / 19.4% / 14.7%，我们落在中间；**这也说明下一个还能压的方向是 FF 与
-流水线寄存器（2405 个 reg-only slice），而不是 LUT。**
+流水线寄存器（`f55ee2b` 实测 2295 个 reg-only slice），而不是 LUT。**
 
 优化过程见 11.1.1~11.1.5，全部在 `feat/resource-opt` 上完成、2026-09-12 合并进
-`main`：16957（79.93%）→ 14579 → 14459 → 13002 → 12987 → **13214（62.28%）**。
+`main`：16957（79.93%）→ 14579 → 14459 → 13002 → 12987 → **13214（62.28%）**；
+之后的 M0 与 `f55ee2b` 增量见本节上表。
 
 两个容易搞混的口径：数据手册表 1-1 里 PH1P35 写的是 **LUT4s 38,189**，那是 LUT4
 等效口径（= 21216 × 1.8）；TD 报告里的 `#lut6` 是物理 6 输入查找表位点数。同一份
@@ -497,7 +513,7 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 | lab_ex1 720P（MIPI+DDR+HDMI）           | 12358     | 58.25%     | 9865  | 13313 | 408           |
 | lab_ex2 720P（+边缘）                     | 12926     | 60.93%     | 10422 | 13465 | 664           |
 | lab_ex3 720P（+OSD）                    | 14852     | 70.00%     | 12669 | 13380 | 408           |
-| **本工程（720P + 全分辨率边缘 + OSD + 调试，优化后）** | **13214** | **62.28%** | 10809 | 14256 | 408           |
+| **本工程（720P + 全分辨率边缘 + OSD + 调试，资源优化后 / M0 前）** | **13214** | **62.28%** | 10809 | 14256 | 408           |
 
 优化完成后，我们比官方最全的 lab_ex3（14852 / 70.00%）**还低 1638 slices**：LUT6 少
 1860，分布式 RAM 从“多 1152”降到与官方 lab_ex1 相同的 408；代价是触发器多 876，因为
@@ -520,6 +536,8 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 `edge_detect_96` 的分布式 RAM 也搬进 ERAM 实测 −1457 slices，再加上 logger 精简
 （−120），占用从 79.93% 一路降到 61.21%；补上 FIFO 观测增强后停在 **13214 / 62.28%**，
 而且 Setup 余量从 +242 ps 提到 **+820 ps**。
+（以上是 2026-09-12 资源优化那一轮的结论；M0 与 `f55ee2b` 之后当前占用是 **63.94% /
++930 ps**，见 11.1。）
 
 继续往下压的空间已经不大：官方纯 MIPI+DDR+HDMI 的 720P 例程本身就有 58.25%，我们
 只比它高 4 个百分点，却多了全分辨率边缘、OSD 和整套运行时观测。剩下的方向是 11.3
@@ -528,10 +546,10 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 ### 11.4 余量策略与操作注意事项
 
 - 密度上限：**≤80% 舒适，85% 可接受，90% 是红线**。官方例子在 58%~70%，我们优化前
-  是 79.93%（贴着红线），现在是 **62.28%**，回到舒适区。
-- 评估“还能加多少功能”用 **1 个 LUT6 ≈ 1.2 个 slice**（当前实测 13214 / 10809 = 1.22，
-  含 18.2% 打包开销）：到 85% 还能加约 4800 slices（≈3950 LUT6），到 90% 约 5900
-  slices（≈4800 LUT6）。
+  是 79.93%（贴着红线），现在是 **63.94%**，回到舒适区。
+- 评估“还能加多少功能”用 **1 个 LUT6 ≈ 1.2 个 slice**（当前实测 13565 / 11270 = 1.20，
+  其中 2295 个是 reg-only slice）：到 85% 还能加约 4470 slices（≈3700 LUT6），到 90%
+  约 5530 slices（≈4600 LUT6）。
 - 比百分比更该盯的三个指标：**final Setup WNS**（建议 ≥ +300 ps 才当基线）、
   **feedthrough**（继续涨说明布线在恶化，比 slices 更早预警）、以及**能否一次
   布局布线成功**（要反复重跑就说明余量不够）。
@@ -541,7 +559,7 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
   `dram lut = 1152`、`eram = 0` 就是证据（这 1152 个 LUT 正是本工程比官方例程多
   出来的那部分分布式 RAM）。要真正搬进块 RAM，得像 `anlogic_logo_rom.v` 那样
   **直接例化 `PH1P_LOGIC_ERAM`**（TD 的器件原语模板在
-  `D:\TangDynasty\template\verilog\Device-Primitive\PH1P\RAM,ROM\ph1p_ram_rom.v`）。
+  `<TD>\template\verilog\Device-Primitive\PH1P\RAM,ROM\ph1p_ram_rom.v`，**本机 `<TD>` = `D:\anlu`**，实测存在）。
   历史上行缓存落成触发器会把 FF 打满，TD 报 `PHY-9002 Placer initialization
   failed`——这个流在资源满时是“编不出来”，不是“编得慢”。
 - 看资源数字请认**本次运行**的 `td_YYYYMMDD_HHMMSS.log` 与 `*.area`：`phy_1\run.log`
@@ -611,11 +629,42 @@ bitstream：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.b
 | 0x07 | `mode_commit_cnt`    | RO  | 模式在相机帧首提交的次数                            |
 | 0x08 | `recog_algo[3:0]`    | R/W | 0 = 识别停 / 1 = 手势识别（M1 消费）。KEY4 短按进 game_mode 时自动置 1、退出置 0；也可串口 `W 08 0001` 单独开 |
 
-0x40~0x7F 归 A（视觉）、0x80~0xBF 归 B（游戏）、0xC0~0xFF 归 C（集成）；用之前先在
-
+0x40~0x7F 归 A（视觉）、0x80~0xBF 归 B（游戏）、0xC0~0xFF 归 C（集成）；用之前先在本节登记。
 
 > **跨域判据（2026-09-17 定）**：**算法类**（0x00 display_mode / 0x01 game_mode / 0x08 recog_algo）经 mode_sync 的 26 位提交字在**相机帧首**一起提交到 CSI 域；**系数类**（0x40~0x7F 段的肤色上下限 / 运动阈值 / quiet_th）**不跨域**——A 的阈值由 CSI 域的示教逻辑用 min/max 包络产生并保存，A 段寄存器只保留"读回来复盘"的语义，别指望用 UART 改它能影响识别。
-本节登记。
+
+#### 12.2.1 B 段地址表（0x80~0xBF，2026-09-26 由 B 线登记）
+
+B 段的实现落在 `user_source/hdl_source/game/game_param.v`（M4a）。**在那之前 `param_ctrl`
+只认 0x00~0x08，写 B 段会被 `default: ;` 静默丢弃、`param_wr_cnt` 也不增**——转发通路是 B 线
+需求单 2（见 `B-游戏引擎实现规划.md` §9），在那之前 B 线用自己的 `localparam` 默认值跑通。
+
+| 地址 | 名称 | 读写 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `0x80` | `game_sel[3:0]` | R/W | 1 | **选哪个游戏**：1 = 切水果（2 = PONG、3 = BRICK 后续）。只在 `0x01 game_mode ≠ 0` 时被渲染层读取；**"游戏层开关"永远是 0x01**，这里不定义"0 = 无游戏" |
+| `0x81` | `game_ctrl[3:0]` | W1P | — | bit0 重开本局、bit1 强制回待机、bit2 强制关层（回待机但不改 0x01）、bit3 暂停 |
+| `0x82`~`0x84` | — | — | — | 预留给后续 Pong（球速 / 拍高 / AI 等级） |
+| `0x85` | `input_src[3:0]` | R/W | 0 | 0 = 假源、1 = 手势、2 = UART 手柄（预留） |
+| `0x86` | `input_cfg[15:0]` | R/W | — | `{假源档位[3:2], 死区[1:0]}`（档位 0 乱舞 / 1 固定圆 / 2 UART 直给） |
+| `0x87` | `input_gain[15:0]` | R/W | 0x0100 | 归一化增益（定点 ×256） |
+| `0x88` | `input_offset[15:0]` | R/W | 0 | 归一化偏置（有符号） |
+| `0x89` | `fruit_spawn[7:0]` | R/W | 48 | 生成间隔（帧） |
+| `0x8A` | `fruit_grav[15:0]` | R/W | 0x0040 | 定点重力 |
+| `0x8B` | `fruit_v0[15:0]` | R/W | 0x0800 | 初速档（水平/垂直各 8 位）；垂直初速 = `v0[15:8]×2` px/帧（默认 16 px/帧 → 顶点升高约 512 px） |
+| `0x8C` | `trail_cfg[15:0]` | R/W | `{8'd8, 8'd10}` | `{点数, 寿命帧}` |
+| `0x8D` | `particle_cfg[15:0]` | R/W | `{8'd8, 8'd20}` | `{粒子数, 寿命}` |
+| `0x8E` | `field_y0[11:0]` | R/W | 200 | 场地上边界 |
+| `0x8F` | `field_y1[11:0]` | R/W | 704 | 场地下边界（漏切判定线） |
+| `0x90` | `game_state[15:0]` | RO | — | `{state[3:0], lives[3:0], score[7:0]}` |
+| `0x91` | `blade_pos[15:0]` | RO | — | `{x[7:0], y[7:0]}`（各 >>3） |
+| `0x92` | `fruit_pos[15:0]` | RO | — | 1 号水果坐标（>>3） |
+| `0x93` | `hit_cnt[15:0]` | RO | — | 累计切中数（调试与计分核对） |
+| `0x94` | `miss_cnt[15:0]` | RO | — | 累计漏切数 |
+| `0xA0` | `dbg_blade_x[11:0]` | R/W | — | 调试刀尖 x（假源档位 2 时直接给坐标，从 PC 手动切） |
+| `0xA1` | `dbg_blade_y[11:0]` | R/W | — | 调试刀尖 y |
+| `0xA2` | `dbg_blade_en` | R/W | — | 调试坐标有效标志（0 = 用自动档） |
+| `0xA3` | `dbg_marker_en` | R/W | 0 | **1 像素对齐标记开关**（L1 坐标自检）：白点画在 `(0,0)`、`(1279,719)`、`(7,127)`、`(106,127)`、`(152,34)`；后三个落在 Logo 墨迹极值点上——**对齐 = 被墨迹盖住看不见，差 1 像素就会在墨迹边冒白点**。串口 `W A3 0001` 打开 |
+| `0xB0`~`0xBF` | 预留 | — | — | 用完再登记 |
 
 ### 12.3 串口在线调参
 
@@ -628,6 +677,10 @@ W 00 0001      # 切到 EDGE
 W 01 0001      # 打开游戏层（状态字变 GES）
 W 03 0001      # 发一次一键示教请求（teach_cnt 加 1）
 ```
+
+B 段（0x80~0xBF）的命令示例见 12.2.1 与 `B-游戏引擎实现规划.md` §6，例如
+`W 85 0000`（输入源切假源）、`W A0 0400` + `W A1 0300` + `W A2 0001`（手动给刀尖）。
+注意在 `param_ctrl` 开通 B 段转发之前，这些写入会被静默丢弃，只是当前已知的待办。
 
 ### 12.4 M0 上板自检清单
 
