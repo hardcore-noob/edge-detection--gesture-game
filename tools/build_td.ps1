@@ -12,14 +12,20 @@
   both（默认）= 综合 + 布局布线；syn = 只综合；phy = 只布局布线；summary = 不编译，
   只读现有报告打印汇总（改完代码前后对比数字时很方便）。
 
+.PARAMETER TdPath
+  TangDynasty 安装路径，默认 D:\TangDynasty。本机装在别处时要显式给（例如 D:\anlu），
+  脚本会用它拼 td_commands_prompt.exe 与 scripts/DefaultFlow.tcl 的路径。
+
 .EXAMPLE
   pwsh -NoProfile -File tools/build_td.ps1
   pwsh -NoProfile -File tools/build_td.ps1 -Stage summary
+  pwsh -NoProfile -File tools/build_td.ps1 -TdPath D:\anlu
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('both', 'syn', 'phy', 'summary')][string]$Stage = 'both'
+    [ValidateSet('both', 'syn', 'phy', 'summary')][string]$Stage = 'both',
+    [string]$TdPath = 'D:\TangDynasty'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,8 +34,13 @@ $root  = Split-Path -Parent $PSScriptRoot
 $runs  = Join-Path $root 'td_project\camera_to_dsi_display_Runs'
 $synD  = Join-Path $runs 'syn_1'
 $phyD  = Join-Path $runs 'phy_1'
-$exe   = 'D:\TangDynasty\bin\td_commands_prompt.exe'
-$tcl   = 'D:/TangDynasty/scripts/DefaultFlow.tcl'
+$exe   = Join-Path $TdPath 'bin\td_commands_prompt.exe'
+# Tcl 只认正斜杠，反斜杠会被当转义吃掉（见文件头说明）
+$tcl   = ((Join-Path $TdPath 'scripts\DefaultFlow.tcl') -replace '\\', '/')
+
+if ($Stage -ne 'summary' -and -not (Test-Path -LiteralPath $exe)) {
+    throw "找不到 TD 命令行工具：$exe`n用 -TdPath 指定安装目录（本机是 -TdPath D:\anlu），或先跑 tools/new_worktree_runs.ps1 -TdPath <路径> 铺 Run 目录。"
+}
 
 function Invoke-TdStage {
     param([string]$Name, [string]$Dir, [string]$Artifact)
