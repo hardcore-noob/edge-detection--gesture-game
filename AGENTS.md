@@ -50,6 +50,14 @@ DM 新增 `.v` 一律由 C 登记进 `.al` + 两个 `prj`；DBG 日志新增字�
 - 每个模块头必须写清：**延迟几拍 / 跨不跨域 / 要不要 SDC 约束 / 占多少 ERAM·DSP**。
 - 资源纪律：A 的 LUT6 配额 1400、ERAM 8 块、**DSP 0**；肤色判定用 `(B−Y)/(R−Y)` 差值法，禁止改回逐像素矩阵乘法/距离平方。
 
+## 交付配置（2026-09-27 起）
+
+`user_source/hdl_source/isp/recog_top.v` 的**源码默认值就是交付配置**，不需要"编完再还原"：
+`SKIN_ONLY=1`（运动/锁存门旁路）、`SOFT_TRACK=1`、`D2_MIN_DELIV=3`、真 luma `Y=(R+2G+B)/4`；
+`isp_top.v` 的 `DIAG_MODE_SEL=0`（开机原画面，短按 KEY4 / `W 08 0001` 才出叠加）。
+交付 bit 见 `bits/M1_DELIVERY_20260927_skin3.bit`（门禁：15329 slices / ERAM 70 / Setup +674 ps / 一次 PnR）。
+8..15 是上板调参档（`W 08 000N`），调参时不需要改源码。
+
 ## 每个里程碑的门禁
 
 编译实测（slices ≤85%，90% 红线）+ **final Setup WNS ≥ +300 ps** + feedthrough 不失控 + **一次布局布线成功**；
