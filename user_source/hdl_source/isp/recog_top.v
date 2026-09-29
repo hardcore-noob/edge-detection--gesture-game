@@ -147,6 +147,7 @@ module recog_top #(
     //     光照边缘的权重低，拉不走准星。
     parameter integer SOFT_TRACK = 1,
     parameter [20:0] MIN_WSUM = 21'd2000,   // Σw 的命中下限（≈ w=1 的像素数）
+    parameter [20:0] MIN_WSUM_HOLD = 21'd1200,  // S3：已锁定时"保持命中"的更低门限（滞回，防反复丢锁）
     // ROI 外扩余量（像素）：锁定后只在"上一帧包围盒 ± 这个余量"内统计，
     // 窗口外的干扰被物理隔离。
     // ROI 余量：手快速移动时也要留在窗口里（太小会"滑出窗口 → 判丢失 → 准星停住"）。
@@ -1225,13 +1226,24 @@ module recog_top #(
         wire [9:0]  S_obs_y_raw = TRACK_Y_FROM_TOP ? S_ymin[9:0] : S_by_sum[10:1];
         // 质心由模块级 generate 块 g_cent / g_cent_off 产生（见下面"质心 ÷ 像素数"
         // 那一段）；质心不可信（像素数不够 / USE_CENTROID=0）时退回包围盒中心。
-        wire [10:0] S_obs_x = S_cent_valid ? S_cent_x : S_obs_x_raw;
-        wire [9:0]  S_obs_y = S_cent_valid ? S_cent_y : S_obs_y_raw;
+        // S1：观测源统一 —— 始终用**质心**（质心无效时保持上一帧有效值，不再跳去包围盒中心）
+        wire [10:0] S_obs_x = S_cent_x;
+        wire [9:0]  S_obs_y = S_cent_y;
         // 目标门控：像素数够 + 包围盒够大 + 不细长（挡掉唇膏/笔/碎噪声这类非手目标）
         wire [10:0] S_w     = S_xmax - S_xmin;
         wire [10:0] S_h     = S_ymax - S_ymin;
         // 命中判定：软权重模式下只看 Σw（尺寸门/细长比已实测无用，整段删掉）。
-        wire        S_hit   = (SOFT_TRACK != 0) ? (S_wsum_h >= MIN_WSUM)
+        // ---- S2：跟踪柔和档（档 9 切换，方便同板 A/B）--------------------------
+        //   α = 1/2^S_ashift、β = 1/2^S_bshift、死区 = S_db
+        //   档 9 = 柔和（α=1/4, β=1/16, 死区 5）；其余 = 原参数（α=1/2, β=1/8, 死区 2）
+        wire [2:0]        S_ashift = (S_cfg == 4'd9) ? 3'd2 : 3'd1;
+        wire [2:0]        S_bshift = (S_cfg == 4'd9) ? 3'd4 : 3'd3;
+        wire signed [12:0] S_db    = (S_cfg == 4'd9) ? 13'sd5 : 13'sd2;
+        // ---- S3：命中滞回（进入 2000 / 锁定后保持 1200）-----------------------
+
+        wire        S_hit   = (SOFT_TRACK != 0)
+                            ? ((S_wsum_h >= MIN_WSUM) ||
+                               (S_locked && (S_wsum_h >= MIN_WSUM_HOLD)))
                                                 : (S_mcnt >= MIN_CNT);
 
         // 观测误差 + 死区：|err| ≤ DEADBAND 时按 0 处理（噪声抖动不再推动准星）
@@ -1239,12 +1251,12 @@ module recog_top #(
         wire signed [12:0] S_err_raw_y = {2'b0, S_obs_y} - S_pos_y;
         wire [12:0] S_aerr_x = S_err_raw_x[12] ? (~S_err_raw_x + 13'd1) : S_err_raw_x;
         wire [12:0] S_aerr_y = S_err_raw_y[12] ? (~S_err_raw_y + 13'd1) : S_err_raw_y;
-        wire signed [12:0] S_err_x = (S_aerr_x > DEADBAND) ? S_err_raw_x : 13'sd0;
-        wire signed [12:0] S_err_y = (S_aerr_y > DEADBAND) ? S_err_raw_y : 13'sd0;
-        wire signed [12:0] S_pos_nx = S_pos_x + (S_err_x >>> ALPHA_SHIFT) + S_vel_x;
-        wire signed [12:0] S_pos_ny = S_pos_y + (S_err_y >>> ALPHA_SHIFT) + S_vel_y;
-        wire signed [12:0] S_vel_nx = S_vel_x + (S_err_x >>> BETA_SHIFT);
-        wire signed [12:0] S_vel_ny = S_vel_y + (S_err_y >>> BETA_SHIFT);
+        wire signed [12:0] S_err_x = (S_aerr_x > S_db) ? S_err_raw_x : 13'sd0;
+        wire signed [12:0] S_err_y = (S_aerr_y > S_db) ? S_err_raw_y : 13'sd0;
+        wire signed [12:0] S_pos_nx = S_pos_x + (S_err_x >>> S_ashift) + S_vel_x;
+        wire signed [12:0] S_pos_ny = S_pos_y + (S_err_y >>> S_ashift) + S_vel_y;
+        wire signed [12:0] S_vel_nx = S_vel_x + (S_err_x >>> S_bshift);
+        wire signed [12:0] S_vel_ny = S_vel_y + (S_err_y >>> S_bshift);
         wire signed [12:0] S_pos_hx = S_pos_x + S_vel_x;   // 丢失时按速度外推
         wire signed [12:0] S_pos_hy = S_pos_y + S_vel_y;
 
