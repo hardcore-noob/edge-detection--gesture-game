@@ -54,6 +54,8 @@
 //   * 第 3 轮：一次事件 = 一个 60 帧采样窗 —— 把**固定中央区**里通过**宽松前置门**的像素
 //     并成 (d1,d2) 包络，窗末判定（样本 ≥2000 且 d2 跨度 ≥10）通过就外扩 ≈14% 写进
 //     窗口寄存器；判定不通过就一个数都不写。TEACH_EN=0 可把整段关掉（回到第 1 轮行为）。
+//     （2026-09-29 压缩：采样密度改成"每 4 列取 1 列"——一拍只并 1 个像素、用 4 级延迟线错开，
+//      省掉 4 像素 min/max 树；门限仍按真实像素数解释。见 g_teach 里的"采样密度"一段。）
 //   * 第 4 轮：窗末起把 O_teach_flash 拉高 ~120 帧（≈2 s）——**不论判定过不过**（同板行为：
 //     "没看到手点亮 = 没采到，重来"）；isp_top 把它并进叠加使能，示教完立刻能看手亮不亮。
 //     平时恒 0，开机画面不受影响。第 5 轮才上板验收。
@@ -549,8 +551,8 @@ module recog_top #(
     if (TEACH_EN != 0) begin : g_teach
 
         // ---- 采样区判据：按"字号"判一次即可 ----------------------------------
-        // 中央区左右边界都落在 4 像素字边界上（320 = 4×80、959 = 4×239+3），所以一拍里的
-        // 4 个像素同进同出，不用逐像素比较。
+        // 中央区左右边界都落在 4 像素字边界上（320 = 4×80、959 = 4×239+3），所以按字号判
+        // 一次就够（每个字号只取它最后那一个像素，见下面"采样密度"）。
         wire [10:0] S_t_xg0 = TEACH_X0 >> 2;
         wire [10:0] S_t_xg1 = TEACH_X1 >> 2;
         wire        S_t_zone = (S_y_pos >= TEACH_Y0) && (S_y_pos <= TEACH_Y1) &&
@@ -565,86 +567,81 @@ module recog_top #(
             end
         endfunction
 
+        // 4 级延迟线（skew buffer）：一拍进一个采样像素，末级就是"4 个有效拍之前"那个。
+        // 只在 I_raw_tvalid 拍推进、也只在 tvalid 拍合并 → 每个**被采样的**像素恰好并一次，
+        // 不需要相位计数器 / FSM（它只是把"比较"和"并进包络"错开 4 拍，不改变吞进去的样本）。
+        reg signed [8:0] S_k1_d1, S_k2_d1, S_k3_d1, S_k4_d1;
+        reg signed [8:0] S_k1_d2, S_k2_d2, S_k3_d2, S_k4_d2;
+        reg              S_k1_ok, S_k2_ok, S_k3_ok, S_k4_ok;
+
         reg               S_t_win;                       // 采样窗开着
         reg [7:0]         S_t_frm;                       // 窗内已经采到的帧数
         reg signed [8:0]  S_t_d1lo, S_t_d1hi;
         reg signed [8:0]  S_t_d2lo, S_t_d2hi;
-        reg [23:0]        S_t_cnt;                       // 进包络的像素数
+        reg [11:0]        S_t_cnt;                       // 进包络的**样本**数（12 位饱和）
         reg [7:0]         S_t_flash;                     // 窗末起的"闪叠加"倒计时（帧）
 
-        // 本拍 4 个像素里有谁通过前置门（不在采样区、tvalid=0 就整拍不算）
-        wire [3:0] S_t_px = (S_t_win && I_raw_tvalid && S_t_zone)
-                          ? { F_teach_pre(S_d1_3, S_d2_3), F_teach_pre(S_d1_2, S_d2_2),
-                              F_teach_pre(S_d1_1, S_d2_1), F_teach_pre(S_d1_0, S_d2_0) }
-                          : 4'b0000;
-
-        // 候选值：没通过的像素用哨兵（min 用 +255、max 用 −256）→ 合并时自动让位。
-        // 用位模式写（9'h0FF / 9'h100）避免混合有符号/无符号的扩展规则踩坑：
-        // 9'h100 就是 9 位补码的 −256，比任何真实色差都小。
-        wire signed [8:0] C_alo0 = S_t_px[0] ? S_d1_0 : 9'h0FF;
-        wire signed [8:0] C_alo1 = S_t_px[1] ? S_d1_1 : 9'h0FF;
-        wire signed [8:0] C_alo2 = S_t_px[2] ? S_d1_2 : 9'h0FF;
-        wire signed [8:0] C_alo3 = S_t_px[3] ? S_d1_3 : 9'h0FF;
-        wire signed [8:0] C_ahi0 = S_t_px[0] ? S_d1_0 : 9'h100;
-        wire signed [8:0] C_ahi1 = S_t_px[1] ? S_d1_1 : 9'h100;
-        wire signed [8:0] C_ahi2 = S_t_px[2] ? S_d1_2 : 9'h100;
-        wire signed [8:0] C_ahi3 = S_t_px[3] ? S_d1_3 : 9'h100;
-        wire signed [8:0] C_blo0 = S_t_px[0] ? S_d2_0 : 9'h0FF;
-        wire signed [8:0] C_blo1 = S_t_px[1] ? S_d2_1 : 9'h0FF;
-        wire signed [8:0] C_blo2 = S_t_px[2] ? S_d2_2 : 9'h0FF;
-        wire signed [8:0] C_blo3 = S_t_px[3] ? S_d2_3 : 9'h0FF;
-        wire signed [8:0] C_bhi0 = S_t_px[0] ? S_d2_0 : 9'h100;
-        wire signed [8:0] C_bhi1 = S_t_px[1] ? S_d2_1 : 9'h100;
-        wire signed [8:0] C_bhi2 = S_t_px[2] ? S_d2_2 : 9'h100;
-        wire signed [8:0] C_bhi3 = S_t_px[3] ? S_d2_3 : 9'h100;
-
-        // 4 选 1 的 min/max（平衡树），再和寄存器里的包络合并
-        wire signed [8:0] C_alo01 = (C_alo0 < C_alo1) ? C_alo0 : C_alo1;
-        wire signed [8:0] C_alo23 = (C_alo2 < C_alo3) ? C_alo2 : C_alo3;
-        wire signed [8:0] C_alo   = (C_alo01 < C_alo23) ? C_alo01 : C_alo23;
-        wire signed [8:0] C_ahi01 = (C_ahi0 > C_ahi1) ? C_ahi0 : C_ahi1;
-        wire signed [8:0] C_ahi23 = (C_ahi2 > C_ahi3) ? C_ahi2 : C_ahi3;
-        wire signed [8:0] C_ahi   = (C_ahi01 > C_ahi23) ? C_ahi01 : C_ahi23;
-        wire signed [8:0] C_blo01 = (C_blo0 < C_blo1) ? C_blo0 : C_blo1;
-        wire signed [8:0] C_blo23 = (C_blo2 < C_blo3) ? C_blo2 : C_blo3;
-        wire signed [8:0] C_blo   = (C_blo01 < C_blo23) ? C_blo01 : C_blo23;
-        wire signed [8:0] C_bhi01 = (C_bhi0 > C_bhi1) ? C_bhi0 : C_bhi1;
-        wire signed [8:0] C_bhi23 = (C_bhi2 > C_bhi3) ? C_bhi2 : C_bhi3;
-        wire signed [8:0] C_bhi   = (C_bhi01 > C_bhi23) ? C_bhi01 : C_bhi23;
-        wire [2:0] S_t_n = {2'b0, S_t_px[0]} + {2'b0, S_t_px[1]} +
-                           {2'b0, S_t_px[2]} + {2'b0, S_t_px[3]};
+        // ======================================================================
+        // 采样密度（2026-09-29 压缩；上板验收之前做的）：**每 4 列取 1 列** —— 取字号里最后一个像素
+        // （列 = 4·x_grp+3，即列 3、7、…、959）。
+        //
+        // 为什么：一拍 4 个像素的 min/max 树 ≈110 LUT6，是这一整块最大的一笔；改成"一拍只并
+        // 一个像素"后，每拍只要 1 组比较/选择（≈20 LUT6 + 76 FF 的延迟线）。
+        //
+        // ⚠ **不是"语义不变"**（我们的抽样点是 4 像素/拍，所以一拍只并 1 个 = 每 4 列取 1），
+        //   差两处，写清楚免得误读：
+        //   ① 密度：每帧只统计 160 列 × 360 行 = 5.76 万样本（原来 23 万）。门限仍按"真实
+        //      像素"解释 —— 比较用 TEACH_MIN_PIX>>2，所以 2000 还是"2000 个真实像素"的意思
+        //      （内部计数是样本数，约 1/4）。包络只会差"相邻列那几个 LSB"。
+        //   ② 窗边界最多差 4 个像素：开窗那一拍延迟线里还残留开窗前的 4 个像素（会被并进新
+        //      包络，无害）；窗末那一拍还有 4 个像素没来得及并（判定少看这 4 个）。
+        //      相对 60 帧 × 5.76 万样本，是 1e-7 量级。
+        // ======================================================================
+        // 喂进延迟线的那一个像素：在中央区 ∧ 过宽松前置门 才算"算数"（标志跟着数据一起延）
+        wire S_t_in_ok = S_t_zone && F_teach_pre(S_d1_3, S_d2_3);
 
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 S_t_win  <= 1'b0;     S_t_frm  <= 8'd0;
                 S_t_d1lo <= 9'sd0;    S_t_d1hi <= 9'sd0;
                 S_t_d2lo <= 9'sd0;    S_t_d2hi <= 9'sd0;
-                S_t_cnt  <= 24'd0;
+                S_t_cnt  <= 12'd0;
                 S_t_flash <= 8'd0;
+                S_k1_d1 <= 9'sd0;  S_k2_d1 <= 9'sd0;  S_k3_d1 <= 9'sd0;  S_k4_d1 <= 9'sd0;
+                S_k1_d2 <= 9'sd0;  S_k2_d2 <= 9'sd0;  S_k3_d2 <= 9'sd0;  S_k4_d2 <= 9'sd0;
+                S_k1_ok <= 1'b0;   S_k2_ok <= 1'b0;   S_k3_ok <= 1'b0;   S_k4_ok <= 1'b0;
             end
             // 帧边界收到请求 → 开（或重开）采样窗：清包络（min 置 +255 / max 置 −256）
             else if(I_raw_tuser && S_teach_req) begin
                 S_t_win  <= 1'b1;     S_t_frm  <= 8'd0;
                 S_t_d1lo <= 9'h0FF;   S_t_d1hi <= 9'h100;
                 S_t_d2lo <= 9'h0FF;   S_t_d2hi <= 9'h100;
-                S_t_cnt  <= 24'd0;
+                S_t_cnt  <= 12'd0;
                 S_t_flash <= 8'd0;                        // 新一轮采样期间不闪
             end
             else begin
-                // 包络累加（窗内 + 在采样区 + 有像素）
-                if(S_t_win && I_raw_tvalid && S_t_zone) begin
-                    S_t_d1lo <= (C_alo < S_t_d1lo) ? C_alo : S_t_d1lo;
-                    S_t_d1hi <= (C_ahi > S_t_d1hi) ? C_ahi : S_t_d1hi;
-                    S_t_d2lo <= (C_blo < S_t_d2lo) ? C_blo : S_t_d2lo;
-                    S_t_d2hi <= (C_bhi > S_t_d2hi) ? C_bhi : S_t_d2hi;
-                    S_t_cnt  <= S_t_cnt + {21'd0, S_t_n};
+                // (1) 延迟线：每个有效拍推进一级（与窗口无关 —— 窗末停在线上的那 4 个就不并了）
+                if(I_raw_tvalid) begin
+                    S_k1_d1 <= S_d1_3;     S_k1_d2 <= S_d2_3;     S_k1_ok <= S_t_in_ok;
+                    S_k2_d1 <= S_k1_d1;    S_k2_d2 <= S_k1_d2;    S_k2_ok <= S_k1_ok;
+                    S_k3_d1 <= S_k2_d1;    S_k3_d2 <= S_k2_d2;    S_k3_ok <= S_k2_ok;
+                    S_k4_d1 <= S_k3_d1;    S_k4_d2 <= S_k3_d2;    S_k4_ok <= S_k3_ok;
                 end
-                // 帧计数：采够 TEACH_WIN_FRAMES 帧就关窗（窗末判定见下面的 S_t_last）
+                // (2) 包络合并：窗内 + 末级这个样本算数 → 一拍一次 min/max（压缩就压在这里）
+                //     用 tvalid 一起闸住是为了**行间空隙不重复并同一个像素**（否则计数会虚高）
+                if(S_t_win && I_raw_tvalid && S_k4_ok) begin
+                    S_t_d1lo <= (S_k4_d1 < S_t_d1lo) ? S_k4_d1 : S_t_d1lo;
+                    S_t_d1hi <= (S_k4_d1 > S_t_d1hi) ? S_k4_d1 : S_t_d1hi;
+                    S_t_d2lo <= (S_k4_d2 < S_t_d2lo) ? S_k4_d2 : S_t_d2lo;
+                    S_t_d2hi <= (S_k4_d2 > S_t_d2hi) ? S_k4_d2 : S_t_d2hi;
+                    if(S_t_cnt != 12'hFFF) S_t_cnt <= S_t_cnt + 12'd1;
+                end
+                // (3) 帧计数：采够 TEACH_WIN_FRAMES 帧就关窗（窗末判定见下面的 S_t_last）
                 if(I_raw_tuser && S_t_win) begin
                     if((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES) S_t_win <= 1'b0;
                     else                                     S_t_frm <= S_t_frm + 8'd1;
                 end
-                // 【第 4 轮】闪叠加：窗末那一拍点亮 TEACH_FLASH_FRAMES 帧，到点自己灭。
+                // (4) 【第 4 轮】闪叠加：窗末那一拍点亮 TEACH_FLASH_FRAMES 帧，到点自己灭。
                 // 条件与上面的关窗**同一个**（都用旧值判断），所以判定过不过都会闪 2 s。
                 if(I_raw_tuser) begin
                     if(S_t_win && ((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES))
@@ -656,43 +653,31 @@ module recog_top #(
         end
 
         // ---- 窗末判定 --------------------------------------------------------
-        // 包络非空时 span = hi − lo ≥ 0；空包络（一个像素都没进）时这两个数没意义，
-        // 但那时 S_t_cnt < TEACH_MIN_PIX，判定必然不通过。
+        // 包络非空时 span = hi − lo ≥ 0；空包络（一个样本都没进）时这两个数没意义，
+        // 但那时样本数门限必然不通过。
         wire [9:0] S_t_d1span = {S_t_d1hi[8], S_t_d1hi} - {S_t_d1lo[8], S_t_d1lo};
         wire [9:0] S_t_d2span = {S_t_d2hi[8], S_t_d2hi} - {S_t_d2lo[8], S_t_d2lo};
         // 外扩量 = (span>>3)+(span>>6) ≈ 14%；span ≤ 511 → 外扩量 ≤ 70，7 位够
         wire [6:0] S_t_exp1 = {1'b0, S_t_d1span[8:3]} + {4'b0, S_t_d1span[8:6]};
         wire [6:0] S_t_exp2 = {1'b0, S_t_d2span[8:3]} + {4'b0, S_t_d2span[8:6]};
 
-        function signed [8:0] F_t_exp_lo;    // 下限向下外扩，并钳在 9 位有符号范围内
-            input signed [8:0] I_lo;
-            input [6:0]        I_exp;
-            reg   signed [10:0] S_v;
-            begin
-                S_v = I_lo - I_exp;
-                F_t_exp_lo = (S_v < -11'sd255) ? -9'sd255 : S_v[8:0];
-            end
-        endfunction
+        // 外扩**不需要钳位**（这次压缩掉的死逻辑）：前置门已经把包络限在 d1∈[−128,0]、
+        // d2∈[0,127]，外扩量 ≤ 70 → lo−exp ≥ −198、hi+exp ≤ 197，9 位有符号不会溢出。
+        // （以后若把 TEACH_PRE_* 放宽到接近 ±255，这里要改回"带钳位的 11 位"算法。）
+        assign S_teach_d1_lo = S_t_d1lo - {2'b0, S_t_exp1};
+        assign S_teach_d1_hi = S_t_d1hi + {2'b0, S_t_exp1};
+        assign S_teach_d2_lo = S_t_d2lo - {2'b0, S_t_exp2};
+        assign S_teach_d2_hi = S_t_d2hi + {2'b0, S_t_exp2};
 
-        function signed [8:0] F_t_exp_hi;    // 上限向上外扩
-            input signed [8:0] I_hi;
-            input [6:0]        I_exp;
-            reg   signed [10:0] S_v;
-            begin
-                S_v = I_hi + I_exp;
-                F_t_exp_hi = (S_v > 11'sd255) ? 9'sd255 : S_v[8:0];
-            end
-        endfunction
-
-        assign S_teach_d1_lo = F_t_exp_lo(S_t_d1lo, S_t_exp1);
-        assign S_teach_d1_hi = F_t_exp_hi(S_t_d1hi, S_t_exp1);
-        assign S_teach_d2_lo = F_t_exp_lo(S_t_d2lo, S_t_exp2);
-        assign S_teach_d2_hi = F_t_exp_hi(S_t_d2hi, S_t_exp2);
+        // 样本门限：计数口径是"每 4 列取 1 列"，所以拿 TEACH_MIN_PIX>>2 去比 —— TEACH_MIN_PIX
+        // 仍按**真实像素数**解释（2000 → 500 个样本）。取 [13:2] 是 >>2 且不产生位宽截断告警
+        // （要求 TEACH_MIN_PIX < 16384）。
+        wire [11:0] S_t_min = TEACH_MIN_PIX[13:2];
 
         // 窗末那一拍（＝第 60 帧的帧首）：样本够 + d2 跨度够 才写。
         // 同一拍又来了新请求就先满足新请求（不写旧结果，直接重开窗）。
         wire S_t_last = S_t_win && ((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES);
-        wire S_t_ok   = (S_t_cnt >= TEACH_MIN_PIX) && (S_t_d2span >= TEACH_MIN_D2SPAN);
+        wire S_t_ok   = (S_t_cnt >= S_t_min) && (S_t_d2span >= TEACH_MIN_D2SPAN);
         assign S_teach_apply = I_raw_tuser && S_t_last && S_t_ok && !S_teach_req;
         // 闪叠加指示灯：窗末起（含"新请求抢在窗末同一拍"的情况）高 ~2 s，给 isp_top 用
         assign O_teach_flash = (S_t_flash != 8'd0);
