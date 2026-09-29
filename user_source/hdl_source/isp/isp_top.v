@@ -94,13 +94,17 @@ module isp_top #(
     //   4 = 只看运动门(绿)  5 = 只看肤色门(红)  6 = ROI 边框+融合  7 = 三色诊断
     // MASK_PREVIEW=1 时无条件叠加；DIAG_MODE_SEL=1 时任一非 0 视图号都叠加；
     // 正式交付两者都为 0 → 只有 recog_algo==1 才叠加。
+    // 【第 4 轮】再加一条：一键示教的"2 秒闪叠加"（recog_top 的 O_teach_flash）—— 采样窗结束后
+    //   不管判定过不过都无条件叠加约 2 s，用来立刻看"示范时手有没有被掩码点亮"。平时恒 0，
+    //   所以开机画面不受影响（这条是 A 线为了示教验收加的唯一一条叠加使能）。
     // 每像素 3 bit 色码（recog_top 的 O_ovl_sel 给）：
     //   0=原像素 1=掩码高亮(红) 2=准星(黄) 3=只过肤色(纯红) 4=只过运动(纯绿)
     //   5=两者都过(纯黄) 6=ROI 窗口边框(纯蓝) 7=准星(青)
     wire [11:0] S_ovl_sel;
     wire [7:0]  S_bg_px;                       // recog_top 给的"当前块背景灰度"
+    wire        S_teach_flash;                 // recog_top 的一键示教"闪叠加"指示（~2 s）
     wire [3:0]  S_dbg_mode = I_mode_committed[15:12];
-    wire S_ovl_en = MASK_PREVIEW |
+    wire S_ovl_en = MASK_PREVIEW | S_teach_flash |
                     ((DIAG_MODE_SEL != 0) ? (S_dbg_mode != 4'd0) : (S_dbg_mode == 4'd1));
     wire S_bgview = (DIAG_MODE_SEL != 0) && (S_dbg_mode == 4'd2);
 
@@ -280,7 +284,8 @@ module isp_top #(
         .O_bbox_y        (O_bbox_y),
         .O_status_toggle (O_status_toggle),
         .O_ovl_sel       (S_ovl_sel),
-        .O_bg_px         (S_bg_px)
+        .O_bg_px         (S_bg_px),
+        .O_teach_flash   (S_teach_flash)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

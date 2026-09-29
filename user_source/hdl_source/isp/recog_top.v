@@ -54,7 +54,9 @@
 //   * 第 3 轮：一次事件 = 一个 60 帧采样窗 —— 把**固定中央区**里通过**宽松前置门**的像素
 //     并成 (d1,d2) 包络，窗末判定（样本 ≥2000 且 d2 跨度 ≥10）通过就外扩 ≈14% 写进
 //     窗口寄存器；判定不通过就一个数都不写。TEACH_EN=0 可把整段关掉（回到第 1 轮行为）。
-//     第 4 轮的"2 秒闪叠加"还没接（那一步要动 isp_top.v）。
+//   * 第 4 轮：窗末起把 O_teach_flash 拉高 ~120 帧（≈2 s）——**不论判定过不过**（同板行为：
+//     "没看到手点亮 = 没采到，重来"）；isp_top 把它并进叠加使能，示教完立刻能看手亮不亮。
+//     平时恒 0，开机画面不受影响。第 5 轮才上板验收。
 //
 // 延迟：肤色判定与统计都是 0 拍组合计入（纯组合掩码 + 帧锁存输出），锁存发生在
 //       所选用掩码源的 tuser 上；运动掩码同样是 0 拍组合（背景值在每块开始时就已经
@@ -271,7 +273,9 @@ module recog_top #(
     parameter signed [8:0] TEACH_PRE_D2_HI =   9'sd127,
     // 窗末判定：样本数下限（不足 = 画面里没看到东西）；d2 跨度下限（自保，只抓到噪声就放弃）
     parameter [23:0]  TEACH_MIN_PIX    = 24'd2000,
-    parameter [9:0]   TEACH_MIN_D2SPAN = 10'd10
+    parameter [9:0]   TEACH_MIN_D2SPAN = 10'd10,
+    // 【第 4 轮】采样窗结束后"闪叠加"的长度（帧；≈120 = 2 s @60 fps）
+    parameter [7:0]   TEACH_FLASH_FRAMES = 8'd120
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -320,7 +324,12 @@ module recog_top #(
     output wire [7:0]  O_bg_px,
     // 每像素 3 bit（低 12 位共 4 像素）：0=原像素 1=掩码高亮(红) 2=准星(黄)
     //                                  3/4/5=诊断色(只肤色/只运动/两者) 6=ROI 边框 7=诊断准星
-    output wire [11:0] O_ovl_sel
+    output wire [11:0] O_ovl_sel,
+
+    // 【第 4 轮】一键示教的"2 秒闪叠加"指示：一次采样窗结束（**不论判定过不过**）后拉高
+    // ~120 帧（≈2 s）。isp_top 把它并进叠加使能 S_ovl_en → 示教完立刻在画面上看"手有没有
+    // 被掩码点亮"（判定不通过时画面照旧会闪 2 s，"没点亮 = 没采到，重来"）。平时恒 0。
+    output wire        O_teach_flash
 );
 
     // ---- 模式提交字锁存（同域，无需两级同步）--------------------------------
@@ -561,6 +570,7 @@ module recog_top #(
         reg signed [8:0]  S_t_d1lo, S_t_d1hi;
         reg signed [8:0]  S_t_d2lo, S_t_d2hi;
         reg [23:0]        S_t_cnt;                       // 进包络的像素数
+        reg [7:0]         S_t_flash;                     // 窗末起的"闪叠加"倒计时（帧）
 
         // 本拍 4 个像素里有谁通过前置门（不在采样区、tvalid=0 就整拍不算）
         wire [3:0] S_t_px = (S_t_win && I_raw_tvalid && S_t_zone)
@@ -610,6 +620,7 @@ module recog_top #(
                 S_t_d1lo <= 9'sd0;    S_t_d1hi <= 9'sd0;
                 S_t_d2lo <= 9'sd0;    S_t_d2hi <= 9'sd0;
                 S_t_cnt  <= 24'd0;
+                S_t_flash <= 8'd0;
             end
             // 帧边界收到请求 → 开（或重开）采样窗：清包络（min 置 +255 / max 置 −256）
             else if(I_raw_tuser && S_teach_req) begin
@@ -617,6 +628,7 @@ module recog_top #(
                 S_t_d1lo <= 9'h0FF;   S_t_d1hi <= 9'h100;
                 S_t_d2lo <= 9'h0FF;   S_t_d2hi <= 9'h100;
                 S_t_cnt  <= 24'd0;
+                S_t_flash <= 8'd0;                        // 新一轮采样期间不闪
             end
             else begin
                 // 包络累加（窗内 + 在采样区 + 有像素）
@@ -631,6 +643,14 @@ module recog_top #(
                 if(I_raw_tuser && S_t_win) begin
                     if((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES) S_t_win <= 1'b0;
                     else                                     S_t_frm <= S_t_frm + 8'd1;
+                end
+                // 【第 4 轮】闪叠加：窗末那一拍点亮 TEACH_FLASH_FRAMES 帧，到点自己灭。
+                // 条件与上面的关窗**同一个**（都用旧值判断），所以判定过不过都会闪 2 s。
+                if(I_raw_tuser) begin
+                    if(S_t_win && ((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES))
+                        S_t_flash <= TEACH_FLASH_FRAMES;
+                    else if(S_t_flash != 8'd0)
+                        S_t_flash <= S_t_flash - 8'd1;
                 end
             end
         end
@@ -674,12 +694,15 @@ module recog_top #(
         wire S_t_last = S_t_win && ((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES);
         wire S_t_ok   = (S_t_cnt >= TEACH_MIN_PIX) && (S_t_d2span >= TEACH_MIN_D2SPAN);
         assign S_teach_apply = I_raw_tuser && S_t_last && S_t_ok && !S_teach_req;
+        // 闪叠加指示灯：窗末起（含"新请求抢在窗末同一拍"的情况）高 ~2 s，给 isp_top 用
+        assign O_teach_flash = (S_t_flash != 8'd0);
 
     end
     else begin : g_teach_off
         // TEACH_EN=0：窗口寄存器只剩复位值（= 交付默认），采样/判定逻辑一个门都不占
         // （上面那几拍事件检测仍然在，代价约 6 FF）
         assign S_teach_apply = 1'b0;
+        assign O_teach_flash = 1'b0;
         assign S_teach_d1_lo = 9'sd0;   assign S_teach_d1_hi = 9'sd0;
         assign S_teach_d2_lo = 9'sd0;   assign S_teach_d2_hi = 9'sd0;
     end
