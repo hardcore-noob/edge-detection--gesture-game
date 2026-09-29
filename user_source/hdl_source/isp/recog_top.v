@@ -325,6 +325,15 @@ module recog_top #(
         if(!I_rst_n) S_mode_word <= 26'd0;
         else         S_mode_word <= I_mode_word;
     end
+    // ---- 【第 2 轮】示教事件检测（模块级）----------------------------------
+    // 提交字 bit[19:16] teach_cnt（KEY4 长按 = 值变化，事件语义）。原来这份检测在 g_motion 里，
+    // 而 SKIN_ONLY=1 时 g_motion 不例化 → 搬到模块级。本轮先"只检测、不消费"（第 3 轮接采样）。
+    reg [3:0] S_teach_seen2;
+    wire      S_teach_evt2 = (S_mode_word[19:16] != S_teach_seen2);
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n)        S_teach_seen2 <= 4'd0;
+        else if(S_teach_evt2) S_teach_seen2 <= S_mode_word[19:16];
+    end
     // M1 消费：algo = S_mode_word[15:12]、game = S_mode_word[11:8]
 
     // ---- tap 监视：每帧字数 -------------------------------------------------
@@ -438,12 +447,31 @@ module recog_top #(
     wire signed [8:0] S_d2_3 = {1'b0, S_raw_pix3[23:16]} - {1'b0, S_y3};
 
     // 判据 v1：(B−Y)/(R−Y) 矩形。Y 由档位决定（旧 S_gray / 新 S_ynew）。
+    // ---- 【第 1 轮】皮肤窗口 = 运行时寄存器 ---------------------------------
+    // 复位值 = 交付默认（d1∈[D1_MIN,D1_MAX]、d2∈[D2_MIN_DELIV,D2_MAX]）。
+    // 第 3 轮的"一键示教"只往这 4 个寄存器写数 —— 判据路径从此不再被后续改动触碰。
+    // 档 8（旧 Y 全宽松）与档 9（d2≥5 标定参照）仍走编译期常量/固定值，与示教解耦。
+    reg signed [8:0] S_win_d1_lo, S_win_d1_hi, S_win_d2_lo, S_win_d2_hi;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_win_d1_lo <= D1_MIN;        S_win_d1_hi <= D1_MAX;
+            S_win_d2_lo <= D2_MIN_DELIV;  S_win_d2_hi <= D2_MAX;
+        end
+        // 第 3 轮在这里写示教结果；本轮不动
+    end
+    // 判据实际用的 4 个边界（档 8/9 走常量，其余走运行时寄存器）
+    wire signed [8:0] S_f_d1_lo = (S_cfg == 4'd8) ? D1_MIN : S_win_d1_lo;
+    wire signed [8:0] S_f_d1_hi = (S_cfg == 4'd8) ? D1_MAX : S_win_d1_hi;
+    wire signed [8:0] S_f_d2_lo = (S_cfg == 4'd8) ? D2_MIN :
+                                 ((S_cfg == 4'd9) ? 9'sd5 : S_win_d2_lo);
+    wire signed [8:0] S_f_d2_hi = (S_cfg == 4'd8) ? D2_MAX : S_win_d2_hi;
+
     // 判据 v1：d1/d2 矩形（Y 由档位决定：档 8 用旧 S_gray，其余用真 luma）。
     function F_skin_px;
         input signed [8:0] I_d1, I_d2;   // d1 = B−Y、d2 = R−Y
         begin
-            F_skin_px = (I_d1 >= D1_MIN) && (I_d1 <= D1_MAX) &&
-                        (I_d2 >= S_d2_lo_r) && (I_d2 <= D2_MAX);
+            F_skin_px = (I_d1 >= S_f_d1_lo) && (I_d1 <= S_f_d1_hi) &&
+                        (I_d2 >= S_f_d2_lo) && (I_d2 <= S_f_d2_hi);
         end
     endfunction
 
