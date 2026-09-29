@@ -48,6 +48,14 @@
 //   * Step 5（收尾）：准星观测从"包围盒中心"换成**掩码质心**（Σ列/Σ行 ÷ 像素数，
 //     每帧一次串行除法）。参数 USE_CENTROID=0 可切回旧的包围盒中心做同板 A/B。
 //
+// M1 收尾 · 一键示教（2026-09-29，第 1~3 轮）：
+//   * 第 1 轮：皮肤窗口 [d1,d2] 从编译期常量改成 **4 个运行时寄存器**（复位值 = 交付默认）；
+//   * 第 2 轮：提交字 bit[19:16] teach_cnt 的事件检测搬到模块级（SKIN_ONLY=1 时也在）；
+//   * 第 3 轮：一次事件 = 一个 60 帧采样窗 —— 把**固定中央区**里通过**宽松前置门**的像素
+//     并成 (d1,d2) 包络，窗末判定（样本 ≥2000 且 d2 跨度 ≥10）通过就外扩 ≈14% 写进
+//     窗口寄存器；判定不通过就一个数都不写。TEACH_EN=0 可把整段关掉（回到第 1 轮行为）。
+//     第 4 轮的"2 秒闪叠加"还没接（那一步要动 isp_top.v）。
+//
 // 延迟：肤色判定与统计都是 0 拍组合计入（纯组合掩码 + 帧锁存输出），锁存发生在
 //       所选用掩码源的 tuser 上；运动掩码同样是 0 拍组合（背景值在每块开始时就已经
 //       预取到手，见下），所以融合掩码相对像素流不产生额外延迟；CTRL_SYNC 回传是
@@ -241,7 +249,29 @@ module recog_top #(
     // MASK_POLICY=1：搜索态只看运动（帧差）；锁定后在"上一帧包围盒 ± CORE_MARGIN"内
     //   再并上肤色（手停住时靠肤色兜住，不会马上掉锁）。
     parameter integer FRAME_DIFF  = 0,
-    parameter integer MASK_POLICY = 0
+    parameter integer MASK_POLICY = 0,
+
+    // ---- 【第 3 轮】一键示教（TEACH_EN=0 时整段逻辑在综合里消失）-------------
+    // 触发 = 提交字 bit[19:16] teach_cnt 变化（长按 KEY4 / 串口 `W 03 0001` 同源）。
+    // 一次触发 = 一个约 1 秒（60 帧）的采样窗；窗内把"固定中央区"里通过宽松前置门的
+    // 像素并进 (d1,d2) 包络，窗末判定通过就把包络外扩后写进 4 个运行时窗口寄存器。
+    // （设计见 docs/A-20260929-交接给新对话.md §5；第 4 轮的"2 秒闪叠加"还没接。）
+    parameter integer TEACH_EN = 1,
+    // 采样窗长度（帧）
+    parameter [7:0]   TEACH_WIN_FRAMES = 8'd60,
+    // 采样区：固定中央区（不用 ROI —— ROI 边界跟着跟踪状态跳，示教结果会漂）
+    parameter [10:0]  TEACH_X0 = 11'd320,
+    parameter [10:0]  TEACH_X1 = 11'd959,
+    parameter [9:0]   TEACH_Y0 = 10'd180,
+    parameter [9:0]   TEACH_Y1 = 10'd539,
+    // 宽松前置门：只有落在这个框里的像素才进包络（顺手排除"画面里根本没有暖色物体"）
+    parameter signed [8:0] TEACH_PRE_D1_LO = -9'sd128,
+    parameter signed [8:0] TEACH_PRE_D1_HI =   9'sd0,
+    parameter signed [8:0] TEACH_PRE_D2_LO =   9'sd0,
+    parameter signed [8:0] TEACH_PRE_D2_HI =   9'sd127,
+    // 窗末判定：样本数下限（不足 = 画面里没看到东西）；d2 跨度下限（自保，只抓到噪声就放弃）
+    parameter [23:0]  TEACH_MIN_PIX    = 24'd2000,
+    parameter [9:0]   TEACH_MIN_D2SPAN = 10'd10
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -325,14 +355,33 @@ module recog_top #(
         if(!I_rst_n) S_mode_word <= 26'd0;
         else         S_mode_word <= I_mode_word;
     end
-    // ---- 【第 2 轮】示教事件检测（模块级）----------------------------------
+    // ---- 【第 2/3 轮】示教事件检测（模块级）--------------------------------
     // 提交字 bit[19:16] teach_cnt（KEY4 长按 = 值变化，事件语义）。原来这份检测在 g_motion 里，
-    // 而 SKIN_ONLY=1 时 g_motion 不例化 → 搬到模块级。本轮先"只检测、不消费"（第 3 轮接采样）。
+    // 而 SKIN_ONLY=1 时 g_motion 不例化 → 搬到模块级（第 2 轮）。第 3 轮起真的消费它，并加两处硬化：
+    //   ① **复位后第一个帧边界只对齐、不触发** —— 否则"软复位了但 teach_cnt 已经是非 0"
+    //      会在开机瞬间凭空触发一次示教，把交付窗口刷掉；
+    //   ② 事件先记成 S_teach_req，到**帧边界**才消费 —— teach_cnt 在帧中间变化，只做 1 拍宽的
+    //      脉冲会被"只在帧边界看"的状态机漏掉。
     reg [3:0] S_teach_seen2;
-    wire      S_teach_evt2 = (S_mode_word[19:16] != S_teach_seen2);
+    reg       S_teach_rdy;      // 复位后过了一个帧边界，才允许认事件
+    reg       S_teach_req;      // 有示教请求待采（在帧边界开窗时清掉）
+    wire      S_teach_chg  = (S_mode_word[19:16] != S_teach_seen2);
+    wire      S_teach_evt2 = S_teach_chg && S_teach_rdy;
     always @(posedge I_clk or negedge I_rst_n) begin
-        if(!I_rst_n)        S_teach_seen2 <= 4'd0;
-        else if(S_teach_evt2) S_teach_seen2 <= S_mode_word[19:16];
+        if(!I_rst_n) begin
+            S_teach_seen2 <= 4'd0;
+            S_teach_rdy   <= 1'b0;
+        end
+        else if(I_raw_tuser) begin
+            S_teach_seen2 <= S_mode_word[19:16];   // 帧边界只对齐，不在这里触发
+            S_teach_rdy   <= 1'b1;
+        end
+        else if(S_teach_chg) S_teach_seen2 <= S_mode_word[19:16];
+    end
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n)          S_teach_req <= 1'b0;
+        else if(S_teach_evt2) S_teach_req <= 1'b1;
+        else if(I_raw_tuser)  S_teach_req <= 1'b0;
     end
     // M1 消费：algo = S_mode_word[15:12]、game = S_mode_word[11:8]
 
@@ -457,8 +506,184 @@ module recog_top #(
             S_win_d1_lo <= D1_MIN;        S_win_d1_hi <= D1_MAX;
             S_win_d2_lo <= D2_MIN_DELIV;  S_win_d2_hi <= D2_MAX;
         end
-        // 第 3 轮在这里写示教结果；本轮不动
+        // 【第 3 轮】一键示教：窗末判定通过的那一拍，把包络写进这 4 个寄存器。
+        // **只有这一处**写它们（判定不通过就一个数都不写，保持原窗口）。
+        else if(S_teach_apply) begin
+            S_win_d1_lo <= S_teach_d1_lo;
+            S_win_d1_hi <= S_teach_d1_hi;
+            S_win_d2_lo <= S_teach_d2_lo;
+            S_win_d2_hi <= S_teach_d2_hi;
+        end
     end
+
+    // ========================================================================
+    // 【第 3 轮】一键示教：采样窗状态机 + (d1,d2) 包络 + 窗末判定与写入
+    //
+    // 一次示教 = 一个 60 帧（≈1 s）的采样窗：
+    //   * 窗内每一拍把**固定中央区**（x∈[TEACH_X0,TEACH_X1]、y∈[TEACH_Y0,TEACH_Y1]）里
+    //     通过**宽松前置门**（d1∈[−128,0] ∧ d2∈[0,127]）的像素并进包络：d1/d2 各记
+    //     min/max，同时数像素个数；
+    //   * 窗末（第 60 帧的帧首）判一次：样本数 ≥ TEACH_MIN_PIX **且** d2 跨度 ≥
+    //     TEACH_MIN_D2SPAN → 包络上下限各自按**自身跨度**外扩 (span>>3)+(span>>6)
+    //     （≈14%，lo 向下、hi 向上）后**一次**写进 4 个运行时窗口寄存器；否则什么都不写。
+    // 为什么采样区是固定中央区：ROI 的边界跟着跟踪状态走（锁定/丢失会跳），拿它当采样区会
+    //   让"同样的手"示教出不同的窗口。
+    // 为什么用 min/max 包络而不是均值±方差：方差要累加平方（成本高、现场难解释）；包络只要
+    //   比较 + 选择，而且上下限能**分别**外扩（肤色分布本来就不对称）。
+    // 资源：≈200 LUT6 / ≈75 FF / 0 ERAM / 0 DSP；TEACH_EN=0 时整段不综合（回到第 1 轮行为）。
+    // ========================================================================
+    wire              S_teach_apply;         // 窗末判定通过（1 拍脉冲）
+    wire signed [8:0] S_teach_d1_lo, S_teach_d1_hi;
+    wire signed [8:0] S_teach_d2_lo, S_teach_d2_hi;
+
+    generate
+    if (TEACH_EN != 0) begin : g_teach
+
+        // ---- 采样区判据：按"字号"判一次即可 ----------------------------------
+        // 中央区左右边界都落在 4 像素字边界上（320 = 4×80、959 = 4×239+3），所以一拍里的
+        // 4 个像素同进同出，不用逐像素比较。
+        wire [10:0] S_t_xg0 = TEACH_X0 >> 2;
+        wire [10:0] S_t_xg1 = TEACH_X1 >> 2;
+        wire        S_t_zone = (S_y_pos >= TEACH_Y0) && (S_y_pos <= TEACH_Y1) &&
+                               (S_x_grp >= S_t_xg0) && (S_x_grp <= S_t_xg1);
+
+        // ---- 宽松前置门 ------------------------------------------------------
+        function F_teach_pre;
+            input signed [8:0] I_d1, I_d2;
+            begin
+                F_teach_pre = (I_d1 >= TEACH_PRE_D1_LO) && (I_d1 <= TEACH_PRE_D1_HI) &&
+                              (I_d2 >= TEACH_PRE_D2_LO) && (I_d2 <= TEACH_PRE_D2_HI);
+            end
+        endfunction
+
+        reg               S_t_win;                       // 采样窗开着
+        reg [7:0]         S_t_frm;                       // 窗内已经采到的帧数
+        reg signed [8:0]  S_t_d1lo, S_t_d1hi;
+        reg signed [8:0]  S_t_d2lo, S_t_d2hi;
+        reg [23:0]        S_t_cnt;                       // 进包络的像素数
+
+        // 本拍 4 个像素里有谁通过前置门（不在采样区、tvalid=0 就整拍不算）
+        wire [3:0] S_t_px = (S_t_win && I_raw_tvalid && S_t_zone)
+                          ? { F_teach_pre(S_d1_3, S_d2_3), F_teach_pre(S_d1_2, S_d2_2),
+                              F_teach_pre(S_d1_1, S_d2_1), F_teach_pre(S_d1_0, S_d2_0) }
+                          : 4'b0000;
+
+        // 候选值：没通过的像素用哨兵（min 用 +255、max 用 −256）→ 合并时自动让位。
+        // 用位模式写（9'h0FF / 9'h100）避免混合有符号/无符号的扩展规则踩坑：
+        // 9'h100 就是 9 位补码的 −256，比任何真实色差都小。
+        wire signed [8:0] C_alo0 = S_t_px[0] ? S_d1_0 : 9'h0FF;
+        wire signed [8:0] C_alo1 = S_t_px[1] ? S_d1_1 : 9'h0FF;
+        wire signed [8:0] C_alo2 = S_t_px[2] ? S_d1_2 : 9'h0FF;
+        wire signed [8:0] C_alo3 = S_t_px[3] ? S_d1_3 : 9'h0FF;
+        wire signed [8:0] C_ahi0 = S_t_px[0] ? S_d1_0 : 9'h100;
+        wire signed [8:0] C_ahi1 = S_t_px[1] ? S_d1_1 : 9'h100;
+        wire signed [8:0] C_ahi2 = S_t_px[2] ? S_d1_2 : 9'h100;
+        wire signed [8:0] C_ahi3 = S_t_px[3] ? S_d1_3 : 9'h100;
+        wire signed [8:0] C_blo0 = S_t_px[0] ? S_d2_0 : 9'h0FF;
+        wire signed [8:0] C_blo1 = S_t_px[1] ? S_d2_1 : 9'h0FF;
+        wire signed [8:0] C_blo2 = S_t_px[2] ? S_d2_2 : 9'h0FF;
+        wire signed [8:0] C_blo3 = S_t_px[3] ? S_d2_3 : 9'h0FF;
+        wire signed [8:0] C_bhi0 = S_t_px[0] ? S_d2_0 : 9'h100;
+        wire signed [8:0] C_bhi1 = S_t_px[1] ? S_d2_1 : 9'h100;
+        wire signed [8:0] C_bhi2 = S_t_px[2] ? S_d2_2 : 9'h100;
+        wire signed [8:0] C_bhi3 = S_t_px[3] ? S_d2_3 : 9'h100;
+
+        // 4 选 1 的 min/max（平衡树），再和寄存器里的包络合并
+        wire signed [8:0] C_alo01 = (C_alo0 < C_alo1) ? C_alo0 : C_alo1;
+        wire signed [8:0] C_alo23 = (C_alo2 < C_alo3) ? C_alo2 : C_alo3;
+        wire signed [8:0] C_alo   = (C_alo01 < C_alo23) ? C_alo01 : C_alo23;
+        wire signed [8:0] C_ahi01 = (C_ahi0 > C_ahi1) ? C_ahi0 : C_ahi1;
+        wire signed [8:0] C_ahi23 = (C_ahi2 > C_ahi3) ? C_ahi2 : C_ahi3;
+        wire signed [8:0] C_ahi   = (C_ahi01 > C_ahi23) ? C_ahi01 : C_ahi23;
+        wire signed [8:0] C_blo01 = (C_blo0 < C_blo1) ? C_blo0 : C_blo1;
+        wire signed [8:0] C_blo23 = (C_blo2 < C_blo3) ? C_blo2 : C_blo3;
+        wire signed [8:0] C_blo   = (C_blo01 < C_blo23) ? C_blo01 : C_blo23;
+        wire signed [8:0] C_bhi01 = (C_bhi0 > C_bhi1) ? C_bhi0 : C_bhi1;
+        wire signed [8:0] C_bhi23 = (C_bhi2 > C_bhi3) ? C_bhi2 : C_bhi3;
+        wire signed [8:0] C_bhi   = (C_bhi01 > C_bhi23) ? C_bhi01 : C_bhi23;
+        wire [2:0] S_t_n = {2'b0, S_t_px[0]} + {2'b0, S_t_px[1]} +
+                           {2'b0, S_t_px[2]} + {2'b0, S_t_px[3]};
+
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_t_win  <= 1'b0;     S_t_frm  <= 8'd0;
+                S_t_d1lo <= 9'sd0;    S_t_d1hi <= 9'sd0;
+                S_t_d2lo <= 9'sd0;    S_t_d2hi <= 9'sd0;
+                S_t_cnt  <= 24'd0;
+            end
+            // 帧边界收到请求 → 开（或重开）采样窗：清包络（min 置 +255 / max 置 −256）
+            else if(I_raw_tuser && S_teach_req) begin
+                S_t_win  <= 1'b1;     S_t_frm  <= 8'd0;
+                S_t_d1lo <= 9'h0FF;   S_t_d1hi <= 9'h100;
+                S_t_d2lo <= 9'h0FF;   S_t_d2hi <= 9'h100;
+                S_t_cnt  <= 24'd0;
+            end
+            else begin
+                // 包络累加（窗内 + 在采样区 + 有像素）
+                if(S_t_win && I_raw_tvalid && S_t_zone) begin
+                    S_t_d1lo <= (C_alo < S_t_d1lo) ? C_alo : S_t_d1lo;
+                    S_t_d1hi <= (C_ahi > S_t_d1hi) ? C_ahi : S_t_d1hi;
+                    S_t_d2lo <= (C_blo < S_t_d2lo) ? C_blo : S_t_d2lo;
+                    S_t_d2hi <= (C_bhi > S_t_d2hi) ? C_bhi : S_t_d2hi;
+                    S_t_cnt  <= S_t_cnt + {21'd0, S_t_n};
+                end
+                // 帧计数：采够 TEACH_WIN_FRAMES 帧就关窗（窗末判定见下面的 S_t_last）
+                if(I_raw_tuser && S_t_win) begin
+                    if((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES) S_t_win <= 1'b0;
+                    else                                     S_t_frm <= S_t_frm + 8'd1;
+                end
+            end
+        end
+
+        // ---- 窗末判定 --------------------------------------------------------
+        // 包络非空时 span = hi − lo ≥ 0；空包络（一个像素都没进）时这两个数没意义，
+        // 但那时 S_t_cnt < TEACH_MIN_PIX，判定必然不通过。
+        wire [9:0] S_t_d1span = {S_t_d1hi[8], S_t_d1hi} - {S_t_d1lo[8], S_t_d1lo};
+        wire [9:0] S_t_d2span = {S_t_d2hi[8], S_t_d2hi} - {S_t_d2lo[8], S_t_d2lo};
+        // 外扩量 = (span>>3)+(span>>6) ≈ 14%；span ≤ 511 → 外扩量 ≤ 70，7 位够
+        wire [6:0] S_t_exp1 = {1'b0, S_t_d1span[8:3]} + {4'b0, S_t_d1span[8:6]};
+        wire [6:0] S_t_exp2 = {1'b0, S_t_d2span[8:3]} + {4'b0, S_t_d2span[8:6]};
+
+        function signed [8:0] F_t_exp_lo;    // 下限向下外扩，并钳在 9 位有符号范围内
+            input signed [8:0] I_lo;
+            input [6:0]        I_exp;
+            reg   signed [10:0] S_v;
+            begin
+                S_v = I_lo - I_exp;
+                F_t_exp_lo = (S_v < -11'sd255) ? -9'sd255 : S_v[8:0];
+            end
+        endfunction
+
+        function signed [8:0] F_t_exp_hi;    // 上限向上外扩
+            input signed [8:0] I_hi;
+            input [6:0]        I_exp;
+            reg   signed [10:0] S_v;
+            begin
+                S_v = I_hi + I_exp;
+                F_t_exp_hi = (S_v > 11'sd255) ? 9'sd255 : S_v[8:0];
+            end
+        endfunction
+
+        assign S_teach_d1_lo = F_t_exp_lo(S_t_d1lo, S_t_exp1);
+        assign S_teach_d1_hi = F_t_exp_hi(S_t_d1hi, S_t_exp1);
+        assign S_teach_d2_lo = F_t_exp_lo(S_t_d2lo, S_t_exp2);
+        assign S_teach_d2_hi = F_t_exp_hi(S_t_d2hi, S_t_exp2);
+
+        // 窗末那一拍（＝第 60 帧的帧首）：样本够 + d2 跨度够 才写。
+        // 同一拍又来了新请求就先满足新请求（不写旧结果，直接重开窗）。
+        wire S_t_last = S_t_win && ((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES);
+        wire S_t_ok   = (S_t_cnt >= TEACH_MIN_PIX) && (S_t_d2span >= TEACH_MIN_D2SPAN);
+        assign S_teach_apply = I_raw_tuser && S_t_last && S_t_ok && !S_teach_req;
+
+    end
+    else begin : g_teach_off
+        // TEACH_EN=0：窗口寄存器只剩复位值（= 交付默认），采样/判定逻辑一个门都不占
+        // （上面那几拍事件检测仍然在，代价约 6 FF）
+        assign S_teach_apply = 1'b0;
+        assign S_teach_d1_lo = 9'sd0;   assign S_teach_d1_hi = 9'sd0;
+        assign S_teach_d2_lo = 9'sd0;   assign S_teach_d2_hi = 9'sd0;
+    end
+    endgenerate
     // 判据实际用的 4 个边界（档 8/9 走常量，其余走运行时寄存器）
     wire signed [8:0] S_f_d1_lo = (S_cfg == 4'd8) ? D1_MIN : S_win_d1_lo;
     wire signed [8:0] S_f_d1_hi = (S_cfg == 4'd8) ? D1_MAX : S_win_d1_hi;
