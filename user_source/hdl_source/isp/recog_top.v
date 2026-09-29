@@ -313,24 +313,11 @@ module recog_top #(
     wire [3:0] S_cfg         = I_mode_word[15:12];
     // ★ 运动/锁存门旁路（参数 SKIN_ONLY，默认 1）：交付档（0/1）也一起旁路。
     wire       S_skin_only    = (SKIN_ONLY != 0);
-    // **修正 Y 回绕**：除基准档 8（旧 Y 全宽松）与对照档 10（旧 Y + d2≥7）外，一律用
-    //   不溢出的真 luma Y = (R+2G+B)/4（移位加法，0 DSP）。
-    wire       S_y_new        = (S_cfg != 4'd8) && (S_cfg != 4'd10);
-    // d2 下限：**交付档（0..7）取 D2_MIN_DELIV**；8..15 是上板调参档（保留，便于后续标定）。
-    wire signed [8:0] S_d2_lo_r = (S_cfg == 4'd8)  ? 9'sd0 :
-                                  (S_cfg == 4'd9)  ? 9'sd5 :
-                                  (S_cfg == 4'd10) ? 9'sd7 :
-                                  (S_cfg == 4'd11) ? 9'sd7 :
-                                  (S_cfg == 4'd12) ? 9'sd6 :
-                                  (S_cfg == 4'd14) ? 9'sd3 :
-                                  (S_cfg == 4'd15) ? 9'sd0 : D2_MIN_DELIV;
-    // 档 13 试**另一条杠杆**：d1 下限（d1 = B−Y ≥ −70），看能不能只切桌面不动手。
-    wire signed [8:0] S_d1_lo_r = (S_cfg == 4'd13) ? -9'sd70 : D1_MIN;
-    // 下面三个旋钮都已被实测否掉：保留代码但不启用（常量 → 综合直接裁掉）。
-    wire       S_d2_hi_strict = 1'b0;    // 上限 70→63：实测无效
-    wire       S_skin_rel     = 1'b0;    // 相对窗口：实测"手多但桌面也有色"
-    wire       S_size_tight   = 1'b0;    // 尺寸门：实测无效
-    wire [7:0] S_y_cap        = 8'd255;  // 亮度上限 Y_CAP_A/B：实测无效
+    // **修正 Y 回绕**：档 8 保留旧 Y 做对照，其余一律用不溢出的真 luma Y=(R+2G+B)/4。
+    wire       S_y_new        = (S_cfg != 4'd8);
+    // d2 下限：交付档取 D2_MIN_DELIV(=3)；档 9 留一个更严的标定参照（d2≥5）、档 8 是全宽松旧 Y。
+    wire signed [8:0] S_d2_lo_r = (S_cfg == 4'd8) ? 9'sd0 :
+                                  (S_cfg == 4'd9) ? 9'sd5 : D2_MIN_DELIV;
 
     reg [25:0] S_mode_word;
     always @(posedge I_clk or negedge I_rst_n) begin
@@ -450,33 +437,12 @@ module recog_top #(
     wire signed [8:0] S_d2_3 = {1'b0, S_raw_pix3[23:16]} - {1'b0, S_y3};
 
     // 判据 v1：(B−Y)/(R−Y) 矩形。Y 由档位决定（旧 S_gray / 新 S_ynew）。
+    // 判据 v1：d1/d2 矩形（Y 由档位决定：档 8 用旧 S_gray，其余用真 luma）。
     function F_skin_px;
         input signed [8:0] I_d1, I_d2;   // d1 = B−Y、d2 = R−Y
-        input        [7:0] I_y;          // 该像素的 Y（档 17 的相对窗口要用）
-        reg signed [8:0] S_lo1, S_hi1, S_lo2, S_hi2;
-        reg signed [8:0] S_y9;
         begin
-            S_y9 = {1'b0, I_y};
-            if(S_skin_rel) begin
-                // 档 17：**窗口随该像素自身亮度缩放** —— 暗环境里手不会因为绝对值等比缩水而掉出窗口。
-                //   d1 ∈ [−Y, −Y/16]      d2 ∈ [Y/16, 0.625·Y]
-                // 全部是移位/取反，无乘法、无 DSP。
-                S_lo1 = -S_y9;
-                S_hi1 = -(S_y9 >> 4);
-                S_lo2 =  (S_y9 >> 4);
-                S_hi2 =  (S_y9 >> 1) + (S_y9 >> 3);
-            end
-            else begin
-                // 绝对矩形：d1/d2 的上下限由档位给（见 S_d1_lo_r / S_d2_lo_r）。
-                // 参考 anlu 标准 CbCr：Cb∈(77,127) && Cr∈(133,173) → d1∈[−100,−5] / d2∈[7,63]。
-                S_lo1 = S_d1_lo_r;
-                S_hi1 = D1_MAX;
-                S_lo2 = S_d2_lo_r;
-                S_hi2 = S_d2_hi_strict ? 9'sd63 : D2_MAX;
-            end
-            F_skin_px = (I_d1 >= S_lo1) && (I_d1 <= S_hi1) &&
-                        (I_d2 >= S_lo2) && (I_d2 <= S_hi2) &&
-                        (I_y <= S_y_cap);
+            F_skin_px = (I_d1 >= D1_MIN) && (I_d1 <= D1_MAX) &&
+                        (I_d2 >= S_d2_lo_r) && (I_d2 <= D2_MAX);
         end
     endfunction
 
@@ -496,10 +462,10 @@ module recog_top #(
     endfunction
 
     // 掩码 bit 序与 S_edge_mask 一致：bit0 = 字内最左像素 [95:72]。
-    wire [3:0] S_skin_mask = {F_skin_px(S_d1_3, S_d2_3, S_y3),
-                              F_skin_px(S_d1_2, S_d2_2, S_y2),
-                              F_skin_px(S_d1_1, S_d2_1, S_y1),
-                              F_skin_px(S_d1_0, S_d2_0, S_y0)};
+    wire [3:0] S_skin_mask = {F_skin_px(S_d1_3, S_d2_3),
+                              F_skin_px(S_d1_2, S_d2_2),
+                              F_skin_px(S_d1_1, S_d2_1),
+                              F_skin_px(S_d1_0, S_d2_0)};
 
     wire [3:0] S_skin2_mask = {F_skin2_px(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3),
                                F_skin2_px(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2),
@@ -550,7 +516,7 @@ module recog_top #(
     wire [7:0] S_bg_cur;
 
     generate
-    if (MASK_SRC == 2) begin : g_motion
+    if (MASK_SRC == 2 && (SKIN_ONLY == 0)) begin : g_motion
 
         // 行内字号 S_x_grp / 行号 S_y_pos 现在在模块顶部统一维护（ROI/准星也要用）
         wire [1:0] S_phase = S_x_grp[1:0];          // 块内第几拍（0..3）
@@ -1264,19 +1230,9 @@ module recog_top #(
         // 目标门控：像素数够 + 包围盒够大 + 不细长（挡掉唇膏/笔/碎噪声这类非手目标）
         wire [10:0] S_w     = S_xmax - S_xmin;
         wire [10:0] S_h     = S_ymax - S_ymin;
-        wire [11:0] S_h3 = (S_h << 1) + S_h;      // ×3（移位加法，避免 DSP）
-        wire [11:0] S_w3 = (S_w << 1) + S_w;
-        // 预设 9 把尺寸上限收紧到 480：桌面亮区往往占满整幅 / 特别大，收紧这条能直接挡掉。
-        wire [10:0] S_max_w = S_size_tight ? 11'd480 : MAX_W;
-        wire [10:0] S_max_h = S_size_tight ? 11'd480 : MAX_H;
-        wire S_size_ok = (S_w >= MIN_W) && (S_h >= MIN_H) &&
-                         (S_w <= S_max_w) && (S_h <= S_max_h) &&
-                         (S_w <= S_h3) && (S_h <= S_w3);
-        // 软权重模式命中原本只看 Σw；**档 12 的尺寸门也要接进来**——否则它在 SOFT_TRACK=1
-        // 下是死代码、什么都量不出来。只在 S_size_tight 时加，保证档 8/10/11 逐位不变。
-        wire        S_hit   = (SOFT_TRACK != 0)
-                              ? ((S_wsum_h >= MIN_WSUM) && (!S_size_tight || S_size_ok))
-                              : ((S_mcnt >= MIN_CNT) && S_size_ok);
+        // 命中判定：软权重模式下只看 Σw（尺寸门/细长比已实测无用，整段删掉）。
+        wire        S_hit   = (SOFT_TRACK != 0) ? (S_wsum_h >= MIN_WSUM)
+                                                : (S_mcnt >= MIN_CNT);
 
         // 观测误差 + 死区：|err| ≤ DEADBAND 时按 0 处理（噪声抖动不再推动准星）
         wire signed [12:0] S_err_raw_x = {2'b0, S_obs_x} - S_pos_x;
