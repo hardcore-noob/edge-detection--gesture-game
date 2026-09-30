@@ -744,3 +744,16 @@ bit `bits/M1_TEACH_MOTGATE_20260930.bit`（`9CB32ECA…`）。
 - 块级帧差只用 1 块 ERAM 就够（920 块），比存整个中央区的采样像素（5.76 万）省 60 倍。
 - 现场两个旋钮：`TEACH_MOT_TH`（动/不动门限，默认 8）、`TEACH_PRE_*`（前置门）。
 - 下一步：用户再测四组 —— ① 手拿开应**拒绝**；② 晃着手应学到手；③ 换光能恢复；④ 角落应拒绝。
+
+---
+
+## 2026-09-30（续 2）　仓库卫生：AGENTS.md 取消跟踪
+
+- `AGENTS.md`（A 线长期约定，4876 B）**从版本库里摘掉**：`git rm --cached` + 提交 `2ea6f5a`
+  （只删索引里那 64 行文件，**磁盘上的文件原样保留** —— Codex 还是照常读它当项目约定）。
+- 本地忽略写在**共享**的 `D:\git output\anlogic_competition\.git\info\exclude`（多 worktree 共用，
+  所以主 worktree 也不会再冒出未跟踪的 AGENTS.md）。注意这不是 `.gitignore`，**不会提交、不影响别人**。
+- 影响范围：该文件只存在于 `feat/m1-mask`（`39ba9a3` 加的），`origin/main` 从来没有过它 →
+  **将来合并进 main 不会删掉任何人的东西**。远端 `origin/feat/m1-mask` 上还在，**要等下次 push 才一起消失**。
+- 文档里对 AGENTS.md 的引用（`docs/A-20260927-*`、`docs/A-进度交接.md`）保留原样，属于历史记录；
+  以后要查那几条长期约定，看**工作区根目录的 AGENTS.md 文件**（不再进版本库）。
