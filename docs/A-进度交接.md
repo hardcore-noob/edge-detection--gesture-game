@@ -757,3 +757,15 @@ bit `bits/M1_TEACH_MOTGATE_20260930.bit`（`9CB32ECA…`）。
   **将来合并进 main 不会删掉任何人的东西**。远端 `origin/feat/m1-mask` 上还在，**要等下次 push 才一起消失**。
 - 文档里对 AGENTS.md 的引用（`docs/A-20260927-*`、`docs/A-进度交接.md`）保留原样，属于历史记录；
   以后要查那几条长期约定，看**工作区根目录的 AGENTS.md 文件**（不再进版本库）。
+---
+
+## 2026-09-30（续 3）　push + PR #2 更新
+
+- 用户发话"去 PR"：推 `origin/feat/m1-mask`（13 个提交，远端 tip → `9c5932d`）；**AGENTS.md 随之从远端
+  分支 tip 消失**（旧提交历史里还在，见文末提醒）。
+- **PR #2 已更新**（`li2-ting:feat/m1-mask` → `hardcore-noob:main`）：标题加"一键示教（帧差门）"；说明顶部
+  新增"状态摘要"节（S1/S3、示教第 3~5 轮、压缩、帧差门、AGENTS.md 取消跟踪、最终门禁数字、剩余项）；
+  文件表里 AGENTS.md 那行改成"已取消跟踪"。
+- 基线核对：`upstream/main = f55ee2b`（fetch 过，无新提交）；PR 状态 `MERGEABLE / CLEAN`。
+- ⚠ `AGENTS.md` 只是**取消跟踪**：分支 tip 与 PR 的 diff 里都没有它，但内容仍在旧提交（`39ba9a3`、`d672702`）
+  里。要彻底从历史抹掉 = 改写分支 + force push（会换掉所有提交号、PR 需要重建）——**没有用户明确要求就不做**。
