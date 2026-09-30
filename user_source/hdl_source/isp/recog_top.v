@@ -59,6 +59,13 @@
 //   * 第 4 轮：窗末起把 O_teach_flash 拉高 ~120 帧（≈2 s）——**不论判定过不过**（同板行为：
 //     "没看到手点亮 = 没采到，重来"）；isp_top 把它并进叠加使能，示教完立刻能看手亮不亮。
 //     平时恒 0，开机画面不受影响。第 5 轮才上板验收。
+//   * 2026-09-30 上板回归（"手完全拿开、只对着桌面，示教后屏幕照样大片变红"）：
+//     ① 前置门收窄到 d1∈[−115,−2]、d2∈[2,80]（原来 [−128,0]×[0,127] 背景就能填满）；
+//     ② 写回时钳在安全带 d1∈[−120,0]、d2∈[0,90]；
+//     ③ 自保：包络只要贴到前置门边（= 背景把框填满）→ 直接拒绝、不写窗口；
+//     ④ **块级帧差门**（真解法）：中央区 40×23 = 920 块用 1 块 ERAM 存上一帧块样本，只有
+//        "这块在动"的像素才进包络 → 静态背景一个块都不动、样本数不够 → 直接拒绝。
+//        ⚠ 代价：示教时**手要动起来**（静止的手和不动的背景一样，进不了包络）。
 //
 // 延迟：肤色判定与统计都是 0 拍组合计入（纯组合掩码 + 帧锁存输出），锁存发生在
 //       所选用掩码源的 tuser 上；运动掩码同样是 0 拍组合（背景值在每块开始时就已经
@@ -268,11 +275,20 @@ module recog_top #(
     parameter [10:0]  TEACH_X1 = 11'd959,
     parameter [9:0]   TEACH_Y0 = 10'd180,
     parameter [9:0]   TEACH_Y1 = 10'd539,
-    // 宽松前置门：只有落在这个框里的像素才进包络（顺手排除"画面里根本没有暖色物体"）
-    parameter signed [8:0] TEACH_PRE_D1_LO = -9'sd128,
-    parameter signed [8:0] TEACH_PRE_D1_HI =   9'sd0,
-    parameter signed [8:0] TEACH_PRE_D2_LO =   9'sd0,
-    parameter signed [8:0] TEACH_PRE_D2_HI =   9'sd127,
+    // 宽松前置门：只有落在这个框里的像素才进包络（顺手排除"画面里根本没有暖色物体"）。
+    // 【2026-09-30 收窄】原来 [−128,0]×[0,127] 太宽：手完全拿开对桌面示教时，背景把整个框填满，
+    // 包络 ≈ 前置门本身 → 学出一大片"皮肤"。现在收到交付框外一圈（交付框 = d1[−100,−5]、d2[3,70]）。
+    parameter signed [8:0] TEACH_PRE_D1_LO = -9'sd115,
+    parameter signed [8:0] TEACH_PRE_D1_HI =  -9'sd2,
+    parameter signed [8:0] TEACH_PRE_D2_LO =   9'sd2,
+    parameter signed [8:0] TEACH_PRE_D2_HI =   9'sd80,
+    // 安全带：教出来的 4 个数钳在这个框里（比前置门宽一点，但不允许跑到离谱的地方）
+    parameter signed [8:0] TEACH_CLP_D1_LO = -9'sd120,
+    parameter signed [8:0] TEACH_CLP_D1_HI =   9'sd0,
+    parameter signed [8:0] TEACH_CLP_D2_LO =   9'sd0,
+    parameter signed [8:0] TEACH_CLP_D2_HI =   9'sd90,
+    // 块级帧差门（方案 B）：块样本相对上一帧差超过它 → 认为"这块在动"，才允许进包络
+    parameter [7:0]   TEACH_MOT_TH = 8'd8,
     // 窗末判定：样本数下限（不足 = 画面里没看到东西）；d2 跨度下限（自保，只抓到噪声就放弃）
     parameter [23:0]  TEACH_MIN_PIX    = 24'd2000,
     parameter [9:0]   TEACH_MIN_D2SPAN = 10'd10,
@@ -573,6 +589,8 @@ module recog_top #(
         reg signed [8:0] S_k1_d1, S_k2_d1, S_k3_d1, S_k4_d1;
         reg signed [8:0] S_k1_d2, S_k2_d2, S_k3_d2, S_k4_d2;
         reg              S_k1_ok, S_k2_ok, S_k3_ok, S_k4_ok;
+        reg              S_k1_mv, S_k2_mv, S_k3_mv, S_k4_mv;   // "这个像素所在块在动"跟数据一起延
+        reg              S_blk_mv;                             // 本块"在动"（样本拍刷新，本块共用）
 
         reg               S_t_win;                       // 采样窗开着
         reg [7:0]         S_t_frm;                       // 窗内已经采到的帧数
@@ -600,6 +618,38 @@ module recog_top #(
         // 喂进延迟线的那一个像素：在中央区 ∧ 过宽松前置门 才算"算数"（标志跟着数据一起延）
         wire S_t_in_ok = S_t_zone && F_teach_pre(S_d1_3, S_d2_3);
 
+        // ---- 块级帧差门：只让"在动"的像素进包络（2026-09-30，方案 B）----------------
+        // 为什么：上板实测"手完全拿开、只对着桌面"也能学出一大片红 —— 前置门里全是背景像素。
+        //   示教时手在动、背景不动，所以再叠一道"这块相对上一帧变过"的门：静态背景一个块都不动
+        //   → 一个样本都进不来 → 样本数不够 → 直接拒绝（根本学不到背景）。
+        // 结构：中央区按 16×16 分块 = 40×23 = **920 块 → 1 块 ERAM**（1024×8）。每块每帧只采一个
+        //   样本像素（就是本模块用的那个：列 4·x_grp+3、块内第一行），存进 ERAM；下一帧同位置比较，
+        //   差 > TEACH_MOT_TH 就认为"这块在动"，本块其余像素共用这个结论。
+        // 时序：地址用"**下一个**采样列所在的块"→ **样本拍的前一拍**读出的正好是上一帧的块样本
+        //   （eram_spram 读延迟 1 拍）；写只在样本拍 → 同一地址不会同拍既读又写（它的硬性要求）。
+        wire [10:0] S_col4   = {S_x_grp, 2'b00} + 11'd7;      // 采样列 + 4 = 4·x_grp + 7
+        wire [6:0]  S_bc4    = S_col4[10:4] - 7'd20;          // 块列 0..39（区外会取值越界，只用不写）
+        wire [5:0]  S_br     = S_y_pos[9:4] - 6'd11;          // 块行 0..22（区外回绕，无害）
+        wire [10:0] S_bsum   = {S_br, 5'b0} + {S_br, 3'b0};   // 块行 × 40
+        wire [10:0] S_baddr  = S_bsum + {4'b0, S_bc4};
+        wire [7:0]  S_bq;                                      // ERAM 读出的"上一帧块样本"
+        // 采样行 = 块内第一行（中央区首行 180 不是 16 的倍数，所以单独放行一次）
+        wire S_smp_row = (S_y_pos[3:0] == 4'd0) || (S_y_pos == TEACH_Y0);
+        // 样本拍：在中央区、采样行、块内第一个采样列（列 ≡ 3 mod 16）——每块每帧正好一次
+        wire S_blk_smp = I_raw_tvalid && S_t_zone && S_smp_row && (S_x_grp[1:0] == 2'd0);
+        wire [7:0] S_bd = (S_y3 >= S_bq) ? (S_y3 - S_bq) : (S_bq - S_y3);
+        wire       S_blk_mv_now = (S_bd > TEACH_MOT_TH);
+        // 样本拍用"刚算出来"的结论；本块其余像素用锁存（S_blk_mv）的那个结论
+        wire       S_px_mv = S_blk_smp ? S_blk_mv_now : S_blk_mv;
+
+        eram_spram #(.DATA_WIDTH(8), .ADDR_WIDTH(10)) u_teach_blk (
+            .I_clk  (I_clk),
+            .I_we   (S_blk_smp),                  // 只在样本拍写（地址当拍正好是"下一个采样列所在块"=本块）
+            .I_addr (S_baddr[9:0]),               // 920 块 < 1024，够；区外的越界值只读不写
+            .I_wdata(S_y3),
+            .O_rdata(S_bq)
+        );
+
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 S_t_win  <= 1'b0;     S_t_frm  <= 8'd0;
@@ -610,6 +660,8 @@ module recog_top #(
                 S_k1_d1 <= 9'sd0;  S_k2_d1 <= 9'sd0;  S_k3_d1 <= 9'sd0;  S_k4_d1 <= 9'sd0;
                 S_k1_d2 <= 9'sd0;  S_k2_d2 <= 9'sd0;  S_k3_d2 <= 9'sd0;  S_k4_d2 <= 9'sd0;
                 S_k1_ok <= 1'b0;   S_k2_ok <= 1'b0;   S_k3_ok <= 1'b0;   S_k4_ok <= 1'b0;
+                S_k1_mv <= 1'b0;   S_k2_mv <= 1'b0;   S_k3_mv <= 1'b0;   S_k4_mv <= 1'b0;
+                S_blk_mv <= 1'b0;                      // 复位后先按"没动"处理（保守：不并）
             end
             // 帧边界收到请求 → 开（或重开）采样窗：清包络（min 置 +255 / max 置 −256）
             else if(I_raw_tuser && S_teach_req) begin
@@ -622,14 +674,16 @@ module recog_top #(
             else begin
                 // (1) 延迟线：每个有效拍推进一级（与窗口无关 —— 窗末停在线上的那 4 个就不并了）
                 if(I_raw_tvalid) begin
-                    S_k1_d1 <= S_d1_3;     S_k1_d2 <= S_d2_3;     S_k1_ok <= S_t_in_ok;
-                    S_k2_d1 <= S_k1_d1;    S_k2_d2 <= S_k1_d2;    S_k2_ok <= S_k1_ok;
-                    S_k3_d1 <= S_k2_d1;    S_k3_d2 <= S_k2_d2;    S_k3_ok <= S_k2_ok;
-                    S_k4_d1 <= S_k3_d1;    S_k4_d2 <= S_k3_d2;    S_k4_ok <= S_k3_ok;
+                    S_k1_d1 <= S_d1_3;     S_k1_d2 <= S_d2_3;     S_k1_ok <= S_t_in_ok;  S_k1_mv <= S_px_mv;
+                    S_k2_d1 <= S_k1_d1;    S_k2_d2 <= S_k1_d2;    S_k2_ok <= S_k1_ok;    S_k2_mv <= S_k1_mv;
+                    S_k3_d1 <= S_k2_d1;    S_k3_d2 <= S_k2_d2;    S_k3_ok <= S_k2_ok;    S_k3_mv <= S_k2_mv;
+                    S_k4_d1 <= S_k3_d1;    S_k4_d2 <= S_k3_d2;    S_k4_ok <= S_k3_ok;    S_k4_mv <= S_k3_mv;
+                    // 块级帧差：样本拍刷新本块结论（ERAM 的写在 u_teach_blk 那一拍完成）
+                    if(S_blk_smp) S_blk_mv <= S_blk_mv_now;
                 end
-                // (2) 包络合并：窗内 + 末级这个样本算数 → 一拍一次 min/max（压缩就压在这里）
+                // (2) 包络合并：窗内 + 末级样本算数 + **本块在动** → 一拍一次 min/max
                 //     用 tvalid 一起闸住是为了**行间空隙不重复并同一个像素**（否则计数会虚高）
-                if(S_t_win && I_raw_tvalid && S_k4_ok) begin
+                if(S_t_win && I_raw_tvalid && S_k4_ok && S_k4_mv) begin
                     S_t_d1lo <= (S_k4_d1 < S_t_d1lo) ? S_k4_d1 : S_t_d1lo;
                     S_t_d1hi <= (S_k4_d1 > S_t_d1hi) ? S_k4_d1 : S_t_d1hi;
                     S_t_d2lo <= (S_k4_d2 < S_t_d2lo) ? S_k4_d2 : S_t_d2lo;
@@ -661,13 +715,17 @@ module recog_top #(
         wire [6:0] S_t_exp1 = {1'b0, S_t_d1span[8:3]} + {4'b0, S_t_d1span[8:6]};
         wire [6:0] S_t_exp2 = {1'b0, S_t_d2span[8:3]} + {4'b0, S_t_d2span[8:6]};
 
-        // 外扩**不需要钳位**（这次压缩掉的死逻辑）：前置门已经把包络限在 d1∈[−128,0]、
-        // d2∈[0,127]，外扩量 ≤ 70 → lo−exp ≥ −198、hi+exp ≤ 197，9 位有符号不会溢出。
-        // （以后若把 TEACH_PRE_* 放宽到接近 ±255，这里要改回"带钳位的 11 位"算法。）
-        assign S_teach_d1_lo = S_t_d1lo - {2'b0, S_t_exp1};
-        assign S_teach_d1_hi = S_t_d1hi + {2'b0, S_t_exp1};
-        assign S_teach_d2_lo = S_t_d2lo - {2'b0, S_t_exp2};
-        assign S_teach_d2_hi = S_t_d2hi + {2'b0, S_t_exp2};
+        // 外扩（9 位有符号不会溢出：前置门已把包络限在 d1∈[−115,−2]、d2∈[2,80]，外扩量足够小）
+        // + **安全带**（2026-09-30 上板实测"手拿开也学会背景"之后加的）：教出来的 4 个数钳在
+        // [TEACH_CLP_*] 里 —— 比前置门宽一点，但不允许跑到离谱的地方。
+        wire signed [8:0] S_x1_lo = S_t_d1lo - {2'b0, S_t_exp1};
+        wire signed [8:0] S_x1_hi = S_t_d1hi + {2'b0, S_t_exp1};
+        wire signed [8:0] S_x2_lo = S_t_d2lo - {2'b0, S_t_exp2};
+        wire signed [8:0] S_x2_hi = S_t_d2hi + {2'b0, S_t_exp2};
+        assign S_teach_d1_lo = (S_x1_lo < TEACH_CLP_D1_LO) ? TEACH_CLP_D1_LO : S_x1_lo;
+        assign S_teach_d1_hi = (S_x1_hi > TEACH_CLP_D1_HI) ? TEACH_CLP_D1_HI : S_x1_hi;
+        assign S_teach_d2_lo = (S_x2_lo < TEACH_CLP_D2_LO) ? TEACH_CLP_D2_LO : S_x2_lo;
+        assign S_teach_d2_hi = (S_x2_hi > TEACH_CLP_D2_HI) ? TEACH_CLP_D2_HI : S_x2_hi;
 
         // 样本门限：计数口径是"每 4 列取 1 列"，所以拿 TEACH_MIN_PIX>>2 去比 —— TEACH_MIN_PIX
         // 仍按**真实像素数**解释（2000 → 500 个样本）。取 [13:2] 是 >>2 且不产生位宽截断告警
@@ -677,7 +735,10 @@ module recog_top #(
         // 窗末那一拍（＝第 60 帧的帧首）：样本够 + d2 跨度够 才写。
         // 同一拍又来了新请求就先满足新请求（不写旧结果，直接重开窗）。
         wire S_t_last = S_t_win && ((S_t_frm + 8'd1) >= TEACH_WIN_FRAMES);
-        wire S_t_ok   = (S_t_cnt >= S_t_min) && (S_t_d2span >= TEACH_MIN_D2SPAN);
+        // 自保（2026-09-30）：包络只要**贴着前置门的边**（= 背景把整个框填满了）→ 直接拒绝、不写窗口
+        wire S_t_edge = (S_t_d1lo == TEACH_PRE_D1_LO) || (S_t_d1hi == TEACH_PRE_D1_HI) ||
+                        (S_t_d2lo == TEACH_PRE_D2_LO) || (S_t_d2hi == TEACH_PRE_D2_HI);
+        wire S_t_ok   = (S_t_cnt >= S_t_min) && (S_t_d2span >= TEACH_MIN_D2SPAN) && !S_t_edge;
         assign S_teach_apply = I_raw_tuser && S_t_last && S_t_ok && !S_teach_req;
         // 闪叠加指示灯：窗末起（含"新请求抢在窗末同一拍"的情况）高 ~2 s，给 isp_top 用
         assign O_teach_flash = (S_t_flash != 8'd0);
