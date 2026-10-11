@@ -116,7 +116,14 @@ module recog_top #(
     //   2 块 ERAM 本来就在），软权重也恢复成 min(肤色分, 运动分) → 静止桌面两条路都不认。
     //   代价（M1 记录过）：手**停住**超过背景自愈时间会掉掩码 → 靠 HOLD/LOCK 兜；
     //   若"手一停准星就丢"影响体验，把它改回 1（= 只对掩码加运动门、权重仍只看肤色）。
-    parameter integer SKIN_ONLY = 0,
+    // ⚠ 2026-10-11（重要教训）：上一版把它置 0 打开融合，上板结果很差——**掩码几乎不出来、
+    //   出来也只闪一下**。原因：背景帧是在开机前 32 帧自举的，而测试时**手正好在画面里**，
+    //   于是"手"被当成了背景 → 手和背景一样 → 运动分恒 0 → 融合掩码恒 0（闪一下 = 手快速
+    //   移动时偶尔超过差分门限）。M1 的注释其实写着前提："**开机时画面里别放手**"。
+    //   → 现已改回 1（只看肤色），改用滑窗多数投票（VOTE_*）去桌面斑点，**不依赖背景帧、
+    //   也不依赖开机姿态**。若以后要用融合：必须"手拿开再上电/复位"，或手拿开时长按 KEY4
+    //   重新基线化（REBASE_ON_TEACH=1）。
+    parameter integer SKIN_ONLY = 1,
 
     // ---- 档 19/20 的**亮度上限**（2026-09-27）--------------------------------
     // 档 10 之所以能挡住"灯照亮的桌面"，本质是"过亮的像素落不进那个窗口"（旧 Y 下 k=2 的像素
@@ -410,6 +417,16 @@ module recog_top #(
     parameter integer  GATE_EN = 1,
     parameter [19:0]   MAX_MASK_PX = 20'd120000,
     parameter [2:0]    GATE_AR_SHIFT = 3'd2     // 长宽比门限 = 4:1
+,
+    // ---- M2.2 方案④（2026-10-11 用户提议）：**滑窗多数投票**，专治"桌面斑点"--------
+    // 桌面那点高亮是**稀疏斑点**（几个像素一团），手是**连成一片**的大块 —— 用"邻域多数"分开：
+    //   每一拍（4 像素）统计 **这一拍 + 上一拍共 8 个像素**里通过肤色判据的个数，
+    //   ≥ VOTE_MIN（默认 5/8）才认这一拍的掩码，否则那一拍整组清零。
+    // 因果（只用到当前与上一拍，不加延迟）、**0 ERAM**、约 20 LUT6。
+    // 局限（写在前面）：它只抹掉**宽度 ≲8 像素**的斑点；如果桌面那片高亮比这更大，
+    //   就需要真正的 16×16 块级投票（要存"上一帧每块的判决"，2 块 ERAM + 约 80 LUT）。
+    parameter integer  VOTE_EN = 1,
+    parameter [3:0]    VOTE_MIN = 4'd5
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -2060,8 +2077,23 @@ module recog_top #(
         wire [3:0] S_m_pick  = (MASK_POLICY != 0) ? S_m_hand
                              : (((FUSE_CORE_SKIN != 0) && S_locked) ? S_m_track : S_m_open);
 
-        // 喂给 mask_stats 的就是这个"（选中的）开运算 + ROI 门控"后的掩码
-        assign S_mask_gated = S_m_pick &
+        // ---- 方案④：滑窗多数投票（8 像素窗，4 像素粒度）—— 抹掉桌面斑点 ----------------
+        // 统计"这一拍 4 个 + 上一拍 4 个"里通过判据的个数：≥ VOTE_MIN 才保留这一拍，
+        // 否则那一拍整组清零。桌面那种"几像素一团的斑点"过不了；手是连片的大块，照样过。
+        reg [3:0] S_mv_h;          // 上一拍的同源掩码（4 像素）
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)                     S_mv_h <= 4'd0;
+            else if(I_raw_tuser)             S_mv_h <= 4'd0;   // 帧首清零，不跨帧连
+            else if(I_raw_tvalid)            S_mv_h <= S_m_pick;
+        end
+        wire [3:0] S_mv_cnt = {3'b0, S_m_pick[0]} + {3'b0, S_m_pick[1]} +
+                              {3'b0, S_m_pick[2]} + {3'b0, S_m_pick[3]} +
+                              {3'b0, S_mv_h[0]}   + {3'b0, S_mv_h[1]}   +
+                              {3'b0, S_mv_h[2]}   + {3'b0, S_mv_h[3]};
+        wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && (S_mv_cnt < VOTE_MIN)) ? 4'd0 : S_m_pick;
+
+        // 喂给 mask_stats 的就是这个"（选中的）开运算 + 多数投票 + ROI 门控"后的掩码
+        assign S_mask_gated = S_m_pick_v &
                               { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
                                 F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
 
