@@ -1951,9 +1951,19 @@ module recog_top #(
         // ---- M2.2：最大尺寸门 + 形状门（2026-10-11 用户提议；治"桌面自锁 + 把准星拽走"）----
         // 桌面误检的判据分开不了（d2/Y 只差 0.05），但形状差得远：又大又扁就不是手。
         // 命中不了 → 不更新位置、丢锁；叠加里也不涂红（见 F_ovl_view 的 S_gate_bad）。
+        // ---- M2.2 误报归因档（2026-10-11 用户提议，学 M1"一次编译、串口四档"）--------
+        // 后处理链的两个开关**挂到 recog_algo 档位**上，一版 bit 覆盖四种配置，现场 `W 08 000N` 切：
+        //   1  = 投票开 + 门开（交付档，现状）        12 = 投票**关** + 门开
+        //   13 = 投票开 + 门**关**                    14 = **两者都关**（= M2_NORMSKIN3 基线）
+        //   5  = 只看原始肤色门（M1 现成的诊断视图，用来看"判据本身碎不碎"）
+        // 说明：SKIN_NORM=1 之后运行时窗口寄存器已不参与判据，档 12/13/14 只剩这两个开关起作用，
+        //       不会顺带改肤色窗（档 9 的柔和跟随仍在，归因时别用 9）。
+        wire        S_cfg_vote_on = ~((S_cfg == 4'd12) || (S_cfg == 4'd14));   // 12/14 = 关投票
+        wire        S_cfg_gate_on = ~((S_cfg == 4'd13) || (S_cfg == 4'd14));   // 13/14 = 关门
+
         wire [10:0] S_gate_w = S_xmax - S_xmin;
         wire [10:0] S_gate_h = S_ymax - S_ymin;
-        wire        S_gate_bad = (GATE_EN != 0) &&
+        wire        S_gate_bad = (GATE_EN != 0) && S_cfg_gate_on &&
                                  ((S_mcnt > MAX_MASK_PX) ||                       // ① 太大
                                   (S_gate_w > (S_gate_h << GATE_AR_SHIFT)) ||    // ② 又宽又扁（桌子）
                                   (S_gate_h > (S_gate_w << GATE_AR_SHIFT)));     // ③ 又高又窄
@@ -2090,7 +2100,9 @@ module recog_top #(
                               {3'b0, S_m_pick[2]} + {3'b0, S_m_pick[3]} +
                               {3'b0, S_mv_h[0]}   + {3'b0, S_mv_h[1]}   +
                               {3'b0, S_mv_h[2]}   + {3'b0, S_mv_h[3]};
-        wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && (S_mv_cnt < VOTE_MIN)) ? 4'd0 : S_m_pick;
+        // 投票开关同样受档位控制（12/14 = 关；见上面 S_cfg_vote_on 的说明）
+        wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && S_cfg_vote_on && (S_mv_cnt < VOTE_MIN))
+                                ? 4'd0 : S_m_pick;
 
         // 喂给 mask_stats 的就是这个"（选中的）开运算 + 多数投票 + ROI 门控"后的掩码
         assign S_mask_gated = S_m_pick_v &
