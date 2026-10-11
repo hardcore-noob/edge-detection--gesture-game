@@ -67,6 +67,13 @@
 //        "这块在动"的像素才进包络 → 静态背景一个块都不动、样本数不够 → 直接拒绝。
 //        ⚠ 代价：示教时**手要动起来**（静止的手和不动的背景一样，进不了包络）。
 //
+// M2.1 内容（2026-10-11，挥手方向）：
+//   * 复用 M1 的质心（不新增像素级统计）：质心延迟线 → 窗口净位移 Δx/Δy → 门限 + 轴占优
+//     + 前半段同向 → 左挥/右挥/下劈事件脉冲（事件后装载延迟线 + ~300 ms 冷却）。
+//   * 结果先用 DBG 的 P/Q/R 观测（GEST_DBG=1 的定标版；编码见下面 g_gest 段落注释）；
+//     交付口径（GEST_DBG=0）P/Q/R 一字不动，挥手逻辑整段被综合裁掉 —— 真正的外送通道
+//     要等 M2.3 找 C 要（CTRL_SYNC 上行按模式复用，或加第二个 26 位字）。
+//
 // 延迟：肤色判定与统计都是 0 拍组合计入（纯组合掩码 + 帧锁存输出），锁存发生在
 //       所选用掩码源的 tuser 上；运动掩码同样是 0 拍组合（背景值在每块开始时就已经
 //       预取到手，见下），所以融合掩码相对像素流不产生额外延迟；CTRL_SYNC 回传是
@@ -293,7 +300,28 @@ module recog_top #(
     parameter [23:0]  TEACH_MIN_PIX    = 24'd2000,
     parameter [9:0]   TEACH_MIN_D2SPAN = 10'd10,
     // 【第 4 轮】采样窗结束后"闪叠加"的长度（帧；≈120 = 2 s @60 fps）
-    parameter [7:0]   TEACH_FLASH_FRAMES = 8'd120
+    parameter [7:0]   TEACH_FLASH_FRAMES = 8'd120,
+
+    // ---- M2.1 挥手方向（2026-10-11；GEST_EN=0 时整段逻辑在综合里消失）---------
+    // 观测源是 M1 的质心（不新增像素级统计）；算法、判据、DBG 口径见下面 g_gest
+    // 的段落注释。这一版只做算法验证（结果还没有外送通道，见 M2.3 向 C 提的需求）。
+    parameter integer  GEST_EN = 1,
+    // 窗口长度（帧）。窗口 = 本帧质心与 (GEST_WIN-1) 帧前质心的差（净位移）。
+    // 本实现支持 3 或 4（= 3~4 帧窗，规划里写的 3~5 帧范围）。
+    parameter integer  GEST_WIN = 4,
+    // 左/右挥：窗口净位移 |Δx| 门限（像素；≈ 平均速度 × GEST_WIN）
+    parameter [11:0]   GEST_VX_TH = 12'd40,
+    // 下劈（向下）：窗口净位移 Δy 门限（像素；y 向下为正，所以往下是正数）
+    parameter [11:0]   GEST_VY_TH = 12'd32,
+    // 一次事件后的冷却帧数（≈300 ms @60 fps；一次挥手只出一个事件）
+    parameter [5:0]    GEST_COOLDOWN = 6'd18,
+    // 左右对调：显示器相对真实场景是镜像时置 1（常量折叠，0 资源、0 逻辑）
+    parameter integer  GEST_FLIP_X = 0,
+    // 调试口径：1 = 把 DBG 的 P/Q/R 三个字段借给"挥手方向"用（编码见 g_gest 注释），
+    //          0 = 交付口径（P/Q/R 仍是 M1 的掩码像素数 / 包围盒）。
+    // M2.1 只做算法验证、结果还没有外送通道，所以**上板定标那一版用 1**；交付版保持 0
+    // （那时整段挥手逻辑会被综合裁掉，交付口径一个 LUT 都不多花）。
+    parameter integer  GEST_DBG = 0
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -1403,6 +1431,155 @@ module recog_top #(
     end
     endgenerate
 
+    // ========================================================================
+    // M2.1（2026-10-11）：挥手方向 —— 左挥 / 右挥 / 下劈
+    //
+    // 观测源：完全复用 M1 的质心（S_cent_x/S_cent_y，S1 已统一观测源），不新增任何
+    //   像素级统计，也不动掩码/跟踪的任何一行。相位：质心除法器在帧首后一拍启动、
+    //   27 拍后出结果并保持整帧，所以**tuser 那一拍读到的 S_cent_* 是上一帧的质心**
+    //   —— 相邻两次 tuser 采到的正好是相邻两帧的质心，差就是帧间位移，不引入新滞后。
+    //
+    // 算法（只有减法/比较，无乘法、无除法、无加法树 → DSP 增量 0；见下面"为什么用净位移"）
+    //   1) 质心延迟线：存最近 GEST_WIN-1 帧的质心（d1 = 上一帧、d3 = 3 帧前）。窗口净位移
+    //      Δx = x_now − d(GEST_WIN-1)、Δy = y_now − d(GEST_WIN-1)。
+    //   2) 可信性：只有"本帧可信"**且**"窗口内每一帧都可信"（连续可信帧数 ≥ GEST_WIN）
+    //      才判事件。手出画再回画时拿旧坐标做差会得到巨大的假位移，这一条把它挡住；延迟线
+    //      在不可信帧上冻结，不会把空帧的旧坐标串进窗口。
+    //   3) 方向一致（便宜版）：窗口的**前半段**必须与整窗同向（Δx ≥ 0 要求 d1 ≥ 窗首，
+    //      Δx < 0 要求 d1 ≤ 窗首）—— 每轴一个比较器，挡住"先反向再正向"的抖动。
+    //   4) 判据：
+    //        左挥 / 右挥：|Δx| > GEST_VX_TH 且 |Δx| > |Δy| 且前半段同向；
+    //        下劈（向下）：Δy > GEST_VY_TH 且 |Δy| > |Δx| 且前半段同向（y 向下为正）。
+    //   5) 出事件后把延迟线整体装载成当前质心（Δ 立刻归零）+ 拉 GEST_COOLDOWN 帧冷却
+    //      （≈300 ms），一次挥手只出一个事件；装载本身也提供滞回。
+    //
+    // 为什么用"净位移"而不是"逐帧位移求和"（2026-10-11 决策）：两者在匀速挥手时等价
+    //   （净位移 ≈ 平均速度 × 窗口长度），但① 净位移让来回抖动**自动抵消**（求和不会，
+    //   还得再加一套"符号一致"投票）；② 省掉整棵加法树。这一条是本轮把 LUT6 从
+    //   +295（求和版实测）压到预算内的关键 —— 原始求和版见本文件 git 历史。
+    //
+    // 方向编码 S_gest_dir：0 = 无事件，1 = 左挥，2 = 右挥，3 = 下劈。左右按**图像坐标**
+    //   （x 增大 = 右）；显示器若相对真实场景是镜像的，把 GEST_FLIP_X 置 1 对调即可。
+    //
+    // GEST_DBG=1 时把 DBG 的 P/Q/R 三个字段借来观测（M1 的原始含义见 CHANGELOG）：
+    //   P = {Δx 8 位, Δy 8 位}  钳 ±127 后 +128（0x80 = 0；单位 = 像素/窗，定标看它）
+    //   Q = {方向[2:0], 事件计数[10:0]}  读成 0x0DCC：D = 方向、CC = 事件数（饱和/不清零）
+    //   R = {本帧 dx 6 位, 本帧 dy 6 位}  钳 ±31 后 +32（0x20 = 0；单位 = 像素/帧，看跟手）
+    // 交付口径（GEST_DBG=0）下 P/Q/R 一个字节都不变，仍是 M1 的掩码像素数与包围盒。
+    //
+    // 资源：2 个 12 位减法（净位移）+ 2 个延迟线（≈63 FF）+ 绝对值/比较 + 冷却计数器，
+    //   ≈110~140 LUT6 + ≈90 FF，0 ERAM / 0 DSP（上板实测数字见 CHANGELOG）。
+    // ========================================================================
+    wire        S_gest_left, S_gest_right, S_gest_down;   // 单帧事件脉冲
+    wire [2:0]  S_gest_dir;      // 最近一次事件的方向：1=左 2=右 3=下（0 = 还没有过）
+    wire [10:0] S_gest_cnt;      // 事件总数（饱和，不清零）
+    wire signed [11:0] S_gest_sx;    // 窗口净位移 Δx（定标用）
+    wire signed [11:0] S_gest_sy;    // 窗口净位移 Δy（定标用）
+    wire signed [11:0] S_gest_dx;    // 本帧位移（不可信帧记 0）
+    wire signed [11:0] S_gest_dy;
+
+    generate
+    if ((GEST_EN != 0) && (MASK_SRC != 0) && (USE_CENTROID != 0)) begin : g_gest
+
+        // 窗口长度 3 或 4 → 窗首抽头是 d2 或 d3（常量折叠）
+        localparam integer GEST_LAST = (GEST_WIN >= 4) ? 3 : 2;
+
+        // ---- 质心延迟线（d1 = 上一帧、d3 = 3 帧前）+ 连续可信帧数 ----------------
+        reg [10:0] S_gd1x, S_gd2x, S_gd3x;
+        reg [9:0]  S_gd1y, S_gd2y, S_gd3y;
+        reg [2:0]  S_gvc;      // 连续可信帧数（饱和在 4）
+        reg [5:0]  S_gcd;      // 冷却倒计时（帧）
+        reg [2:0]  S_gdir;
+        reg [10:0] S_gcnt;
+
+        wire [10:0] S_gzdx = (GEST_LAST == 3) ? S_gd3x : S_gd2x;   // 窗首列
+        wire [9:0]  S_gzdy = (GEST_LAST == 3) ? S_gd3y : S_gd2y;   // 窗首行
+
+        // ---- 窗口净位移 Δx/Δy（本帧 − 窗首）与本帧位移 -------------------------
+        wire signed [11:0] S_gdx = {1'b0, S_cent_x} - {1'b0, S_gzdx};
+        wire signed [11:0] S_gdy = {2'b0, S_cent_y} - {2'b0, S_gzdy};
+        wire signed [11:0] S_gfx = {1'b0, S_cent_x} - {1'b0, S_gd1x};
+        wire signed [11:0] S_gfy = {2'b0, S_cent_y} - {2'b0, S_gd1y};
+
+        // ---- 绝对值 + 三个比较（门限两个、轴占优一个）--------------------------
+        wire [11:0] S_gax = S_gdx[11] ? (~S_gdx + 12'd1) : S_gdx;
+        wire [11:0] S_gay = S_gdy[11] ? (~S_gdy + 12'd1) : S_gdy;
+        wire S_gest_x_th  = (S_gax > GEST_VX_TH);
+        wire S_gest_y_th  = (S_gay > GEST_VY_TH);
+        wire S_gest_x_dom = (S_gax > S_gay);
+        wire S_gest_y_dom = (S_gay > S_gax);
+
+        // ---- 前半段同向：Δx ≥ 0 要求 d1 ≥ 窗首；Δx < 0 要求 d1 ≤ 窗首 ----------
+        wire S_gest_x_ok = ((S_gd1x >= S_gzdx) == ~S_gdx[11]);
+        wire S_gest_y_ok = ((S_gd1y >= S_gzdy) == ~S_gdy[11]);
+
+        // ---- 事件：窗口内每帧都可信 + 冷却 --------------------------------------
+        wire S_gwin    = (S_gvc >= GEST_WIN);
+        wire S_gfree   = (S_gcd == 6'd0);
+        wire S_gevt_lr = S_cent_valid & S_gwin & S_gfree & S_gest_x_dom &
+                         S_gest_x_th & S_gest_x_ok;
+        wire S_gevt_dn = S_cent_valid & S_gwin & S_gfree & S_gest_y_dom &
+                         S_gest_y_th & S_gest_y_ok;
+        // 右 = Δx ≥ 0（图像坐标）；GEST_FLIP_X=1 时对调
+        wire S_gright = (GEST_FLIP_X != 0) ? S_gdx[11] : ~S_gdx[11];
+
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_gd1x <= 11'd0; S_gd2x <= 11'd0; S_gd3x <= 11'd0;
+                S_gd1y <= 10'd0; S_gd2y <= 10'd0; S_gd3y <= 10'd0;
+                S_gvc <= 3'd0;   S_gcd <= 6'd0;
+                S_gdir <= 3'd0;  S_gcnt <= 11'd0;
+            end
+            else if(I_raw_tuser) begin
+                if(S_gcd != 6'd0) S_gcd <= S_gcd - 6'd1;
+
+                if(S_gevt_lr || S_gevt_dn) begin
+                    // 事件：装载延迟线（Δ 立刻归零 → 滞回）、进冷却、记方向与计数
+                    S_gdir <= S_gevt_lr ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
+                    S_gcnt <= (S_gcnt == 11'h7FF) ? 11'h7FF : (S_gcnt + 11'd1);
+                    S_gcd  <= GEST_COOLDOWN;
+                    S_gd1x <= S_cent_x; S_gd2x <= S_cent_x; S_gd3x <= S_cent_x;
+                    S_gd1y <= S_cent_y; S_gd2y <= S_cent_y; S_gd3y <= S_cent_y;
+                    S_gvc  <= 3'd0;
+                end
+                else if(S_cent_valid) begin
+                    // 可信帧：推进延迟线 + 连续可信帧数
+                    S_gd1x <= S_cent_x; S_gd2x <= S_gd1x; S_gd3x <= S_gd2x;
+                    S_gd1y <= S_cent_y; S_gd2y <= S_gd1y; S_gd3y <= S_gd2y;
+                    S_gvc  <= (S_gvc >= 3'd4) ? 3'd4 : (S_gvc + 3'd1);
+                end
+                else begin
+                    // 不可信帧：延迟线冻结、连续可信帧数清零（见算法第 2 条）
+                    S_gvc <= 3'd0;
+                end
+            end
+        end
+
+        assign S_gest_left  = S_gevt_lr & ~S_gright;
+        assign S_gest_right = S_gevt_lr &  S_gright;
+        assign S_gest_down  = S_gevt_dn;
+        assign S_gest_dir   = S_gdir;
+        assign S_gest_cnt   = S_gcnt;
+        assign S_gest_sx    = S_gdx;
+        assign S_gest_sy    = S_gdy;
+        assign S_gest_dx    = S_gfx;
+        assign S_gest_dy    = S_gfy;
+
+    end
+    else begin : g_gest_off
+        // GEST_EN=0 / MASK_SRC=0 / USE_CENTROID=0：一段都不综合
+        assign S_gest_left  = 1'b0;
+        assign S_gest_right = 1'b0;
+        assign S_gest_down  = 1'b0;
+        assign S_gest_dir   = 3'd0;
+        assign S_gest_cnt   = 11'd0;
+        assign S_gest_sx    = 12'sd0;
+        assign S_gest_sy    = 12'sd0;
+        assign S_gest_dx    = 12'sd0;
+        assign S_gest_dy    = 12'sd0;
+    end
+    endgenerate
+
     // ---- 诊断：帧内 (d1,d2) 极值（DIAG_CHROMA=1 时 Q/R 上报它，不再报包围盒）----
     // 帧内全部像素一起取极值（不做门控），用来量出手的真实色度范围：
     //   手伸进画面读一行 DBG，手拿开再读一行，两组 Q/R 一减就知道手落在哪。
@@ -1811,12 +1988,43 @@ module recog_top #(
         .O_empty(S_empty)
     );
 
-    assign O_mask_cnt_shift = (DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4);
+    // ---- M2.1：GEST_DBG=1 时把 P/Q/R 借给"挥手方向"观测 ------------------------
+    // 编码见上面 g_gest 的段落注释：P = {Σdx,Σdy}（±127 钳位 +128）、
+    // Q = {方向, 事件计数}、R = {本帧 dx, 本帧 dy}（±31 钳位 +32）。
+    // GEST_DBG=0（交付口径）时下面三行与 M1 逐字节一致。
+    function [7:0] F_gest_sat8;     // 12 位有符号 → 钳 ±127 后 +128（0x80 = 0）
+        input signed [11:0] I_v;
+        begin
+            if(I_v > 12'sd127)        F_gest_sat8 = 8'hFF;
+            else if(I_v < -12'sd127)  F_gest_sat8 = 8'h01;
+            else                      F_gest_sat8 = I_v[7:0] + 8'd128;
+        end
+    endfunction
+
+    function [5:0] F_gest_sat6;     // 12 位有符号 → 钳 ±31 后 +32（0x20 = 0）
+        input signed [11:0] I_v;
+        begin
+            if(I_v > 12'sd31)         F_gest_sat6 = 6'd63;
+            else if(I_v < -12'sd31)   F_gest_sat6 = 6'd1;
+            else                      F_gest_sat6 = I_v[5:0] + 6'd32;
+        end
+    endfunction
+
+    wire S_gest_dbg_on = (GEST_EN != 0) && (GEST_DBG != 0) &&
+                         (MASK_SRC != 0) && (USE_CENTROID != 0);
+
+    assign O_mask_cnt_shift = S_gest_dbg_on
+                              ? { F_gest_sat8(S_gest_sx), F_gest_sat8(S_gest_sy) }
+                              : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
-    assign O_bbox_x         = (DIAG_CHROMA != 0) ? S_ch_word_x
-                                                 : {S_xmin[10:4], S_xmax[10:4]};
-    assign O_bbox_y         = (DIAG_CHROMA != 0) ? S_ch_word_y
-                                                 : {S_ymin[9:4],  S_ymax[9:4]};
+    assign O_bbox_x         = S_gest_dbg_on
+                              ? { S_gest_dir, S_gest_cnt }
+                              : ((DIAG_CHROMA != 0) ? S_ch_word_x
+                                                    : {S_xmin[10:4], S_xmax[10:4]});
+    assign O_bbox_y         = S_gest_dbg_on
+                              ? { F_gest_sat6(S_gest_dx), F_gest_sat6(S_gest_dy) }
+                              : ((DIAG_CHROMA != 0) ? S_ch_word_y
+                                                    : {S_ymin[9:4],  S_ymax[9:4]});
 
 
     // 用边沿流（比 raw 流晚 2 拍）的帧首翻 toggle：此刻 tap 计数与掩码统计都已锁存

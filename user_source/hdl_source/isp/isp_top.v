@@ -262,7 +262,14 @@ module isp_top #(
 
     // ---- 识别支路（M0：tap 监视 + 掩码统计 + CTRL_SYNC 端点）------------------
     // 取点：AWB 输出的彩色 RAW 流与边缘流，都在上面的 MUX 之前。
-    recog_top u_recog_top (
+    // M2.1 上板定标/验收版：GEST_DBG=1 把 DBG 的 P/Q/R 三个字段借给"挥手方向"观测
+    // （编码见 recog_top 里 g_gest 的段落注释）。交付版改回 0 —— 那时整段挥手逻辑会
+    // 被综合裁掉，交付口径一个 LUT 都不多花。
+    localparam integer GEST_DBG_SEL = 1;
+
+    recog_top #(
+        .GEST_DBG        (GEST_DBG_SEL)
+    ) u_recog_top (
         .I_clk           (axi4s_video_aclk),
         .I_rst_n         (I_rst_n),
         .I_raw_tdata     (awb_O_tdata),
