@@ -318,8 +318,8 @@ module recog_top #(
     parameter [11:0]   GEST_X_TH = 12'd60,
     // 下劈：整段 ΔY（掩码最高行下移）门限（像素）
     parameter [11:0]   GEST_Y_TH = 12'd120,
-    // 下劈：整段 |ΔX| 上限（横向几乎没动才认，像素）
-    parameter [11:0]   GEST_Y_XMAX = 12'd25,
+    // 下劈：**整段横向峰值**上限（横向全程几乎没动才认，像素）
+    parameter [11:0]   GEST_Y_XMAX = 12'd40,
     // "看到了动作但够不上任何判据"要闪青色提示的最小整段位移（小于它当噪声，不闪）
     parameter [11:0]   GEST_NOISE_TH = 12'd30,
     // 左右对调：显示器相对真实场景是镜像时置 1（常量折叠，0 资源、0 逻辑）
@@ -337,8 +337,10 @@ module recog_top #(
     // 想连掩码/准星一起看：短按 KEY4（= 进游戏模式，顺带把 recog_algo 置 1）。
     parameter integer  GEST_VIS = 1,
     parameter [7:0]    GEST_FLASH_FRAMES = 8'd24,
-    parameter [9:0]    GEST_BAND_Y0 = 10'd300,
-    parameter [9:0]    GEST_BAND_Y1 = 10'd419
+    // 提示条画在**对应屏幕边缘**（不是固定条换颜色）：左挥 = 左边竖条、右挥 = 右边竖条、
+    // 下劈 = 底部横条、方向不明确 = 顶部细横条。边缘条宽度 = GEST_VIS_W。
+    parameter [10:0]   GEST_VIS_W = 11'd80,
+    parameter [9:0]    GEST_VIS_UNK_Y = 10'd20
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -1522,6 +1524,16 @@ module recog_top #(
         wire [11:0] S_gax = S_gfx[11] ? (~S_gfx + 12'd1) : S_gfx;   // |每帧 dx|
         wire [11:0] S_gay = S_gfy[11] ? (~S_gfy + 12'd1) : S_gfy;   // |每帧 dy(手顶)|
 
+        // ---- 相对动作起点的位移（整段峰值口径，见下面"为什么不用终点"）------------
+        wire signed [11:0] S_gex  = {1'b0, S_gcx1} - {1'b0, S_gx0};   // 横向偏离起点（带符号）
+        wire signed [11:0] S_gey  = {1'b0, S_ymin} - {1'b0, S_gy0};   // 纵向偏离起点（+ = 向下）
+        wire [11:0] S_gaex = S_gex[11] ? (~S_gex + 12'd1) : S_gex;    // |横向偏离|
+        wire [11:0] S_gaey = S_gey[11] ? (~S_gey + 12'd1) : S_gey;    // |纵向偏离|
+
+        // 整段峰值：横向最大幅度（带符号定左右）、纵向最大幅度、**向下**最大幅度
+        reg signed [11:0] S_gxpk;
+        reg [11:0]        S_gaxm, S_gaym, S_gdym;
+
         // ---- 动作段状态机（一个动作只结算一次 → 直接消灭"三色连出"）----------------
         //   已武装 → 每帧 |位移| > START_TH = 动作开始（记起点）→ 动作中
         //   动作中 → 连续 QUIET_FRAMES 帧安静 = 动作结束 → **按整段净位移一次性定性**
@@ -1539,22 +1551,20 @@ module recog_top #(
         wire S_gend  = S_gact && ((S_gstop && (S_gqc >= GEST_QUIET_FRAMES)) ||
                                   (S_glen >= GEST_SEG_MAX));
 
-        // ---- 整段净位移（终点 − 起点）与判据（余量写死，不再"大一点就算"）----------
-        wire signed [11:0] S_gdX = {1'b0, S_gcx1} - {1'b0, S_gx0};
-        wire signed [11:0] S_gdY = {1'b0, S_ymin} - {1'b0, S_gy0};
-        wire [11:0] S_gaX = S_gdX[11] ? (~S_gdX + 12'd1) : S_gdX;
-        wire [11:0] S_gaY = S_gdY[11] ? (~S_gdY + 12'd1) : S_gdY;
-        wire [12:0] S_gy2 = {1'b0, S_gaY, 1'b0};            // 2·|ΔY|
-        wire S_ghx = (S_gaX > GEST_X_TH) && ({1'b0, S_gaX} > S_gy2);
-        wire S_ghy = (S_gdY[11] == 1'b0) && (S_gaY > GEST_Y_TH) &&
-                     (S_gaX < GEST_Y_XMAX);
-        // "看到了动作但够不上任何一条"：只有整段位移明显大于噪声才打青色提示，
+        // ---- 判据：全部用**整段峰值**，余量写死（不再"大一点就算"）------------------
+        // 为什么不用"终点 − 起点"：人的"挥一下"常常是**来回摆**（挥出去再收回来），终点≈
+        //   起点 → ΔX≈0，剩下的纵向分量（手臂摆动 + 掩码最高行被 ROI 重裁）就把动作判成
+        //   下劈 —— 这就是上板实测"横挥出蓝条"的根因。峰值口径下左挥的横向峰值是几百像素，
+        //   "下劈要求横向峰值 < GEST_Y_XMAX"结构上不可能成立（判据互斥，不是调门限）。
+        wire S_ghx = (S_gaxm > GEST_X_TH) && ({1'b0, S_gaxm} > {1'b0, S_gaym, 1'b0});
+        wire S_ghy = (S_gdym > GEST_Y_TH) && (S_gaxm < GEST_Y_XMAX);
+        // "看到了动作但够不上任何一条"：只有整段幅度明显大于噪声才打青色提示，
         // 否则掩码抖两下也会算一段、没完没了地闪
-        wire S_gbig  = (S_gaX > GEST_NOISE_TH) || (S_gaY > GEST_NOISE_TH);
+        wire S_gbig  = (S_gaxm > GEST_NOISE_TH) || (S_gaym > GEST_NOISE_TH);
         wire S_ghevt = S_gend && (S_ghx || S_ghy);              // 真事件（红/绿/蓝）
         wire S_ghunk = S_gend && !S_ghx && !S_ghy && S_gbig;    // 方向不明确（青）
-        // 右 = ΔX ≥ 0（图像坐标）；GEST_FLIP_X=1 时对调
-        wire S_gright = (GEST_FLIP_X != 0) ? S_gdX[11] : ~S_gdX[11];
+        // 右 = 横向峰值朝正（图像坐标）；GEST_FLIP_X=1 时对调
+        wire S_gright = (GEST_FLIP_X != 0) ? ~S_gxpk[11] : S_gxpk[11];
 
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
@@ -1562,10 +1572,18 @@ module recog_top #(
                 S_gv1  <= 1'b0;  S_gv2  <= 1'b0;
                 S_gact <= 1'b0;  S_gx0 <= 11'd0;  S_gy0 <= 11'd0;
                 S_gqc  <= 4'd0;  S_glen <= 8'd0;
+                S_gxpk <= 12'sd0; S_gaxm <= 12'd0; S_gaym <= 12'd0; S_gdym <= 12'd0;
                 S_gdir <= 3'd0;  S_gcnt <= 11'd0; S_gflash <= 8'd0;
             end
             else if(I_raw_tuser) begin
                 if(S_gflash != 8'd0) S_gflash <= S_gflash - 8'd1;
+
+                // 整段峰值更新（动作中每帧都算，含结算那一拍，这样最后一帧不丢）
+                if(S_gact) begin
+                    if(S_gaex > S_gaxm) begin S_gaxm <= S_gaex; S_gxpk <= S_gex; end
+                    if(S_gaey > S_gaym) S_gaym <= S_gaey;
+                    if((S_gey[11] == 1'b0) && (S_gey > {1'b0, S_gdym})) S_gdym <= S_gey[11:0];
+                end
 
                 if(S_gend) begin
                     // 动作结束：一次性定性 + 出提示条（一个动作只出一次）
@@ -1588,6 +1606,10 @@ module recog_top #(
                         S_gy0  <= S_ymin;
                         S_gqc  <= 4'd0;
                         S_glen <= 8'd0;
+                        S_gxpk <= 12'sd0;   // 峰值从起点重新开始
+                        S_gaxm <= 12'd0;    // （这三个同时是"上一段"的定标读数，见 DBG P）
+                        S_gaym <= 12'd0;
+                        S_gdym <= 12'd0;
                     end
                 end
                 else begin
@@ -1610,8 +1632,10 @@ module recog_top #(
         assign S_gest_down  = S_ghevt & ~S_ghx;
         assign S_gest_dir   = S_gdir;
         assign S_gest_cnt   = S_gcnt;
-        assign S_gest_sx    = S_gact ? S_gdX : 12'sd0;   // DBG P：动作中看整段位移（定标用）
-        assign S_gest_sy    = S_gact ? S_gdY : 12'sd0;
+        // DBG P：**上一段的整段峰值幅度**（横向 / 向下），一直留到下一段开始 —— 所以
+        // 挥完之后再读日志就能看到"这一挥到底走了多少像素"，用来定门限（不用盯着实时值）。
+        assign S_gest_sx    = S_gaxm;
+        assign S_gest_sy    = S_gdym;
         assign S_gest_dx    = S_gfx;                     // DBG R：每帧 dx / dy（手顶）
         assign S_gest_dy    = S_gfy;
         // 挥手提示：方向 → 颜色（左红 3 / 右绿 4 / 下蓝 6 / 不明确青 7）；GEST_VIS=0 时恒 0
@@ -1976,8 +2000,12 @@ module recog_top #(
                        ((I_y + 2 >= S_roi_y1) && (I_y <= S_roi_y1 + 1));
                 S_border = (S_bx && (I_y >= S_roi_y0) && (I_y <= S_roi_y1)) ||
                            (S_by && (I_x >= S_roi_x0) && (I_x <= S_roi_x1));
-                if((I_gest != 3'd0) && (I_y >= GEST_BAND_Y0) && (I_y <= GEST_BAND_Y1))
-                    F_ovl_view = I_gest;                // M2.1：挥手提示条（整宽，按方向着色）
+                // M2.1 挥手提示：**画在对应屏幕边缘**（位置 + 颜色双重编码）
+                if(((I_gest == 3'd3) && (I_x < GEST_VIS_W)) ||                            // 左挥：左边缘
+                   ((I_gest == 3'd4) && (I_x > (11'd1279 - GEST_VIS_W))) ||               // 右挥：右边缘
+                   ((I_gest == 3'd6) && (I_y > (10'd719 - GEST_VIS_W[9:0]))) ||           // 下劈：底边缘
+                   ((I_gest == 3'd7) && (I_y < GEST_VIS_UNK_Y)))                          // 不明确：顶部细条
+                    F_ovl_view = I_gest;
                 else if((S_x_on && S_y_th) || (S_y_on && S_x_th))
                     F_ovl_view = 3'd2;                  // 准星（黄）：所有视图都画
                 else if(S_view == 4'd4)
