@@ -104,7 +104,11 @@ module isp_top #(
     wire [7:0]  S_bg_px;                       // recog_top 给的"当前块背景灰度"
     wire        S_teach_flash;                 // recog_top 的一键示教"闪叠加"指示（~2 s）
     wire [3:0]  S_dbg_mode = I_mode_committed[15:12];
-    wire S_ovl_en = MASK_PREVIEW | S_teach_flash |
+    wire        S_gest_flash;                  // recog_top 的 M2.1 挥手提示条指示（~0.4 s）
+    // 【M2.1】挥手提示条也并进叠加使能：这样 recog_algo=0（画面本来是纯摄像头）时，挥手照样
+    // 会在屏幕上打一条按方向着色的横条 —— 不用串口、不用按键就能看到识别结果。
+    // 代价：闪条那 ~0.4 s 里画面会从 EDGE 切回 RAW（叠加通路的时间基准锁在 RAW 流上）。
+    wire S_ovl_en = MASK_PREVIEW | S_teach_flash | S_gest_flash |
                     ((DIAG_MODE_SEL != 0) ? (S_dbg_mode != 4'd0) : (S_dbg_mode == 4'd1));
     wire S_bgview = (DIAG_MODE_SEL != 0) && (S_dbg_mode == 4'd2);
 
@@ -292,7 +296,8 @@ module isp_top #(
         .O_status_toggle (O_status_toggle),
         .O_ovl_sel       (S_ovl_sel),
         .O_bg_px         (S_bg_px),
-        .O_teach_flash   (S_teach_flash)
+        .O_teach_flash   (S_teach_flash),
+        .O_gest_flash    (S_gest_flash)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

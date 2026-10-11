@@ -321,7 +321,17 @@ module recog_top #(
     //          0 = 交付口径（P/Q/R 仍是 M1 的掩码像素数 / 包围盒）。
     // M2.1 只做算法验证、结果还没有外送通道，所以**上板定标那一版用 1**；交付版保持 0
     // （那时整段挥手逻辑会被综合裁掉，交付口径一个 LUT 都不多花）。
-    parameter integer  GEST_DBG = 0
+    parameter integer  GEST_DBG = 0,
+    // ---- M2.1 可视化：挥手结果直接画在画面上（GEST_VIS=0 时整段不综合）----------
+    // 出一次挥手事件就在画面上打一条**整宽横条**（默认 300..419 行，1/6 屏高），颜色 = 方向：
+    //   左挥 = 红、右挥 = 绿、下劈 = 蓝，持续 GEST_FLASH_FRAMES 帧（≈0.4 s @60 fps）。
+    // 不用串口、不用按键：这个"闪条"同时并进 isp_top 的叠加使能（S_ovl_en |= O_gest_flash），
+    // 所以哪怕 recog_algo=0（画面本来是纯摄像头）也会闪 —— 挥手就有反应。
+    // 想连掩码/准星一起看：短按 KEY4（= 进游戏模式，顺带把 recog_algo 置 1）。
+    parameter integer  GEST_VIS = 1,
+    parameter [7:0]    GEST_FLASH_FRAMES = 8'd24,
+    parameter [9:0]    GEST_BAND_Y0 = 10'd300,
+    parameter [9:0]    GEST_BAND_Y1 = 10'd419
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -375,7 +385,10 @@ module recog_top #(
     // 【第 4 轮】一键示教的"2 秒闪叠加"指示：一次采样窗结束（**不论判定过不过**）后拉高
     // ~120 帧（≈2 s）。isp_top 把它并进叠加使能 S_ovl_en → 示教完立刻在画面上看"手有没有
     // 被掩码点亮"（判定不通过时画面照旧会闪 2 s，"没点亮 = 没采到，重来"）。平时恒 0。
-    output wire        O_teach_flash
+    output wire        O_teach_flash,
+    // 【M2.1】挥手事件指示（≈0.4 s 高）：isp_top 把它并进叠加使能，于是"挥手 = 屏幕上立刻
+    // 出现一条按方向着色的横条"，不用串口、不用按键。平时恒 0；GEST_VIS=0 时恒 0（被裁掉）。
+    output wire        O_gest_flash
 );
 
     // ---- 模式提交字锁存（同域，无需两级同步）--------------------------------
@@ -1477,6 +1490,8 @@ module recog_top #(
     wire signed [11:0] S_gest_sy;    // 窗口净位移 Δy（定标用）
     wire signed [11:0] S_gest_dx;    // 本帧位移（不可信帧记 0）
     wire signed [11:0] S_gest_dy;
+    wire        S_gest_flash;   // 挥手事件后 ~0.4 s 高（并进 isp_top 的叠加使能）
+    wire [2:0]  S_gest_vis;     // 闪条色码：0=不闪、3=左(红)、4=右(绿)、6=下(蓝)
 
     generate
     if ((GEST_EN != 0) && (MASK_SRC != 0) && (USE_CENTROID != 0)) begin : g_gest
@@ -1491,6 +1506,7 @@ module recog_top #(
         reg [5:0]  S_gcd;      // 冷却倒计时（帧）
         reg [2:0]  S_gdir;
         reg [10:0] S_gcnt;
+        reg [7:0]  S_gflash;   // 挥手提示条倒计时（帧）
 
         wire [10:0] S_gzdx = (GEST_LAST == 3) ? S_gd3x : S_gd2x;   // 窗首列
         wire [9:0]  S_gzdy = (GEST_LAST == 3) ? S_gd3y : S_gd2y;   // 窗首行
@@ -1528,16 +1544,18 @@ module recog_top #(
                 S_gd1x <= 11'd0; S_gd2x <= 11'd0; S_gd3x <= 11'd0;
                 S_gd1y <= 10'd0; S_gd2y <= 10'd0; S_gd3y <= 10'd0;
                 S_gvc <= 3'd0;   S_gcd <= 6'd0;
-                S_gdir <= 3'd0;  S_gcnt <= 11'd0;
+                S_gdir <= 3'd0;  S_gcnt <= 11'd0;  S_gflash <= 8'd0;
             end
             else if(I_raw_tuser) begin
                 if(S_gcd != 6'd0) S_gcd <= S_gcd - 6'd1;
+                if(S_gflash != 8'd0) S_gflash <= S_gflash - 8'd1;
 
                 if(S_gevt_lr || S_gevt_dn) begin
                     // 事件：装载延迟线（Δ 立刻归零 → 滞回）、进冷却、记方向与计数
                     S_gdir <= S_gevt_lr ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
                     S_gcnt <= (S_gcnt == 11'h7FF) ? 11'h7FF : (S_gcnt + 11'd1);
                     S_gcd  <= GEST_COOLDOWN;
+                    S_gflash <= GEST_FLASH_FRAMES;   // 打出"挥手提示条"（见 GEST_VIS）
                     S_gd1x <= S_cent_x; S_gd2x <= S_cent_x; S_gd3x <= S_cent_x;
                     S_gd1y <= S_cent_y; S_gd2y <= S_cent_y; S_gd3y <= S_cent_y;
                     S_gvc  <= 3'd0;
@@ -1564,6 +1582,11 @@ module recog_top #(
         assign S_gest_sy    = S_gdy;
         assign S_gest_dx    = S_gfx;
         assign S_gest_dy    = S_gfy;
+        // 挥手提示：方向 → 颜色（左红 / 右绿 / 下蓝）；GEST_VIS=0 时恒 0（整段被裁掉）
+        assign S_gest_vis = ((GEST_VIS == 0) || (S_gflash == 8'd0)) ? 3'd0 :
+                            ((S_gdir == 3'd1) ? 3'd3 :
+                            ((S_gdir == 3'd2) ? 3'd4 : 3'd6));
+        assign S_gest_flash = (GEST_VIS != 0) && (S_gflash != 8'd0);
 
     end
     else begin : g_gest_off
@@ -1577,8 +1600,12 @@ module recog_top #(
         assign S_gest_sy    = 12'sd0;
         assign S_gest_dx    = 12'sd0;
         assign S_gest_dy    = 12'sd0;
+        assign S_gest_flash = 1'b0;
+        assign S_gest_vis   = 3'd0;
     end
     endgenerate
+
+    assign O_gest_flash = S_gest_flash;
 
     // ---- 诊断：帧内 (d1,d2) 极值（DIAG_CHROMA=1 时 Q/R 上报它，不再报包围盒）----
     // 帧内全部像素一起取极值（不做门控），用来量出手的真实色度范围：
@@ -1901,6 +1928,7 @@ module recog_top #(
             input        I_fuse;      // 融合掩码（ROI 门控 + 开运算后）
             input        I_skin;      // 原始肤色门
             input        I_motion;    // 原始运动门
+            input [2:0]  I_gest;      // M2.1 挥手提示色码（0 = 不闪）
             reg S_x_on, S_y_on, S_x_th, S_y_th, S_bx, S_by, S_border;
             begin
                 // 臂长 ±CROSS_LEN、线宽 ±CROSS_TH（十字两个方向各一条粗线）
@@ -1915,7 +1943,9 @@ module recog_top #(
                        ((I_y + 2 >= S_roi_y1) && (I_y <= S_roi_y1 + 1));
                 S_border = (S_bx && (I_y >= S_roi_y0) && (I_y <= S_roi_y1)) ||
                            (S_by && (I_x >= S_roi_x0) && (I_x <= S_roi_x1));
-                if((S_x_on && S_y_th) || (S_y_on && S_x_th))
+                if((I_gest != 3'd0) && (I_y >= GEST_BAND_Y0) && (I_y <= GEST_BAND_Y1))
+                    F_ovl_view = I_gest;                // M2.1：挥手提示条（整宽，按方向着色）
+                else if((S_x_on && S_y_th) || (S_y_on && S_x_th))
                     F_ovl_view = 3'd2;                  // 准星（黄）：所有视图都画
                 else if(S_view == 4'd4)
                     F_ovl_view = I_motion ? 3'd4 : (S_border ? 3'd6 : 3'd0);
@@ -1934,10 +1964,10 @@ module recog_top #(
             end
         endfunction
 
-        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_gated[3], S_skin_use[3], S_motion_mask[3]),
-                                 F_ovl_view(S_col2, S_y_pos, S_mask_gated[2], S_skin_use[2], S_motion_mask[2]),
-                                 F_ovl_view(S_col1, S_y_pos, S_mask_gated[1], S_skin_use[1], S_motion_mask[1]),
-                                 F_ovl_view(S_col0, S_y_pos, S_mask_gated[0], S_skin_use[0], S_motion_mask[0]) };
+        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_gated[3], S_skin_use[3], S_motion_mask[3], S_gest_vis),
+                                 F_ovl_view(S_col2, S_y_pos, S_mask_gated[2], S_skin_use[2], S_motion_mask[2], S_gest_vis),
+                                 F_ovl_view(S_col1, S_y_pos, S_mask_gated[1], S_skin_use[1], S_motion_mask[1], S_gest_vis),
+                                 F_ovl_view(S_col0, S_y_pos, S_mask_gated[0], S_skin_use[0], S_motion_mask[0], S_gest_vis) };
 
         assign S_ovl_sel = S_ovl_rt;
 
