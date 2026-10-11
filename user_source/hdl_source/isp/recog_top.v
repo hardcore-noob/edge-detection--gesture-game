@@ -366,7 +366,19 @@ module recog_top #(
     parameter [3:0]    M2_TIP_R = 4'd3,
     // 调试口径：1 = 把 DBG 的 P/Q 借给指尖/手型（P={峰数,指尖行}、Q={手型,指尖列}），
     //          0 = P/Q 仍是 M1 的掩码像素数 / 包围盒 x。上板定标那一版用 1。
-    parameter integer  M2_DBG = 1
+    parameter integer  M2_DBG = 1,
+    // ---- M2.2 修正（2026-10-11，用户提议）：肤色判据改成"按亮度归一化"------------
+    // 老判据是**绝对值窗**：d2 = R−Y ≥ 3、|d1| = Y−B ∈ [5, 100]。光照一暗，R/B/Y 一起变小、
+    //   差值按比例缩小 → 暗处的手掉出窗口（上板实测"手指放到暗一点的地方，指尖就不全"）。
+    // 归一化判据把边界写成**比例**：d2/Y 与 |d1|/Y 落在同一区间（本质就是 Cb/Cr 归一化）：
+    //     d2/Y ∈ [2^-NORM_LO_SH, 2^-NORM_HI_SH]、|d1|/Y 同区间（默认 1/32 ~ 1/2）
+    // 实现**不用乘除法**：边界直接把 Y 右移得到（Y>>5 = Y/32、Y>>1 = Y/2），
+    //   下界再取 max(1, ·) 防止极暗处退化成 0 而把噪声放进来。全是移位 + 比较，0 DSP。
+    // ⚠ 副作用：归一化模式下**不再用运行时窗口寄存器**，所以"一键示教"学出来的绝对值边界
+    //   在这条路上不生效（要恢复示教的效果，把 SKIN_NORM 置 0 即回到老判据）。
+    parameter integer  SKIN_NORM = 1,
+    parameter [3:0]    NORM_LO_SH = 4'd5,   // 下界 = Y >> 5 = Y/32
+    parameter [3:0]    NORM_HI_SH = 4'd1    // 上界 = Y >> 1 = Y/2
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -860,19 +872,42 @@ module recog_top #(
         end
     endfunction
 
+    // 判据 v3（M2.2 修正，用户提议）：**按亮度归一化**的肤色判据 —— 用比例代替绝对值窗。
+    //   d2/Y ∈ [2^-NORM_LO_SH, 2^-NORM_HI_SH]、|d1|/Y 同区间。边界由 Y 右移得到，不用乘除。
+    //   注意 d2 必须为正（皮肤是 R > Y）：负 d2 零扩展后是个大正数，会被上界自然挡掉。
+    function F_skin_norm_px;
+        input signed [8:0] I_d1, I_d2;   // d1 = B−Y、d2 = R−Y
+        input [7:0]        I_y;          // 真 luma
+        reg [8:0] S_l, S_h, S_a1;
+        begin
+            S_l  = {4'b0, I_y[NORM_LO_SH+2 : NORM_LO_SH]};        // Y >> NORM_LO_SH
+            S_l  = (S_l == 9'd0) ? 9'd1 : S_l;                    // 极暗处不让下界掉到 0
+            S_h  = {1'b0, I_y[7 : NORM_HI_SH]};                   // Y >> NORM_HI_SH
+            S_a1 = I_d1[8] ? (~I_d1 + 9'd1) : I_d1;               // |d1|
+            F_skin_norm_px = (S_a1 >= S_l) && (S_a1 <= S_h) &&
+                             ({1'b0, I_d2} >= S_l) && ({1'b0, I_d2} <= S_h);
+        end
+    endfunction
+
     // 掩码 bit 序与 S_edge_mask 一致：bit0 = 字内最左像素 [95:72]。
     wire [3:0] S_skin_mask = {F_skin_px(S_d1_3, S_d2_3),
                               F_skin_px(S_d1_2, S_d2_2),
                               F_skin_px(S_d1_1, S_d2_1),
                               F_skin_px(S_d1_0, S_d2_0)};
 
+    wire [3:0] S_skin_norm_mask = {F_skin_norm_px(S_d1_3, S_d2_3, S_gray3),
+                                   F_skin_norm_px(S_d1_2, S_d2_2, S_gray2),
+                                   F_skin_norm_px(S_d1_1, S_d2_1, S_gray1),
+                                   F_skin_norm_px(S_d1_0, S_d2_0, S_gray0)};
+
     wire [3:0] S_skin2_mask = {F_skin2_px(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3),
                                F_skin2_px(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2),
                                F_skin2_px(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1),
                                F_skin2_px(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0)};
 
-    // 最终使用的肤色掩码（编译期常量选择，两个判据不会同时存在）
-    wire [3:0] S_skin_use = (SKIN_RULE2 != 0) ? S_skin2_mask : S_skin_mask;
+    // 最终使用的肤色掩码（编译期常量选择，没选中的判据会被综合裁掉）
+    wire [3:0] S_skin_use = (SKIN_RULE2 != 0) ? S_skin2_mask :
+                            ((SKIN_NORM != 0)  ? S_skin_norm_mask : S_skin_mask);
 
     // ========================================================================
     // M1 Step 2：背景帧（80x45 灰度）+ 运动掩码 → 融合掩码 = 肤色 ∩ 运动
