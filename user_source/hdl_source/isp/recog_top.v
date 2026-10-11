@@ -306,15 +306,22 @@ module recog_top #(
     // 观测源是 M1 的质心（不新增像素级统计）；算法、判据、DBG 口径见下面 g_gest
     // 的段落注释。这一版只做算法验证（结果还没有外送通道，见 M2.3 向 C 提的需求）。
     parameter integer  GEST_EN = 1,
-    // 窗口长度（帧）。窗口 = 本帧质心与 (GEST_WIN-1) 帧前质心的差（净位移）。
-    // 本实现支持 3 或 4（= 3~4 帧窗，规划里写的 3~5 帧范围）。
-    parameter integer  GEST_WIN = 4,
-    // 左/右挥：窗口净位移 |Δx| 门限（像素；≈ 平均速度 × GEST_WIN）
-    parameter [11:0]   GEST_VX_TH = 12'd40,
-    // 下劈（向下）：窗口净位移 Δy 门限（像素；y 向下为正，所以往下是正数）
-    parameter [11:0]   GEST_VY_TH = 12'd32,
-    // 一次事件后的冷却帧数（≈300 ms @60 fps；一次挥手只出一个事件）
-    parameter [5:0]    GEST_COOLDOWN = 6'd18,
+    // 动作段（2026-10-11 改）：每帧 |位移| 超过它 = **动作开始**（像素/帧）
+    parameter [11:0]   GEST_START_TH = 12'd8,
+    // 每帧 |位移| 不超过它 = **安静**（像素/帧）
+    parameter [11:0]   GEST_QUIET_TH = 12'd5,
+    // 连续安静这么多帧（≈150 ms @60 fps）才判"动作结束"并结算
+    parameter [3:0]    GEST_QUIET_FRAMES = 4'd9,
+    // 单段最长帧数（≈2.5 s @60 fps）：到点强制结算，防"场景一直在动"永远卡在动作中
+    parameter [7:0]    GEST_SEG_MAX = 8'd150,
+    // 左/右挥：整段 |ΔX| 门限（像素）
+    parameter [11:0]   GEST_X_TH = 12'd60,
+    // 下劈：整段 ΔY（掩码最高行下移）门限（像素）
+    parameter [11:0]   GEST_Y_TH = 12'd120,
+    // 下劈：整段 |ΔX| 上限（横向几乎没动才认，像素）
+    parameter [11:0]   GEST_Y_XMAX = 12'd25,
+    // "看到了动作但够不上任何判据"要闪青色提示的最小整段位移（小于它当噪声，不闪）
+    parameter [11:0]   GEST_NOISE_TH = 12'd30,
     // 左右对调：显示器相对真实场景是镜像时置 1（常量折叠，0 资源、0 逻辑）
     parameter integer  GEST_FLIP_X = 0,
     // 调试口径：1 = 把 DBG 的 P/Q/R 三个字段借给"挥手方向"用（编码见 g_gest 注释），
@@ -1447,145 +1454,171 @@ module recog_top #(
     // ========================================================================
     // M2.1（2026-10-11）：挥手方向 —— 左挥 / 右挥 / 下劈
     //
-    // 观测源：完全复用 M1 的质心（S_cent_x/S_cent_y，S1 已统一观测源），不新增任何
-    //   像素级统计，也不动掩码/跟踪的任何一行。相位：质心除法器在帧首后一拍启动、
-    //   27 拍后出结果并保持整帧，所以**tuser 那一拍读到的 S_cent_* 是上一帧的质心**
-    //   —— 相邻两次 tuser 采到的正好是相邻两帧的质心，差就是帧间位移，不引入新滞后。
+    // 观测源：x 用 M1 的**质心**（S_cent_x），y 用 M1 的**掩码最高行**（S_ymin，11 位全精度，
+    //   mask_stats 现成输出）。都是每帧一个值、帧首锁存，不新增像素级统计。
+    //   相位：质心除法器在帧首后 27 拍出结果并保持整帧 → tuser 那一拍读到的是上一帧质心；
+    //   y_min 由 mask_stats 在 tuser 那一拍锁存 → 该拍读到的是再上一帧的 y_min（比质心晚一拍）。
+    //   所以下面用"cx1/cx2 两级 + ym1 一级"的采样前沿，把两条路**对齐到同一对帧 (k−1,k−2)**。
     //
-    // 算法（只有减法/比较，无乘法、无除法、无加法树 → DSP 增量 0；见下面"为什么用净位移"）
-    //   1) 质心延迟线：存最近 GEST_WIN-1 帧的质心（d1 = 上一帧、d3 = 3 帧前）。窗口净位移
-    //      Δx = x_now − d(GEST_WIN-1)、Δy = y_now − d(GEST_WIN-1)。
-    //   2) 可信性：只有"本帧可信"**且**"窗口内每一帧都可信"（连续可信帧数 ≥ GEST_WIN）
-    //      才判事件。手出画再回画时拿旧坐标做差会得到巨大的假位移，这一条把它挡住；延迟线
-    //      在不可信帧上冻结，不会把空帧的旧坐标串进窗口。
-    //   3) 方向一致（便宜版）：窗口的**前半段**必须与整窗同向（Δx ≥ 0 要求 d1 ≥ 窗首，
-    //      Δx < 0 要求 d1 ≤ 窗首）—— 每轴一个比较器，挡住"先反向再正向"的抖动。
-    //   4) 判据：
-    //        左挥 / 右挥：|Δx| > GEST_VX_TH 且 |Δx| > |Δy| 且前半段同向；
-    //        下劈（向下）：Δy > GEST_VY_TH 且 |Δy| > |Δx| 且前半段同向（y 向下为正）。
-    //   5) 出事件后把延迟线整体装载成当前质心（Δ 立刻归零）+ 拉 GEST_COOLDOWN 帧冷却
-    //      （≈300 ms），一次挥手只出一个事件；装载本身也提供滞回。
+    // 算法（只有减法/比较，无乘法、无除法、无加法树 → DSP 增量 0）：
+    //   1) 每帧位移：dx = 质心列差、dy = **掩码最高行差**（不是质心 y！见下方"为什么换 y"）。
+    //   2) **动作段状态机**（这一条是 2026-10-11 用户实测反馈后加的）：
+    //        已武装 → 某帧 |位移| > GEST_START_TH = 动作开始（记起点 cx1/ymin）→ 动作中；
+    //        动作中 → 连续 GEST_QUIET_FRAMES 帧安静（|位移| ≤ GEST_QUIET_TH）= 动作结束；
+    //                 或到 GEST_SEG_MAX 帧强制结算（防场景一直动）。
+    //        → **一个动作只结算一次**，所以不会再出现"一个动作连出三条颜色"。
+    //   3) 结算时按**整段净位移**（终点 − 起点）一次性定性，余量写死：
+    //        左挥 / 右挥：|ΔX| > GEST_X_TH 且 |ΔX| > 2·|ΔY|；
+    //        下劈（向下）：ΔY > GEST_Y_TH 且 |ΔX| < GEST_Y_XMAX（横向几乎没动）。
+    //      两条都不满足但整段位移大于 GEST_NOISE_TH → 闪**青色**（"看到动作、方向够不上"），
+    //      小于噪声就完全不闪（掩码抖两下不算动作）。
     //
-    // 为什么用"净位移"而不是"逐帧位移求和"（2026-10-11 决策）：两者在匀速挥手时等价
-    //   （净位移 ≈ 平均速度 × 窗口长度），但① 净位移让来回抖动**自动抵消**（求和不会，
-    //   还得再加一套"符号一致"投票）；② 省掉整棵加法树。这一条是本轮把 LUT6 从
-    //   +295（求和版实测）压到预算内的关键 —— 原始求和版见本文件 git 历史。
+    // 为什么把下劈的 y 从"质心"换成"掩码最高行"（2026-10-11）：质心是**面积中心**，横向挥手
+    //   时手臂进/出 ROI、掩码形状一变它就上下漂；横挥到两端一减速，|Δy| 常常大于 |Δx|，
+    //   于是误报下劈（上板实测"横挥出蓝条"）。手往下劈时**最高行**明显下移、横向挥手时它基本
+    //   不动 —— 这才是"手在哪儿"的干净信号（M1 老参数 TRACK_Y_FROM_TOP 就是拿它贴指尖的）。
     //
-    // 方向编码 S_gest_dir：0 = 无事件，1 = 左挥，2 = 右挥，3 = 下劈。左右按**图像坐标**
-    //   （x 增大 = 右）；显示器若相对真实场景是镜像的，把 GEST_FLIP_X 置 1 对调即可。
+    // 方向编码 S_gest_dir：0 = 无事件，1 = 左挥，2 = 右挥，3 = 下劈，4 = 动作结束但方向不明确。
+    //   左右按**图像坐标**（x 增大 = 右）；显示器若相对真实场景是镜像的，GEST_FLIP_X=1 对调即可。
     //
     // GEST_DBG=1 时把 DBG 的 P/Q/R 三个字段借来观测（M1 的原始含义见 CHANGELOG）：
-    //   P = {Δx 8 位, Δy 8 位}  钳 ±127 后 +128（0x80 = 0；单位 = 像素/窗，定标看它）
+    //   P = {整段 ΔX 8 位, 整段 ΔY 8 位}  钳 ±127 后 +128（0x80 = 0；动作中看它定标门限）
     //   Q = {方向[2:0], 事件计数[10:0]}  读成 0x0DCC：D = 方向、CC = 事件数（饱和/不清零）
-    //   R = {本帧 dx 6 位, 本帧 dy 6 位}  钳 ±31 后 +32（0x20 = 0；单位 = 像素/帧，看跟手）
+    //   R = {每帧 dx 6 位, 每帧 dy 6 位}  钳 ±31 后 +32（0x20 = 0；已锁存，逐帧可信）
     // 交付口径（GEST_DBG=0）下 P/Q/R 一个字节都不变，仍是 M1 的掩码像素数与包围盒。
     //
-    // 资源：2 个 12 位减法（净位移）+ 2 个延迟线（≈63 FF）+ 绝对值/比较 + 冷却计数器，
-    //   ≈110~140 LUT6 + ≈90 FF，0 ERAM / 0 DSP（上板实测数字见 CHANGELOG）。
+    // 资源：2 个 12 位减法 ×2（帧间 + 整段）+ 绝对值/比较 + 采样寄存器 + 段状态机，
+    //   ≈150~180 LUT6 + ≈90 FF，0 ERAM / 0 DSP（上板实测数字见 CHANGELOG）。
     // ========================================================================
     wire        S_gest_left, S_gest_right, S_gest_down;   // 单帧事件脉冲
-    wire [2:0]  S_gest_dir;      // 最近一次事件的方向：1=左 2=右 3=下（0 = 还没有过）
+    wire [2:0]  S_gest_dir;      // 最近一次结算的方向：1=左 2=右 3=下 4=方向不明确（0=还没有过）
     wire [10:0] S_gest_cnt;      // 事件总数（饱和，不清零）
-    wire signed [11:0] S_gest_sx;    // 窗口净位移 Δx（定标用）
-    wire signed [11:0] S_gest_sy;    // 窗口净位移 Δy（定标用）
-    wire signed [11:0] S_gest_dx;    // 本帧位移（不可信帧记 0）
-    wire signed [11:0] S_gest_dy;
+    wire signed [11:0] S_gest_sx;    // 动作中：整段 ΔX（定标用；空闲恒 0）
+    wire signed [11:0] S_gest_sy;    // 动作中：整段 ΔY（定标用；空闲恒 0）
+    wire signed [11:0] S_gest_dx;    // 每帧 dx（已锁存，不可信帧记 0）
+    wire signed [11:0] S_gest_dy;    // 每帧 dy（用掩码最高行算）
     wire        S_gest_flash;   // 挥手事件后 ~0.4 s 高（并进 isp_top 的叠加使能）
     wire [2:0]  S_gest_vis;     // 闪条色码：0=不闪、3=左(红)、4=右(绿)、6=下(蓝)
 
     generate
     if ((GEST_EN != 0) && (MASK_SRC != 0) && (USE_CENTROID != 0)) begin : g_gest
 
-        // 窗口长度 3 或 4 → 窗首抽头是 d2 或 d3（常量折叠）
-        localparam integer GEST_LAST = (GEST_WIN >= 4) ? 3 : 2;
+        // ---- 帧间量（2026-10-11 修正）：x 用质心，y 用**掩码最高行 y_min** -----------
+        // y_min = 掩码最上面一行（≈指尖/手顶）：手往下劈时它明显下移，横向挥手时基本不动。
+        // 上一版拿**质心 y** 判下劈 —— 质心是"面积中心"，横向挥手时手臂进/出 ROI、掩码形状
+        // 一变它就上下漂；横挥到两端一减速，|Δy| 常常大于 |Δx|，于是误报下劈（用户实测的
+        // "横挥出蓝条"）。S_ymin 是 mask_stats 现成的 11 位全精度输出（M1 的 TRACK_Y_FROM_TOP
+        // 就是拿它当"贴指尖"用的），换它几乎不花资源。
+        // 相位对齐：y_min 在 tuser 那一拍锁存，所以该拍**读到**的是再上一帧的值（比质心晚一
+        // 拍）；这里用"上一拍采样的 y_min"与"再上一拍"作差，正好和质心的 (k−1,k−2) 帧对严格
+        // 对齐（质心要 cx1/cx2 两级，y_min 只要一级）。
+        reg [10:0] S_gcx1, S_gcx2;   // 质心列（前 1 / 前 2 拍采样）
+        reg [10:0] S_gym1;           // y_min（前 1 拍采样）
+        reg        S_gv1, S_gv2;     // 前 1 / 前 2 拍采样时"掩码可信"（= 上一帧有手）
+        wire S_gok = S_cent_valid && S_gv1 && S_gv2;
 
-        // ---- 质心延迟线（d1 = 上一帧、d3 = 3 帧前）+ 连续可信帧数 ----------------
-        reg [10:0] S_gd1x, S_gd2x, S_gd3x;
-        reg [9:0]  S_gd1y, S_gd2y, S_gd3y;
-        reg [2:0]  S_gvc;      // 连续可信帧数（饱和在 4）
-        reg [5:0]  S_gcd;      // 冷却倒计时（帧）
-        reg [2:0]  S_gdir;
-        reg [10:0] S_gcnt;
-        reg [7:0]  S_gflash;   // 挥手提示条倒计时（帧）
+        wire signed [11:0] S_gfx = S_gok ? ({1'b0, S_gcx1} - {1'b0, S_gcx2}) : 12'sd0;
+        wire signed [11:0] S_gfy = S_gok ? ({1'b0, S_ymin} - {1'b0, S_gym1}) : 12'sd0;
+        wire [11:0] S_gax = S_gfx[11] ? (~S_gfx + 12'd1) : S_gfx;   // |每帧 dx|
+        wire [11:0] S_gay = S_gfy[11] ? (~S_gfy + 12'd1) : S_gfy;   // |每帧 dy(手顶)|
 
-        wire [10:0] S_gzdx = (GEST_LAST == 3) ? S_gd3x : S_gd2x;   // 窗首列
-        wire [9:0]  S_gzdy = (GEST_LAST == 3) ? S_gd3y : S_gd2y;   // 窗首行
+        // ---- 动作段状态机（一个动作只结算一次 → 直接消灭"三色连出"）----------------
+        //   已武装 → 每帧 |位移| > START_TH = 动作开始（记起点）→ 动作中
+        //   动作中 → 连续 QUIET_FRAMES 帧安静 = 动作结束 → **按整段净位移一次性定性**
+        //            （或 SEG_MAX 帧到点强制结算，防场景一直动）
+        reg        S_gact;           // 0 = 已武装（等动作）/ 1 = 动作中
+        reg [10:0] S_gx0, S_gy0;     // 动作起点（口径与帧对一致：cx1 / ymin）
+        reg [3:0]  S_gqc;            // 连续安静帧数
+        reg [7:0]  S_glen;           // 本段已持续帧数（超时保护）
+        reg [7:0]  S_gflash;         // 提示条倒计时
+        reg [2:0]  S_gdir;           // 1=左 2=右 3=下 4=动作结束但方向不明确
+        reg [10:0] S_gcnt;           // 事件计数（只数真事件）
 
-        // ---- 窗口净位移 Δx/Δy（本帧 − 窗首）与本帧位移 -------------------------
-        wire signed [11:0] S_gdx = {1'b0, S_cent_x} - {1'b0, S_gzdx};
-        wire signed [11:0] S_gdy = {2'b0, S_cent_y} - {2'b0, S_gzdy};
-        wire signed [11:0] S_gfx = {1'b0, S_cent_x} - {1'b0, S_gd1x};
-        wire signed [11:0] S_gfy = {2'b0, S_cent_y} - {2'b0, S_gd1y};
+        wire S_gmove = S_gok && ((S_gax > GEST_START_TH) || (S_gay > GEST_START_TH));
+        wire S_gstop = !S_gok || ((S_gax <= GEST_QUIET_TH) && (S_gay <= GEST_QUIET_TH));
+        wire S_gend  = S_gact && ((S_gstop && (S_gqc >= GEST_QUIET_FRAMES)) ||
+                                  (S_glen >= GEST_SEG_MAX));
 
-        // ---- 绝对值 + 三个比较（门限两个、轴占优一个）--------------------------
-        wire [11:0] S_gax = S_gdx[11] ? (~S_gdx + 12'd1) : S_gdx;
-        wire [11:0] S_gay = S_gdy[11] ? (~S_gdy + 12'd1) : S_gdy;
-        wire S_gest_x_th  = (S_gax > GEST_VX_TH);
-        wire S_gest_y_th  = (S_gay > GEST_VY_TH);
-        wire S_gest_x_dom = (S_gax > S_gay);
-        wire S_gest_y_dom = (S_gay > S_gax);
-
-        // ---- 前半段同向：Δx ≥ 0 要求 d1 ≥ 窗首；Δx < 0 要求 d1 ≤ 窗首 ----------
-        wire S_gest_x_ok = ((S_gd1x >= S_gzdx) == ~S_gdx[11]);
-        wire S_gest_y_ok = ((S_gd1y >= S_gzdy) == ~S_gdy[11]);
-
-        // ---- 事件：窗口内每帧都可信 + 冷却 --------------------------------------
-        wire S_gwin    = (S_gvc >= GEST_WIN);
-        wire S_gfree   = (S_gcd == 6'd0);
-        wire S_gevt_lr = S_cent_valid & S_gwin & S_gfree & S_gest_x_dom &
-                         S_gest_x_th & S_gest_x_ok;
-        wire S_gevt_dn = S_cent_valid & S_gwin & S_gfree & S_gest_y_dom &
-                         S_gest_y_th & S_gest_y_ok;
-        // 右 = Δx ≥ 0（图像坐标）；GEST_FLIP_X=1 时对调
-        wire S_gright = (GEST_FLIP_X != 0) ? S_gdx[11] : ~S_gdx[11];
+        // ---- 整段净位移（终点 − 起点）与判据（余量写死，不再"大一点就算"）----------
+        wire signed [11:0] S_gdX = {1'b0, S_gcx1} - {1'b0, S_gx0};
+        wire signed [11:0] S_gdY = {1'b0, S_ymin} - {1'b0, S_gy0};
+        wire [11:0] S_gaX = S_gdX[11] ? (~S_gdX + 12'd1) : S_gdX;
+        wire [11:0] S_gaY = S_gdY[11] ? (~S_gdY + 12'd1) : S_gdY;
+        wire [12:0] S_gy2 = {1'b0, S_gaY, 1'b0};            // 2·|ΔY|
+        wire S_ghx = (S_gaX > GEST_X_TH) && ({1'b0, S_gaX} > S_gy2);
+        wire S_ghy = (S_gdY[11] == 1'b0) && (S_gaY > GEST_Y_TH) &&
+                     (S_gaX < GEST_Y_XMAX);
+        // "看到了动作但够不上任何一条"：只有整段位移明显大于噪声才打青色提示，
+        // 否则掩码抖两下也会算一段、没完没了地闪
+        wire S_gbig  = (S_gaX > GEST_NOISE_TH) || (S_gaY > GEST_NOISE_TH);
+        wire S_ghevt = S_gend && (S_ghx || S_ghy);              // 真事件（红/绿/蓝）
+        wire S_ghunk = S_gend && !S_ghx && !S_ghy && S_gbig;    // 方向不明确（青）
+        // 右 = ΔX ≥ 0（图像坐标）；GEST_FLIP_X=1 时对调
+        wire S_gright = (GEST_FLIP_X != 0) ? S_gdX[11] : ~S_gdX[11];
 
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
-                S_gd1x <= 11'd0; S_gd2x <= 11'd0; S_gd3x <= 11'd0;
-                S_gd1y <= 10'd0; S_gd2y <= 10'd0; S_gd3y <= 10'd0;
-                S_gvc <= 3'd0;   S_gcd <= 6'd0;
-                S_gdir <= 3'd0;  S_gcnt <= 11'd0;  S_gflash <= 8'd0;
+                S_gcx1 <= 11'd0; S_gcx2 <= 11'd0; S_gym1 <= 11'd0;
+                S_gv1  <= 1'b0;  S_gv2  <= 1'b0;
+                S_gact <= 1'b0;  S_gx0 <= 11'd0;  S_gy0 <= 11'd0;
+                S_gqc  <= 4'd0;  S_glen <= 8'd0;
+                S_gdir <= 3'd0;  S_gcnt <= 11'd0; S_gflash <= 8'd0;
             end
             else if(I_raw_tuser) begin
-                if(S_gcd != 6'd0) S_gcd <= S_gcd - 6'd1;
                 if(S_gflash != 8'd0) S_gflash <= S_gflash - 8'd1;
 
-                if(S_gevt_lr || S_gevt_dn) begin
-                    // 事件：装载延迟线（Δ 立刻归零 → 滞回）、进冷却、记方向与计数
-                    S_gdir <= S_gevt_lr ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
-                    S_gcnt <= (S_gcnt == 11'h7FF) ? 11'h7FF : (S_gcnt + 11'd1);
-                    S_gcd  <= GEST_COOLDOWN;
-                    S_gflash <= GEST_FLASH_FRAMES;   // 打出"挥手提示条"（见 GEST_VIS）
-                    S_gd1x <= S_cent_x; S_gd2x <= S_cent_x; S_gd3x <= S_cent_x;
-                    S_gd1y <= S_cent_y; S_gd2y <= S_cent_y; S_gd3y <= S_cent_y;
-                    S_gvc  <= 3'd0;
+                if(S_gend) begin
+                    // 动作结束：一次性定性 + 出提示条（一个动作只出一次）
+                    if(S_ghevt) begin
+                        S_gdir   <= S_ghx ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
+                        S_gcnt   <= (S_gcnt == 11'h7FF) ? 11'h7FF : (S_gcnt + 11'd1);
+                        S_gflash <= GEST_FLASH_FRAMES;
+                    end
+                    else if(S_ghunk) begin
+                        S_gdir   <= 3'd4;                     // 青色：动作看到了、方向够不上
+                        S_gflash <= GEST_FLASH_FRAMES >> 1;   // 短一半，和真事件区分
+                    end
+                    S_gact <= 1'b0;
                 end
-                else if(S_cent_valid) begin
-                    // 可信帧：推进延迟线 + 连续可信帧数
-                    S_gd1x <= S_cent_x; S_gd2x <= S_gd1x; S_gd3x <= S_gd2x;
-                    S_gd1y <= S_cent_y; S_gd2y <= S_gd1y; S_gd3y <= S_gd2y;
-                    S_gvc  <= (S_gvc >= 3'd4) ? 3'd4 : (S_gvc + 3'd1);
+                else if(!S_gact) begin
+                    if(S_gmove) begin
+                        S_gact <= 1'b1;
+                        // 起点 = 检测到动作那一步的**后**一个采样 → "掩码突变一格"不算整段位移
+                        S_gx0  <= S_gcx1;
+                        S_gy0  <= S_ymin;
+                        S_gqc  <= 4'd0;
+                        S_glen <= 8'd0;
+                    end
                 end
                 else begin
-                    // 不可信帧：延迟线冻结、连续可信帧数清零（见算法第 2 条）
-                    S_gvc <= 3'd0;
+                    S_glen <= (S_glen == 8'hFF) ? 8'hFF : (S_glen + 8'd1);
+                    S_gqc  <= S_gstop ? ((S_gqc == 4'hF) ? 4'hF : (S_gqc + 4'd1))
+                                      : 4'd0;
                 end
+
+                // 采样推进（放最后：上面用到的都是"上一拍采样值"）
+                S_gcx2 <= S_gcx1;
+                S_gcx1 <= S_cent_x;
+                S_gym1 <= S_ymin;
+                S_gv2  <= S_gv1;
+                S_gv1  <= S_cent_valid;
             end
         end
 
-        assign S_gest_left  = S_gevt_lr & ~S_gright;
-        assign S_gest_right = S_gevt_lr &  S_gright;
-        assign S_gest_down  = S_gevt_dn;
+        assign S_gest_left  = S_ghevt &  S_ghx & ~S_gright;
+        assign S_gest_right = S_ghevt &  S_ghx &  S_gright;
+        assign S_gest_down  = S_ghevt & ~S_ghx;
         assign S_gest_dir   = S_gdir;
         assign S_gest_cnt   = S_gcnt;
-        assign S_gest_sx    = S_gdx;
-        assign S_gest_sy    = S_gdy;
-        assign S_gest_dx    = S_gfx;
+        assign S_gest_sx    = S_gact ? S_gdX : 12'sd0;   // DBG P：动作中看整段位移（定标用）
+        assign S_gest_sy    = S_gact ? S_gdY : 12'sd0;
+        assign S_gest_dx    = S_gfx;                     // DBG R：每帧 dx / dy（手顶）
         assign S_gest_dy    = S_gfy;
-        // 挥手提示：方向 → 颜色（左红 / 右绿 / 下蓝）；GEST_VIS=0 时恒 0（整段被裁掉）
+        // 挥手提示：方向 → 颜色（左红 3 / 右绿 4 / 下蓝 6 / 不明确青 7）；GEST_VIS=0 时恒 0
         assign S_gest_vis = ((GEST_VIS == 0) || (S_gflash == 8'd0)) ? 3'd0 :
                             ((S_gdir == 3'd1) ? 3'd3 :
-                            ((S_gdir == 3'd2) ? 3'd4 : 3'd6));
+                            ((S_gdir == 3'd2) ? 3'd4 :
+                            ((S_gdir == 3'd3) ? 3'd6 : 3'd7)));
         assign S_gest_flash = (GEST_VIS != 0) && (S_gflash != 8'd0);
 
     end
