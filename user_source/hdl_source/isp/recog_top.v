@@ -335,7 +335,10 @@ module recog_top #(
     // 不用串口、不用按键：这个"闪条"同时并进 isp_top 的叠加使能（S_ovl_en |= O_gest_flash），
     // 所以哪怕 recog_algo=0（画面本来是纯摄像头）也会闪 —— 挥手就有反应。
     // 想连掩码/准星一起看：短按 KEY4（= 进游戏模式，顺带把 recog_algo 置 1）。
-    parameter integer  GEST_VIS = 1,
+    // ⚠ 2026-10-11：M2.1（挥手方向）用户实测后决定**先跳过**（识别效果不理想），本行置 0
+    // → 整段挥手逻辑连同可视化一起被综合裁掉，交付版增量 0（额度让给 M2.2）。
+    // 复活办法：本行置 1，同时把 `isp_top.v` 的 `GEST_DBG_SEL` 置 1（那是 DBG P/Q/R 口径）。
+    parameter integer  GEST_VIS = 0,
     parameter [7:0]    GEST_FLASH_FRAMES = 8'd24,
     // 提示条画在**对应屏幕边缘**（不是固定条换颜色）：左挥 = 左边竖条、右挥 = 右边竖条、
     // 下劈 = 底部横条、方向不明确 = 顶部细横条。边缘条宽度 = GEST_VIS_W。

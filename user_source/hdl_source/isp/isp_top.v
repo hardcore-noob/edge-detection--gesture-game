@@ -266,10 +266,10 @@ module isp_top #(
 
     // ---- 识别支路（M0：tap 监视 + 掩码统计 + CTRL_SYNC 端点）------------------
     // 取点：AWB 输出的彩色 RAW 流与边缘流，都在上面的 MUX 之前。
-    // M2.1 上板定标/验收版：GEST_DBG=1 把 DBG 的 P/Q/R 三个字段借给"挥手方向"观测
-    // （编码见 recog_top 里 g_gest 的段落注释）。交付版改回 0 —— 那时整段挥手逻辑会
-    // 被综合裁掉，交付口径一个 LUT 都不多花。
-    localparam integer GEST_DBG_SEL = 1;
+    // M2.1（挥手方向）2026-10-11 用户决定**先跳过**：本行置 0 → 不借 DBG 的 P/Q/R，
+    // 配合 recog_top 的 `GEST_VIS=0`，整段挥手逻辑被综合裁掉（交付口径 0 增量）。
+    // 要复活 M2.1 定标：本行置 1 + recog_top 的 `GEST_VIS` 置 1。
+    localparam integer GEST_DBG_SEL = 0;
 
     recog_top #(
         .GEST_DBG        (GEST_DBG_SEL)
