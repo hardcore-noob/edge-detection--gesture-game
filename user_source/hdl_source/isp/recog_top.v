@@ -380,8 +380,16 @@ module recog_top #(
     //   已在 F_skin_norm_px 里补上 `I_d1[8]`（皮肤必须 B−Y < 0，与 M1 的 d1∈[−100,−5] 同义）。
     //   归一化的思路不变：暗处掩码断开确实是"绝对值下界"造成的。
     parameter integer  SKIN_NORM = 1,
-    parameter [3:0]    NORM_LO_SH = 4'd5,   // 下界 = Y >> 5 = Y/32
-    parameter [3:0]    NORM_HI_SH = 4'd1    // 上界 = Y >> 1 = Y/2
+    // 下界 ≈ 1/20：用 (Y>>4) − (Y>>6) = 3Y/64 ≈ Y/21.3（纯移位+减法，不用乘法）
+    //   收紧到 1/20 的原因：1/32 会放行"刚过一档色差"的暖灰面（亮桌面）。
+    parameter [3:0]    NORM_LO_SH  = 4'd4,
+    parameter [3:0]    NORM_LO_SUB = 4'd6,
+    // 上界 = min(Y/4, 硬帽)：比例界（Y>>2）+ M1 的老绝对上限**双保险**。
+    //   皮肤 d2/Y≈0.2、|d1|/Y≈0.16 照样过；亮暖桌面（0.3~0.5）被比例界挡，
+    //   而"特别亮、比例看着正常但绝对值离谱"的杂光被硬帽挡。
+    parameter [3:0]    NORM_HI_SH  = 4'd2,
+    parameter [8:0]    NORM_D2_HARD = 9'd70,    // M1 的 D2_MAX
+    parameter [8:0]    NORM_D1_HARD = 9'd100    // M1 的 |d1| 上限
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -883,16 +891,20 @@ module recog_top #(
         input [7:0]        I_y;          // 真 luma
         reg [8:0] S_l, S_h, S_a1;
         begin
-            S_l  = {4'b0, I_y[NORM_LO_SH+2 : NORM_LO_SH]};        // Y >> NORM_LO_SH
-            S_l  = (S_l == 9'd0) ? 9'd1 : S_l;                    // 极暗处不让下界掉到 0
-            S_h  = {1'b0, I_y[7 : NORM_HI_SH]};                   // Y >> NORM_HI_SH
+            // 下界 ≈ (Y>>4) − (Y>>6) ≈ Y/21.3（不用乘法）；再钳到 ≥1 防极暗退化
+            S_l  = {5'b0, I_y[7 : NORM_LO_SH]} - {7'b0, I_y[7 : NORM_LO_SUB]};
+            S_l  = (S_l <= 9'd1) ? 9'd1 : S_l;
+            S_h  = {1'b0, I_y[7 : NORM_HI_SH]};                   // Y >> NORM_HI_SH（默认 Y/4）
             S_a1 = I_d1[8] ? (~I_d1 + 9'd1) : I_d1;               // |d1|
             // ★ 2026-10-11 补的关键条件：d1 = B−Y **必须为负**（皮肤比 Y 更暖，B 小于 Y）。
             //   第一版漏了它、只比 |d1| 的幅度 → 偏冷/中性的表面也满足比例窗 → **整屏变红**。
             //   注意 d2 的正负不用单独判：d2 < 0 时零扩展是个大正数，必然超过上界 S_h。
+            // 上界再加 M1 的老硬帽（min(Y/4, 硬帽)）：比例界挡"亮暖桌面"，硬帽挡"特别亮的杂光"。
             F_skin_norm_px = I_d1[8] &&                       // d1 < 0（B < Y）
                              (S_a1 >= S_l) && (S_a1 <= S_h) &&
-                             ({1'b0, I_d2} >= S_l) && ({1'b0, I_d2} <= S_h);
+                             (S_a1 <= NORM_D1_HARD) &&
+                             ({1'b0, I_d2} >= S_l) && ({1'b0, I_d2} <= S_h) &&
+                             ({1'b0, I_d2} <= NORM_D2_HARD);
         end
     endfunction
 
@@ -1399,14 +1411,17 @@ module recog_top #(
             end
         endfunction
 
+        // ★ 2026-10-11（用户指出）：软权重（质心/准星的观测源）**必须与掩码同源** —— 原来这里喂的是
+        //   `S_skin_mask`（老绝对窗），归一化打开后两条路判据不同：桌面可能不再被涂红、却仍把**准星**
+        //   拽过去（M1 踩过同一个坑，结论就是"准星与掩码同源"）。改成 `S_skin_use` 即可。
         wire [1:0]  S_w0 = F_w_inroi(S_wc0, S_y_pos)
-                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_lat_on, S_skin_mask[0]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_lat_on, S_skin_use[0]) : 2'd0;
         wire [1:0]  S_w1 = F_w_inroi(S_wc1, S_y_pos)
-                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_lat_on, S_skin_mask[1]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_lat_on, S_skin_use[1]) : 2'd0;
         wire [1:0]  S_w2 = F_w_inroi(S_wc2, S_y_pos)
-                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_lat_on, S_skin_mask[2]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_lat_on, S_skin_use[2]) : 2'd0;
         wire [1:0]  S_w3 = F_w_inroi(S_wc3, S_y_pos)
-                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_lat_on, S_skin_mask[3]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_lat_on, S_skin_use[3]) : 2'd0;
 
         // w∈0..2：w·x = (w[0] ? x : 0) + (w[1] ? x<<1 : 0) —— 移位加法，不碰 DSP
         wire [11:0] S_wx0 = (S_w0[0] ? {1'b0,S_wc0} : 12'd0) + (S_w0[1] ? {S_wc0,1'b0} : 12'd0);
