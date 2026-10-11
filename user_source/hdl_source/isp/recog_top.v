@@ -343,7 +343,30 @@ module recog_top #(
     // 提示条画在**对应屏幕边缘**（不是固定条换颜色）：左挥 = 左边竖条、右挥 = 右边竖条、
     // 下劈 = 底部横条、方向不明确 = 顶部细横条。边缘条宽度 = GEST_VIS_W。
     parameter [10:0]   GEST_VIS_W = 11'd80,
-    parameter [9:0]    GEST_VIS_UNK_Y = 10'd20
+    parameter [9:0]    GEST_VIS_UNK_Y = 10'd20,
+
+    // ---- M2.2 指尖 + 手型（2026-10-11；M2_EN=0 时整段不综合）------------------
+    // 规划里 M2.2 要"每列轮廓记忆（1280×10bit ≈ 1 块 ERAM）+ 找局部极大值"。这里用一条
+    // 等价但省得多的路子：
+    //   * 指尖 = 掩码**最高带里遇到的第一个像素**（自顶向下、行内从左到右扫）→ 锁存列/行，
+    //     不需要任何存储（只要一个"找到没"的标志）；
+    //   * 手型 = **峰数**：在"顶带"内**逐行**数"进入掩码的连续段数"，取整帧最大。
+    //     1 段 = 并指/握拳；≥2 段 = 手指分开（张开）。逐行数就不用存任何轮廓。
+    //   * 滞回：连续 M2_LOCK_FRAMES 帧同类才改状态（照 M1 的 LOCK_FRAMES 写法）。
+    //   * 可视化：在指尖画画一个小方点，颜色 = 手型（黄=张开 / 红=握拳 / 不画=未知）。
+    parameter integer  M2_EN = 1,
+    // 顶带：以"上一帧掩码最高行 S_ymin"为中心，向上 M2_TOP_UP、向下 M2_TOP_DN 像素
+    parameter [9:0]    M2_TOP_UP = 10'd16,
+    parameter [9:0]    M2_TOP_DN = 10'd48,
+    // 峰数 ≥ 它 = 张开（=1 段 = 并指/握拳）
+    parameter integer  M2_OPEN_MIN = 2,
+    // 手型滞回：连续这么多帧同类才改状态
+    parameter [3:0]    M2_LOCK_FRAMES = 4'd4,
+    // 指尖方点半边长（像素；画 (2R+1)² 的方块）
+    parameter [3:0]    M2_TIP_R = 4'd3,
+    // 调试口径：1 = 把 DBG 的 P/Q 借给指尖/手型（P={峰数,指尖行}、Q={手型,指尖列}），
+    //          0 = P/Q 仍是 M1 的掩码像素数 / 包围盒 x。上板定标那一版用 1。
+    parameter integer  M2_DBG = 1
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -1756,6 +1779,10 @@ module recog_top #(
     wire [9:0]  S_trk_y;
     wire        S_trk_locked;
     wire [11:0] S_ovl_sel;
+    // M2.2：指尖/手型（g_track 里产生；给叠加画点 + DBG 借用，见参数 M2_*）
+    wire [15:0] S_m2_dbg_p;      // {峰数[3:0], 2'b0, 指尖行[9:0]}
+    wire [13:0] S_m2_dbg_q;      // {手型[2:0], 指尖列[10:0]}
+    wire        S_m2_dbg_on;
 
     generate
     if (MASK_SRC != 0) begin : g_track
@@ -1952,6 +1979,105 @@ module recog_top #(
                               { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
                                 F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
 
+        // ====================================================================
+        // M2.2（2026-10-11）：指尖 + 手型（张开 / 握拳 / 未知）
+        //   指尖 = **顶带里遇到的第一个掩码像素**（自顶向下、行内左→右扫）→ 锁存列/行；
+        //   峰数 = 顶带内**逐行**数"进入掩码的连续段数"，取整帧最大 → 1 段 = 并指/握拳、
+        //          ≥2 段 = 手指分开（张开）。逐行数**不需要任何轮廓存储** —— 规划里那块
+        //          "1280 列（或 320 列）×10bit 轮廓记忆"ERAM 可以省掉。
+        //   相位：扫描是"逐像素流水 + 帧首锁存"，叠加里画点用**上一帧**的指尖（h_m2_*），
+        //         帧内稳定不抖；手型状态机用的是刚结束那一帧的整帧结果。
+        //   滞回：连续 M2_LOCK_FRAMES 帧同类才改状态（照 M1 的 LOCK/HOLD 写法）。
+        //   行边界：换行那一拍把"上一拍最右像素"作废，免得上一行右端和新行左端连起来
+        //          多算一段（见 S_m2_prev_eff）。
+        // 资源：≈100~120 LUT6 + ≈60 FF，0 ERAM / 0 DSP。
+        // ====================================================================
+        wire [10:0] S_m2_ylo = (S_ymin > {1'b0, M2_TOP_UP}) ? (S_ymin - {1'b0, M2_TOP_UP})
+                                                             : 11'd0;
+        wire [10:0] S_m2_yhi = S_ymin + {1'b0, M2_TOP_DN};
+        wire       S_m2_band = ({1'b0, S_y_pos} >= S_m2_ylo) && ({1'b0, S_y_pos} <= S_m2_yhi);
+        wire [3:0] S_m2_top  = S_mask_gated & {4{S_m2_band}};
+
+        reg [10:0] a_m2_tx, a_m2_ty;    // 本帧指尖（列 / 行）
+        reg        a_m2_got;            // 本帧找到指尖了吗
+        reg [9:0]  a_m2_py;             // 上一拍的行（检测换行）
+        reg        a_m2_prev;           // 上一拍最右像素在不在顶带
+        reg [4:0]  a_m2_runs;           // 当前行的连续段数（饱和）
+        reg [4:0]  a_m2_max;            // 本帧各行的最大段数
+        reg [10:0] h_m2_tx, h_m2_ty;    // 上一帧结果（画点 / DBG 用）
+        reg [4:0]  h_m2_max;
+        reg [2:0]  S_m2_shape;          // 手型状态：0=未知 1=握拳 2=张开
+        reg [3:0]  S_m2_agree;          // 连续同类帧数（滞回用）
+
+        wire       S_m2_rownew   = (S_y_pos != a_m2_py);
+        wire       S_m2_prev_eff = a_m2_prev & ~S_m2_rownew;   // 行边界当作"没在顶带"
+        wire [3:0] S_m2_e;
+        assign S_m2_e[0] = S_m2_top[0] & ~S_m2_prev_eff;
+        assign S_m2_e[1] = S_m2_top[1] & ~S_m2_top[0];
+        assign S_m2_e[2] = S_m2_top[2] & ~S_m2_top[1];
+        assign S_m2_e[3] = S_m2_top[3] & ~S_m2_top[2];
+        wire [2:0] S_m2_new    = {2'b0, S_m2_e[0]} + {2'b0, S_m2_e[1]} +
+                                 {2'b0, S_m2_e[2]} + {2'b0, S_m2_e[3]};
+        wire [4:0] S_m2_runs_n = (a_m2_runs > 5'd28) ? 5'd31 : (a_m2_runs + {2'b0, S_m2_new});
+        // 手型原始类别（用刚结束那一帧的整帧结果）：0=未知 1=并指/握拳 2=张开
+        wire [2:0] S_m2_raw = a_m2_got ? ((a_m2_max >= M2_OPEN_MIN) ? 3'd2 : 3'd1) : 3'd0;
+
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                a_m2_tx <= 11'd0; a_m2_ty <= 11'd0; a_m2_got <= 1'b0;
+                a_m2_py <= 10'd0; a_m2_prev <= 1'b0;
+                a_m2_runs <= 5'd0; a_m2_max <= 5'd0;
+                h_m2_tx <= 11'd0; h_m2_ty <= 11'd0; h_m2_max <= 5'd0;
+                S_m2_shape <= 3'd0; S_m2_agree <= 4'd0;
+            end
+            else if(I_raw_tuser) begin
+                // 帧首：锁存这一帧的结果（画点/DBG 用），并清零累加器
+                h_m2_tx  <= a_m2_tx;  h_m2_ty <= a_m2_ty;  h_m2_max <= a_m2_max;
+                a_m2_tx  <= 11'd0;    a_m2_ty <= 11'd0;    a_m2_got <= 1'b0;
+                a_m2_py  <= 10'd0;    a_m2_prev <= 1'b0;
+                a_m2_runs <= 5'd0;    a_m2_max <= 5'd0;
+
+                // 手型滞回：连续 M2_LOCK_FRAMES 帧同类才改状态
+                if(S_m2_raw != S_m2_shape) begin
+                    if((S_m2_agree + 4'd1) >= M2_LOCK_FRAMES) begin
+                        S_m2_shape <= S_m2_raw;
+                        S_m2_agree <= 4'd0;
+                    end
+                    else S_m2_agree <= S_m2_agree + 4'd1;
+                end
+                else S_m2_agree <= 4'd0;
+            end
+            else if(I_raw_tvalid) begin
+                if(S_m2_rownew) begin
+                    // 换行：先把上一行的段数并进本帧最大值，再从新行重新数
+                    if(a_m2_runs > a_m2_max) a_m2_max <= a_m2_runs;
+                    a_m2_runs <= {2'b0, S_m2_new};
+                    a_m2_py   <= S_y_pos;
+                    a_m2_prev <= 1'b0;
+                end
+                else begin
+                    a_m2_runs <= S_m2_runs_n;
+                    a_m2_prev <= S_m2_top[3];
+                end
+
+                // 指尖：本帧顶带里遇到的第一个像素（最上那一行的最左一个）
+                if(!a_m2_got && (|S_m2_top)) begin
+                    a_m2_got <= 1'b1;
+                    a_m2_ty  <= {1'b0, S_y_pos};
+                    a_m2_tx  <= S_m2_top[0] ? S_col0 : (S_m2_top[1] ? S_col1 :
+                                (S_m2_top[2] ? S_col2 : S_col3));
+                end
+            end
+        end
+
+        // 给叠加画点用（上一帧结果，帧内稳定）
+        wire [10:0] S_m2_tx = h_m2_tx;
+        wire [10:0] S_m2_ty = h_m2_ty;
+        // DBG 借用：P = {峰数[3:0], 2'b0, 指尖行[9:0]}、Q = {手型[2:0], 指尖列[10:0]}
+        assign S_m2_dbg_p  = { h_m2_max[3:0], 2'b0, h_m2_ty[9:0] };
+        assign S_m2_dbg_q  = { S_m2_shape, h_m2_tx };
+        assign S_m2_dbg_on = (M2_EN != 0) && (M2_DBG != 0);
+
         // ROI 边界导出（软权重在 g_cent 里"只在窗口内投票"）
         assign S_roi_x0_w = S_roi_x0;
         assign S_roi_x1_w = S_roi_x1;
@@ -2009,6 +2135,13 @@ module recog_top #(
                    ((I_gest == 3'd6) && (I_y > (10'd719 - GEST_VIS_W[9:0]))) ||           // 下劈：底边缘
                    ((I_gest == 3'd7) && (I_y < GEST_VIS_UNK_Y)))                          // 不明确：顶部细条
                     F_ovl_view = I_gest;
+                // M2.2 指尖方点：颜色 = 手型（黄 = 张开、红 = 握拳；手型未知就不画）
+                else if((S_m2_shape != 3'd0) &&
+                        (I_x + {7'b0, M2_TIP_R} >= S_m2_tx) &&
+                        (I_x <= S_m2_tx + {7'b0, M2_TIP_R}) &&
+                        (I_y + {6'b0, M2_TIP_R} >= S_m2_ty[9:0]) &&
+                        (I_y <= S_m2_ty[9:0] + {6'b0, M2_TIP_R}))
+                    F_ovl_view = (S_m2_shape == 3'd2) ? 3'd5 : 3'd3;
                 else if((S_x_on && S_y_th) || (S_y_on && S_x_th))
                     F_ovl_view = 3'd2;                  // 准星（黄）：所有视图都画
                 else if(S_view == 4'd4)
@@ -2042,6 +2175,9 @@ module recog_top #(
         assign S_trk_x      = 11'd640;
         assign S_trk_y      = 10'd360;
         assign S_trk_locked = 1'b0;
+        assign S_m2_dbg_p   = 16'd0;
+        assign S_m2_dbg_q   = 14'd0;
+        assign S_m2_dbg_on  = 1'b0;
         assign S_roi_x0_w   = 11'd0;
         assign S_roi_x1_w   = 11'd1279;
         assign S_roi_y0_w   = 10'd0;
@@ -2107,11 +2243,14 @@ module recog_top #(
     wire S_gest_dbg_on = (GEST_EN != 0) && (GEST_DBG != 0) &&
                          (MASK_SRC != 0) && (USE_CENTROID != 0);
 
-    assign O_mask_cnt_shift = S_gest_dbg_on
+    // M2.2 先借：P = {峰数[3:0], 2'b0, 指尖行[9:0]}、Q = {手型[2:0], 指尖列[10:0]}（见 M2_* 参数）
+    assign O_mask_cnt_shift = S_m2_dbg_on ? S_m2_dbg_p
+                            : S_gest_dbg_on
                               ? { F_gest_sat8(S_gest_sx), F_gest_sat8(S_gest_sy) }
                               : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
-    assign O_bbox_x         = S_gest_dbg_on
+    assign O_bbox_x         = S_m2_dbg_on ? S_m2_dbg_q
+                            : S_gest_dbg_on
                               ? { S_gest_dir, S_gest_cnt }
                               : ((DIAG_CHROMA != 0) ? S_ch_word_x
                                                     : {S_xmin[10:4], S_xmax[10:4]});
