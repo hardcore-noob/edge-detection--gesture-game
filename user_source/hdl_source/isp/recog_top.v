@@ -390,6 +390,18 @@ module recog_top #(
     parameter [3:0]    NORM_HI_SH  = 4'd2,
     parameter [8:0]    NORM_D2_HARD = 9'd70,    // M1 的 D2_MAX
     parameter [8:0]    NORM_D1_HARD = 9'd100    // M1 的 |d1| 上限
+,
+    // ---- M2.2 修正（2026-10-11 用户提议）：**最大尺寸门 + 形状门**--------------------
+    // 为什么需要：归一化判据再怎么调也分不开"皮肤(d2/Y≈0.2)"与"暖木桌(d2/Y≈0.25)" —— 间隔太窄。
+    //   但两者的**形状/尺寸**完全不同：手再近也占不到大半个画面，桌面/墙面经常是。
+    //   ⚠ M1 当年删掉的是"最小尺寸门"（实测无用）；**最大门是另一回事**，所以本组带开关
+    //   `GATE_EN` 方便同板 A/B。
+    // 三个门：① 掩码像素数 > MAX_MASK_PX（默认 12 万 ≈ 13% 画面）② 宽 > 4×高 ③ 高 > 4×宽。
+    // 命中不了就**不更新位置、丢锁**（照 HOLD/LOCK 的兜底）；同时**叠加里也不再涂红那个掩码**，
+    //   所以"桌面被高亮"在画面上也会消失（否则门只挡住跟踪、屏幕上还是红的）。
+    parameter integer  GATE_EN = 1,
+    parameter [19:0]   MAX_MASK_PX = 20'd120000,
+    parameter [2:0]    GATE_AR_SHIFT = 3'd2     // 长宽比门限 = 4:1
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -1911,10 +1923,19 @@ module recog_top #(
         wire signed [12:0] S_db    = (S_cfg == 4'd9) ? 13'sd5 : 13'sd2;
         // ---- S3：命中滞回（进入 2000 / 锁定后保持 1200）-----------------------
 
-        wire        S_hit   = (SOFT_TRACK != 0)
+        // ---- M2.2：最大尺寸门 + 形状门（2026-10-11 用户提议；治"桌面自锁 + 把准星拽走"）----
+        // 桌面误检的判据分开不了（d2/Y 只差 0.05），但形状差得远：又大又扁就不是手。
+        // 命中不了 → 不更新位置、丢锁；叠加里也不涂红（见 F_ovl_view 的 S_gate_bad）。
+        wire [10:0] S_gate_w = S_xmax - S_xmin;
+        wire [10:0] S_gate_h = S_ymax - S_ymin;
+        wire        S_gate_bad = (GATE_EN != 0) &&
+                                 ((S_mcnt > MAX_MASK_PX) ||                       // ① 太大
+                                  (S_gate_w > (S_gate_h << GATE_AR_SHIFT)) ||    // ② 又宽又扁（桌子）
+                                  (S_gate_h > (S_gate_w << GATE_AR_SHIFT)));     // ③ 又高又窄
+        wire        S_hit   = ((SOFT_TRACK != 0)
                             ? ((S_wsum_h >= MIN_WSUM) ||
                                (S_locked && (S_wsum_h >= MIN_WSUM_HOLD)))
-                                                : (S_mcnt >= MIN_CNT);
+                                                : (S_mcnt >= MIN_CNT)) && !S_gate_bad;
 
         // 观测误差 + 死区：|err| ≤ DEADBAND 时按 0 处理（噪声抖动不再推动准星）
         wire signed [12:0] S_err_raw_x = {2'b0, S_obs_x} - S_pos_x;
@@ -2214,7 +2235,9 @@ module recog_top #(
                 else if(S_view == 4'd6)
                     F_ovl_view = S_border ? 3'd6 : (I_fuse ? 3'd1 : 3'd0);
                 else
-                    F_ovl_view = I_fuse ? 3'd1 : 3'd0;  // 0/1/2/3：正常融合视图
+                    // 0/1/2/3：正常融合视图。**形状门不过时不涂红**（否则门只挡跟踪、屏幕上桌面
+                    // 仍然是红的 —— 用户看到的就是"桌面高亮"）。宁可画面干净，也不误导。
+                    F_ovl_view = (I_fuse && !S_gate_bad) ? 3'd1 : 3'd0;
             end
         endfunction
 
