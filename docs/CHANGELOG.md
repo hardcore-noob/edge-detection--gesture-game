@@ -1935,3 +1935,54 @@ bit `phy_1/camera_to_dsi_display.bit`（1789547 B，2026-09-26 19:11:43）。
 关掉这些逻辑后资源如预期回落：slices 15930 → **14110（66.51%）**、LUT6 13649 → **11791（55.58%）**、
 reg 15914 → 14997、feedthrough 7550 → **7066**、**DSP 9 → 8**、ERAM 72/108 不变；
 final Setup WNS **+1016 ps** / Hold +20 ps。bit `phy_1/camera_to_dsi_display.bit`（19:37:15）。
+
+---
+
+## 2026-10-13　集成记录：PR #2 / PR #1 合入、顶层接线与三次重建
+
+把两条并行分支合进 `main` 并完成 C 侧集成接线。三次都是**一次 PnR、0 条 ERROR、0 违例**。
+
+### 1. PR #2（A 线 M1）squash 合入 —— `69f876b`，tag `m1-done`
+
+- GitHub 上以 squash 合并：保留 PR #2 的最终内容，不带入 WIP 提交与个人 `AGENTS.md`。
+- 重建（main @ `69f876b`）：slices **15389（72.53%）**、LUT6 **13029**、ERAM 71/108、DSP 8/40、
+  feedthrough 7322、final Setup WNS **+785 ps** / Hold +20 ps；日志 `td_20261013_203521.log`。
+- 与 A 线自己报的 `15389 / 13029 / ERAM 71 / +785 ps` 逐项一致，确认可复现。
+- bit（1789547 B）SHA256 `95613E5E97433363C074F6AEBCA94570277AD00779E3CF436FA43A8D62EADA01`，
+  归档 `tmp/m1-done-20261013/`。
+
+### 2. PR #1（B 线 M4a 第一部分）合入 + C 侧配套 —— `d42ffd1`
+
+- `docs/CHANGELOG.md` 冲突（两边都在末尾追加）：解决为**两段都保留**（A 的 2026-09-20 起各节 +
+  B 的《文档校准》《B 线 M4a》），这也是本文件此前两段并存的原因。
+- C 侧配套：`.al` 新增 `game/{game_param,game_input,game_sprite_rom,game_render,game_fruit}.v`
+  （CompileOrder 66~70，提交 `e0818ce`），`new_worktree_runs.ps1 -SyncOnly` 把两个 prj 补到 73 条；
+  README 新增 **§12.2.1 B 段地址表（0x80~0xBF，含 0xA3）**并修好 §12.2 被引用块劈开的句子（`8f90893`）。
+- 重建（main @ `8f90893`）：slices **15912（75.00%）**、LUT6 **13643**、ERAM 73/108、DSP 8/40、
+  feedthrough 7379、final Setup WNS **+568 ps** / Hold +20 ps；日志 `td_20261013_205358.log`。
+- bit SHA256 `9997F007C6CE693ED8605E559C9B74DDAD784B9C67B705DB711717829678E203`，
+  归档 `tmp/m4a-fruit-screen-20261013/`。
+- B 在《文档校准与基线更新》里列的"属 C 文件"遗留（README §6/§11.4/§12.2.1、规划同步）已在本日处理。
+
+### 3. 顶层接线（B 段参数 + A 质心）—— `6c95b87`，tag `m4a-gesture-wired`
+
+- `param_ctrl.v`：新增 `O_b_we/O_b_addr[5:0]/O_b_wdata`，把 0x80~0xBF 的**仲裁后写**原样转发给
+  `game_top` 的 `game_param`；B 段写也计入 `param_wr_cnt`；读回按段选通（`I_b_rd_data`）。
+  在接通前 `game_top.I_param_we` 是悬空的（行为=全默认值、输入源=假源）。
+- `isp_top.v`（**A 的文件，集成所需的最小扩展**）：把 `recog_top` 已有但未引出的
+  `O_track_x/O_track_y/O_track_locked` 增加为 3 个输出口；顶层用**原有 toggle 整包捕获**进像素域，
+  接 `game_input.I_ctrl_x/y/valid`。`design_top_wrapper.v` 的观测包位宽注释同步改成 76 位
+  （tap 12 + 掩码 16 + 包围盒 14+12 + 追踪 11+10+1）。
+- **CTRL_SYNC 下行（M4c 用）本轮不接**：`game_top.I_ctrl_down_data` 仍未被驱动（12 条 `SYN-5013` 警告，无害）。
+- 重建（main @ `6c95b87`）：slices **15883（74.86%）**、LUT6 **13675**、ERAM 73/108、DSP 8/40、
+  feedthrough 7541、final Setup WNS **+866 ps** / Hold +20 ps；`I_param_we` / `I_ctrl_x/y/valid`
+  的未连接告警消失。bit SHA256 `4EBB11808CDDBF23DEE93AA6B3166F97CA01C53560E6A1170FA614E6F8ED062F`，
+  归档 `tmp/m4a-gesture-wired-20261013/`。
+
+### 4. 合并后遗留（截至 2026-10-13）
+
+1. M1 板级验收还剩 3 项：准星跟手正式确认、出画 5 帧内丢失 / 回画 3 帧内重锁、人脸入画是否干扰。
+2. DBG 增补质心 x/y、Σw、命中标志（A 的需求单，待 C 加通道）；CTRL_SYNC 下行的形状描述子留到 M4c。
+3. M4a 的刀光/切割/粒子仍为编译期关闭；全开约再 +1858 LUT6，会超 3900 总预算约 240——先改账本或裁剪。
+4. 资源已到 slices **74.86%**（到 85% 余约 +2151 slices），M2 / M4c / M5 开工前先对照规划 §2.5.3。
+5. 上手/上板玩法：README §12.5（`W 85 0001` 切手势源 → 短按 KEY4 进 game_mode；示教 `W 03 0001`，采样窗内手要动）。
