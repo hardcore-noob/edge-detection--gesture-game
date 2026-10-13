@@ -285,8 +285,9 @@ module design_top_wrapper (
     wire [15:0] S_cmd_data;
 
     // VIDEO_TAP 观测（CSI 域 → 像素域）：用 recog_top 的"每帧 toggle"做**整包捕获**，
-    // 而不是逐位两级同步——数据在 toggle 之前就已经锁存稳定，捕获时一次搬 52 位；
-    // 比逐位 2FF（4×16×2 = 128 FF）省 70 多个触发器，跨区走线也同比减少。
+    // 而不是逐位两级同步——数据在 toggle 之前就已经锁存稳定，捕获时一次搬整包
+    //（tap 12 + 掩码 16 + 包围盒 14+12 + 追踪 11+10+1 = 76 位）；
+    // 比逐位同步省几十个触发器，跨区走线也同比减少。
     wire [11:0] S_tap_px_shift;      // 每帧 tap 像素数 >>10（应为 900）
     wire [15:0] S_mask_cnt_shift;    // 掩码像素数 >>4
     wire [13:0] S_bbox_x;            // {x_min/16, x_max/16}
