@@ -50,7 +50,11 @@ module isp_top #(
     output [15:0]   O_mask_cnt_shift,
     output [13:0]   O_bbox_x,
     output [11:0]   O_bbox_y,
-    output          O_status_toggle
+    output          O_status_toggle,
+    // M1 追踪结果（VIDEO_TAP 观测包扩展，帧锁存；像素域用 toggle 整包捕获）
+    output [10:0]   O_track_x,
+    output [9:0]    O_track_y,
+    output          O_track_locked
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -283,6 +287,9 @@ module isp_top #(
         .O_bbox_x        (O_bbox_x),
         .O_bbox_y        (O_bbox_y),
         .O_status_toggle (O_status_toggle),
+        .O_track_x       (O_track_x),
+        .O_track_y       (O_track_y),
+        .O_track_locked  (O_track_locked),
         .O_ovl_sel       (S_ovl_sel),
         .O_bg_px         (S_bg_px),
         .O_teach_flash   (S_teach_flash)

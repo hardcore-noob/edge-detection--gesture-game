@@ -297,6 +297,12 @@ module design_top_wrapper (
     reg  [15:0] S_mask_cnt_hold;
     reg  [13:0] S_bbox_x_hold;
     reg  [11:0] S_bbox_y_hold;
+    wire [10:0] S_trk_x;             // M1 追踪：平滑准星列（帧锁存）
+    wire [9:0]  S_trk_y;             // M1 追踪：平滑准星行
+    wire        S_trk_locked;        // M1 追踪：已锁定
+    reg  [10:0] S_trk_x_hold;
+    reg  [9:0]  S_trk_y_hold;
+    reg         S_trk_locked_hold;
 
     // CTRL_SYNC 插座：下行（像素域→CSI 域）与上行（CSI 域→像素域）
     wire [25:0] S_ctrl_down_rx_data;   // CSI 域
@@ -545,6 +551,9 @@ module design_top_wrapper (
             S_mask_cnt_hold <= 16'd0;
             S_bbox_x_hold   <= 14'd0;
             S_bbox_y_hold   <= 12'd0;
+            S_trk_x_hold    <= 11'd0;
+            S_trk_y_hold    <= 10'd0;
+            S_trk_locked_hold <= 1'b0;
         end
         else begin
             // 两级同步 + 边沿检测：toggle 稳定后再一次性把整包数据搬进 hold
@@ -554,6 +563,9 @@ module design_top_wrapper (
                 S_mask_cnt_hold <= S_mask_cnt_shift;
                 S_bbox_x_hold   <= S_bbox_x;
                 S_bbox_y_hold   <= S_bbox_y;
+                S_trk_x_hold    <= S_trk_x;
+                S_trk_y_hold    <= S_trk_y;
+                S_trk_locked_hold <= S_trk_locked;
             end
         end
     end
@@ -825,6 +837,13 @@ module design_top_wrapper (
       .O_data       ( S_cmd_data       )
   );
 
+  // B 段（0x80~0xBF）转发与回读（M4a 接通，C 集成）
+  wire        S_param_b_we;
+  wire [5:0]  S_param_b_addr;
+  wire [15:0] S_param_b_wdata;
+  wire [15:0] S_param_b_rd_data;
+  wire [7:0]  S_param_rd_addr = 8'h00;   // 回读地址暂无消费者，保留通路
+
   param_ctrl #(.CLK_HZ(75000000), .SW_DEBOUNCE_MS(20)) u_param_ctrl (
       .I_clk           ( S_hdmi_pixel_clk ),
       .I_rst_n         ( S_hdmi_rst_n     ),
@@ -837,7 +856,7 @@ module design_top_wrapper (
       .I_ext_addr      ( S_cmd_addr       ),
       .I_ext_data      ( S_cmd_data       ),
       .I_commit_pulse  ( S_mode_echo_valid),
-      .I_rd_addr       ( 8'h00            ),
+      .I_rd_addr       ( S_param_rd_addr  ),
       .O_rd_data       (                  ),
       .O_display_mode  ( S_display_mode   ),
       .O_game_mode     ( S_game_mode      ),
@@ -850,7 +869,12 @@ module design_top_wrapper (
       .O_key4_evt      ( S_key4_evt       ),
       .O_teach_req     ( S_teach_req      ),
       .O_mode_word     ( S_mode_word      ),
-      .O_led           ( O_led            )
+      .O_led           ( O_led            ),
+      // B 段转发（写 0x80~0xBF → game_top；回读按段选通）
+      .O_b_we          ( S_param_b_we     ),
+      .O_b_addr        ( S_param_b_addr   ),
+      .O_b_wdata       ( S_param_b_wdata  ),
+      .I_b_rd_data     ( S_param_b_rd_data)
   );
 
   // 模式寄存器 → CSI 域：挂在相机帧首提交（I_frame_start = ISP 输出 tuser）
@@ -1098,7 +1122,10 @@ isp_top u_isp_top (
 .O_mask_cnt_shift(S_mask_cnt_shift),
 .O_bbox_x        (S_bbox_x),
 .O_bbox_y        (S_bbox_y),
-.O_status_toggle (S_obs_toggle)
+.O_status_toggle (S_obs_toggle),
+.O_track_x       (S_trk_x),
+.O_track_y       (S_trk_y),
+.O_track_locked  (S_trk_locked)
   );
 
 
@@ -1264,7 +1291,16 @@ isp_top u_isp_top (
         .I_display_mode ( S_display_mode    ),
         .O_pixel_out    ( S_game_pixel_out  ),
         .O_ctrl_tx_data ( S_ctrl_down_data  ),
-        .O_ctrl_tx_valid( S_ctrl_down_valid )
+        .O_ctrl_tx_valid( S_ctrl_down_valid ),
+        // C 集成：B 段参数（param_ctrl 转发）与 A 的质心（VIDEO_TAP 扩展，帧锁存）
+        .I_param_we     ( S_param_b_we      ),
+        .I_param_addr   ( S_param_b_addr    ),
+        .I_param_wdata  ( S_param_b_wdata   ),
+        .I_param_rd_addr( S_param_rd_addr   ),
+        .O_param_rd_data( S_param_b_rd_data ),
+        .I_ctrl_x       ( S_trk_x_hold      ),
+        .I_ctrl_y       ( {1'b0, S_trk_y_hold} ),
+        .I_ctrl_valid   ( S_trk_locked_hold )
     );
 
     hdmi_mixer #(
