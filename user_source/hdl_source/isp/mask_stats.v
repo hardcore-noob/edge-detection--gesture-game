@@ -11,7 +11,8 @@
 //
 // 延迟：统计本身 0 拍组合计入，输出是帧锁存的稳定值。
 // 时钟域：CSI 域，单时钟，不跨域。
-// 资源：约 120 FF + 90 LUT，无 ERAM / DSP。
+// 资源：约 120 FF + 90 LUT，无 ERAM / DSP（Σ 累加里的"×像素个数"是 0..3 的移位加法，
+//       见下面 S_n_col / S_n_cy 的注释——写成 `*` 会被 TD 分配 2 个 DSP）。
 // ============================================================================
 module mask_stats #(
     parameter IMG_WIDTH = 1280
@@ -51,6 +52,15 @@ module mask_stats #(
     wire [1:0]  S_jmax  = I_mask[3] ? 2'd3 : I_mask[2] ? 2'd2 : I_mask[1] ? 2'd1 : 2'd0;
     wire [2:0]  S_jsum  = (I_mask[1] ? 3'd1 : 3'd0) + (I_mask[2] ? 3'd2 : 3'd0) +
                           (I_mask[3] ? 3'd3 : 3'd0);
+
+    // S_n ∈ 0..3，乘列号/行号**必须写成移位加法**：M0 时 Σ列/Σ行 没有消费者，
+    // `S_n * xxx` 会被综合裁掉；M1 接上质心后这两个乘法就活了，TD 直接给分配 2 个
+    // DSP（实测 DSP 8 → 10），违反 A 线"0 DSP"的配额。写成 n[0]·X + n[1]·(X<<1)
+    // 只用 LUT + 进位链，行为逐位等价。
+    wire [12:0] S_n_col = (I_mask[0] ? {2'b0, S_col_base}       : 13'd0) +
+                          (I_mask[1] ? {1'b0, S_col_base, 1'b0} : 13'd0);
+    wire [12:0] S_n_cy  = (I_mask[0] ? {2'b0, S_cy}             : 13'd0) +
+                          (I_mask[1] ? {1'b0, S_cy, 1'b0}       : 13'd0);
 
     // 帧首**只认 I_user**、不闸 I_valid：上层流的 tuser 可能落在 valid 的空隙里
     // （2026-09-15 上板踩到，详见 recog_top.v 里 tap 计数器那段注释）。
@@ -122,8 +132,8 @@ module mask_stats #(
                     if(S_new || (S_cy      > a_ymax)) a_ymax <= S_cy;
 
                     a_sumx <= (S_new ? 31'd0 : a_sumx) +
-                              (S_n * S_col_base) + {28'b0, S_jsum};
-                    a_sumy <= (S_new ? 30'd0 : a_sumy) + (S_n * S_cy);
+                              {18'b0, S_n_col} + {28'b0, S_jsum};
+                    a_sumy <= (S_new ? 30'd0 : a_sumy) + {17'b0, S_n_cy};
                     a_any  <= 1'b1;
                 end
             end
