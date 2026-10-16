@@ -51,6 +51,17 @@
 //     灯照亮桌面时亮区还能修回来（旧 quiet 单向棘轮做不到这两件事同时成立）。
 //   Step D（融合）：掩码与软权重**同源**（同一份判据、同一个 S_bg_cur）。
 //
+// M2 · 运动门 第 2 轮（2026-10-16，用户报"光反射到铁皮照样出红掩码"）：
+//   用户给了 5 条候选，并明确"**观测档应该先做**"（M1 的阈值全是读回来的，别再靠猜）。
+//   本轮落地 ⑤ + ②（② 是 5 条里最便宜、最可能立竿见影的），全部挂在运行时档位上：
+//     档 4  = **运动门归因**：红=两个门都过（= 运动掩码）/ 绿=只过绝对门 / 青=只过相对门；
+//     档 13 = **肤色判据观测**：过肤色判据的像素按 Y 分档着色（绿<96/青<160/黄<200/红≥200），
+//             并把"掩码内 Y、饱和度的帧内极值"借 P/Q 上报（P={minY,maxY}、Q={minSat,maxSat}）；
+//     档 14 = **② 生效 + 运动门开**（最终候选）：肤色再加 "Y ≤ SKIN_Y_CAP" 且
+//             "max−min ≥ SKIN_SAT_MIN" 两个门 —— 铁皮上的灯光反射**又亮又暖**，
+//             用 M1 档 10 那句老话："过亮的像素落不进窗口"。
+//   定标配方写在 g_obs 的段落注释里（只对反光读一次、只对手读一次，取中间值）。
+//
 // 几何提醒：肤色源用的是 RAW 的字几何（字内 [95:72] 是最左像素），而 mask_stats
 // 的列号按"列 4k-1..4k+2"（边缘流那套，边缘图整体比 RAW 左移 1 像素）算，所以
 // 肤色掩码的列号整体偏左 1 像素 —— Q 是 16 像素粒度，看不出来；M2 做指尖坐标
@@ -435,6 +446,16 @@ module recog_top #(
     parameter [8:0]    NORM_D2_HARD = 9'd70,    // M1 的 D2_MAX
     parameter [8:0]    NORM_D1_HARD = 9'd100    // M1 的 |d1| 上限
 ,
+    // ---- 【2026-10-16 ②：亮暖反射（铁皮高光）】亮度上限 + 饱和度下限 --------------
+    // 用户实测："光反射到铁皮，会显示红色的掩码" —— 铁皮上的灯光反射**又亮又暖**，
+    //   它落在归一化比例窗里就过得去（皮肤 d2/Y≈0.2，反射的比值往往更小但同样在窗内）。
+    // M1 当年档 10 能挡住"灯照亮的桌面"，靠的正是"过亮的像素落不进窗口"——这里把这个
+    //   效果**显式化**成两个门（都是 8 位比较，不用乘除）：
+    //     Y > SKIN_Y_CAP        → 不算肤色（挡高亮反射；皮肤一般 ≤ 200）
+    //     max−min < SKIN_SAT_MIN→ 不算肤色（挡灰白高光；金属反光常比皮肤更"白"）
+    // **档 14 = 开（运动门也开 = 最终候选配置）；档 13 = 观测档（② 关）** → 一版 bit A/B。
+    parameter [7:0]    SKIN_Y_CAP   = 8'd200,
+    parameter [7:0]    SKIN_SAT_MIN = 8'd12,
     // ---- M2.2 修正（2026-10-11 用户提议）：**最大尺寸门 + 形状门**--------------------
     // 为什么需要：归一化判据再怎么调也分不开"皮肤(d2/Y≈0.2)"与"暖木桌(d2/Y≈0.25)" —— 间隔太窄。
     //   但两者的**形状/尺寸**完全不同：手再近也占不到大半个画面，桌面/墙面经常是。
@@ -1004,9 +1025,93 @@ module recog_top #(
                                F_skin2_px(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1),
                                F_skin2_px(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0)};
 
+    // ========================================================================
+    // 【2026-10-16 ②】亮度上限 + 饱和度下限（8 位比较，0 DSP）
+    //   sat = max(R,G,B) − min(R,G,B)：金属高光偏白（sat 小），皮肤/木头偏色（sat 大）。
+    //   只作用在**归一化肤色掩码**上，由运行时**档 14** 打开（档 13 = 关的观测档）。
+    // 成本：4 像素 ×（3 路 max/min 树 + 2 个比较）≈ 90 LUT6。
+    // ========================================================================
+    function [7:0] F_max3;
+        input [7:0] I_a, I_b, I_c;
+        begin
+            F_max3 = (I_a >= I_b) ? ((I_a >= I_c) ? I_a : I_c)
+                                  : ((I_b >= I_c) ? I_b : I_c);
+        end
+    endfunction
+    function [7:0] F_min3;
+        input [7:0] I_a, I_b, I_c;
+        begin
+            F_min3 = (I_a <= I_b) ? ((I_a <= I_c) ? I_a : I_c)
+                                  : ((I_b <= I_c) ? I_b : I_c);
+        end
+    endfunction
+    wire [7:0] S_sat0 = F_max3(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0]) -
+                        F_min3(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0]);
+    wire [7:0] S_sat1 = F_max3(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0]) -
+                        F_min3(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0]);
+    wire [7:0] S_sat2 = F_max3(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0]) -
+                        F_min3(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0]);
+    wire [7:0] S_sat3 = F_max3(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0]) -
+                        F_min3(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0]);
+    wire [3:0] S_cappx = { (S_gray3 <= SKIN_Y_CAP) && (S_sat3 >= SKIN_SAT_MIN),
+                           (S_gray2 <= SKIN_Y_CAP) && (S_sat2 >= SKIN_SAT_MIN),
+                           (S_gray1 <= SKIN_Y_CAP) && (S_sat1 >= SKIN_SAT_MIN),
+                           (S_gray0 <= SKIN_Y_CAP) && (S_sat0 >= SKIN_SAT_MIN) };
+    wire [3:0] S_skin_cap_mask = S_skin_norm_mask & S_cappx;
+    // 档 14 = ② 开（同时把运动门也开 = 最终候选配置）；档 13 = 观测档（② 关）
+    wire       S_cap_on = (S_cfg == 4'd14);
+    wire       S_mot_on = (S_cfg == 4'd2) || (S_cfg == 4'd14);
+
     // 最终使用的肤色掩码（编译期常量选择，没选中的判据会被综合裁掉）
     wire [3:0] S_skin_use = (SKIN_RULE2 != 0) ? S_skin2_mask :
-                            ((SKIN_NORM != 0)  ? S_skin_norm_mask : S_skin_mask);
+                            (S_cap_on ? S_skin_cap_mask :
+                             ((SKIN_NORM != 0)  ? S_skin_norm_mask : S_skin_mask));
+
+    // ========================================================================
+    // 【2026-10-16 ⑤：观测档】肤色掩码内 Y / 饱和度的**帧内最小、最大值**
+    //   为什么要它：用户明说了"我们盲调的现状，别再靠猜"。M1 的每个阈值都是这么读回来的。
+    //   现场定标配方（档 13 打开，画面里只对一个东西）：
+    //     ① 只对着**铁皮反光** → 读 P/Q = 反光的 Y 区间 / sat 区间
+    //     ② 只对着**手**       → 读 P/Q = 手的 Y 区间 / sat 区间
+    //     ③ 取 Y_CAP 在手 maxY 与反光 minY 之间；SAT_MIN 取在反光 maxSat 之上
+    //     ④ 切档 14（② 生效）看红色是否只剩手
+    //   P(16) = { 掩码内 minY, 掩码内 maxY }
+    //   Q(14) = { 掩码内 minSat[6:0], 掩码内 maxSat[6:0] }（sat 饱和到 127）
+    //   R(12) = M1 语义（包围盒 y）不变 —— 顺手盯掩码健康
+    //   采样密度：每拍只并**像素 3**（= 每 4 列取 1 列，与示教那套同一招）→ 极值统计
+    //   仍然够用（反光/手的面积远大于 4 像素），而成本降到 1/4（≈60 LUT6）。
+    //   只在档 13/14 借 P/Q；其余档位 P/Q/R 一字不动。
+    // ========================================================================
+    wire S_obs_on = (S_cfg == 4'd13) || (S_cfg == 4'd14);
+    reg [7:0] a_obs_ymin, a_obs_ymax, a_obs_smin, a_obs_smax;
+    reg [7:0] h_obs_ymin, h_obs_ymax, h_obs_smin, h_obs_smax;
+    // 饱和先钳到 127（Q 只有 7 位给它）：皮肤/反光的 sat 都远小于 127，钳位不影响判读
+    wire [7:0] S_sat3_c = (S_sat3 > 8'd127) ? 8'd127 : S_sat3;
+    wire [7:0] S_obs_ymin_in = S_skin_use[3] ? S_gray3 : 8'hFF;
+    wire [7:0] S_obs_ymax_in = S_skin_use[3] ? S_gray3 : 8'h00;
+    wire [7:0] S_obs_smin_in = S_skin_use[3] ? S_sat3_c : 8'h7F;
+    wire [7:0] S_obs_smax_in = S_skin_use[3] ? S_sat3_c : 8'h00;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            a_obs_ymin <= 8'hFF;  a_obs_ymax <= 8'h00;
+            a_obs_smin <= 8'h7F;  a_obs_smax <= 8'h00;
+            h_obs_ymin <= 8'hFF;  h_obs_ymax <= 8'h00;
+            h_obs_smin <= 8'h7F;  h_obs_smax <= 8'h00;
+        end
+        else if(I_raw_tuser) begin
+            // 帧首：把上一帧的极值锁存出去，累加器重置成"空集"的初值
+            h_obs_ymin <= a_obs_ymin;  h_obs_ymax <= a_obs_ymax;
+            h_obs_smin <= a_obs_smin;  h_obs_smax <= a_obs_smax;
+            a_obs_ymin <= 8'hFF;       a_obs_ymax <= 8'h00;
+            a_obs_smin <= 8'h7F;       a_obs_smax <= 8'h00;
+        end
+        else if(I_raw_tvalid) begin
+            if(S_obs_ymin_in < a_obs_ymin) a_obs_ymin <= S_obs_ymin_in;
+            if(S_obs_ymax_in > a_obs_ymax) a_obs_ymax <= S_obs_ymax_in;
+            if(S_obs_smin_in < a_obs_smin) a_obs_smin <= S_obs_smin_in;
+            if(S_obs_smax_in > a_obs_smax) a_obs_smax <= S_obs_smax_in;
+        end
+    end
 
     // ========================================================================
     // M1 Step 2：背景帧（80x45 灰度）+ 运动掩码 → 融合掩码 = 肤色 ∩ 运动
@@ -1050,6 +1155,8 @@ module recog_top #(
     // 背景帧是否已建好（自举/重建窗口内为 0）：没建好时运动门不生效（退回只认肤色）。
     // g_motion 里由 S_bg_ready 驱动，g_nomotion（MASK_SRC≠2）恒 1。
     wire       S_bg_rdy;
+    // 运动门归因（视图 4 用）：每像素 2 bit，见 g_motion 里的 F_mot_lv。
+    wire [7:0] S_mot_lv;
 
     generate
     if (MASK_SRC == 2 && (SKIN_ONLY == 0)) begin : g_motion
@@ -1271,6 +1378,27 @@ module recog_top #(
                                  F_motion_lv1(S_m1, S_bg_use),
                                  F_motion_lv1(S_m0, S_bg_use) };
 
+        // ---- 【2026-10-16 ⑤】运动门的**归因**（视图 4 用）：每像素 2 bit
+        //   0 = 两个门都不过（静）   1 = 只过绝对门（|d| > MOTION_TH，被相对门挡下）
+        //   2 = 只过相对门（(|d|<<3) > bg，但 |d| 不够）   3 = 两个门都过（= 运动掩码）
+        //   用途：一眼看出"铁皮那片的 |d| 到底有多大、是哪个门把它挡下来的/没挡住"。
+        function [1:0] F_mot_lv;
+            input signed [8:0] I_d;
+            input [7:0]        I_bg;
+            reg   signed [8:0] S_a;
+            reg                S_pa, S_pr;
+            begin
+                S_a  = I_d[8] ? (~I_d + 9'd1) : I_d;         // |d|
+                S_pa = (S_a > MOTION_TH);                     // 绝对门
+                S_pr = (MOTION_REL != 0) && ({S_a, 3'b0} > {1'b0, I_bg});  // 相对门
+                F_mot_lv = (S_pa & S_pr) ? 2'd3 :
+                           (S_pa         ? 2'd1 :
+                            (S_pr        ? 2'd2 : 2'd0));
+            end
+        endfunction
+        assign S_mot_lv = { F_mot_lv(S_m3, S_bg_use), F_mot_lv(S_m2, S_bg_use),
+                            F_mot_lv(S_m1, S_bg_use), F_mot_lv(S_m0, S_bg_use) };
+
         // ---- 块内活动像素数（0..16）：Step C 的 quiet 门的依据 -------------------
         // 块级信息现在**只剩一个用途**：背景更新的许可（另一个可选用途 = 块内占比门）。
         wire [2:0] S_act_pop = {2'b0, S_motion_mask[0]} + {2'b0, S_motion_mask[1]} +
@@ -1346,6 +1474,7 @@ module recog_top #(
         // 不建运动支路时（MASK_SRC = 0/1，或 SKIN_ONLY=1）：融合掩码退化成肤色掩码，
         // 且 0 资源开销
         assign S_motion_mask = 4'b1111;
+        assign S_mot_lv      = 8'd0;
         assign S_bg_cur      = 8'd0;
         assign S_bg_rdy      = 1'b1;
     end
@@ -1357,8 +1486,9 @@ module recog_top #(
     //   背景还没建好（自举/重建窗口，S_bg_rdy=0）时也不生效：拿未初始化的 ERAM 内容当参考
     //   只会乱报，退回"只看肤色"更安全。
     //   一版 bit 现场 A/B：`W 08 0002`（开）/ `W 08 0003`（关），画面里掩码 + 准星都在
-    //   （isp_top 的 S_dbg_ovl 把 2/3 也并进叠加使能了）。
-    wire S_mot_on  = (S_cfg == 4'd2);
+    //   （isp_top 的 S_dbg_ovl 把 2/3/13/14 也并进叠加使能了）。
+    //   ⚠ `S_mot_on` 在**肤色那一段**就定义了（档 2 或档 14）—— 因为档 14 = ② + 运动门
+    //     同时开的"最终候选配置"。
     wire S_mot_use = S_mot_on && S_bg_rdy;
     wire [3:0] S_fusion_mask = S_skin_use & (S_mot_use ? S_motion_mask : 4'b1111);
 
@@ -2066,7 +2196,9 @@ module recog_top #(
         //          ROI 退回全帧 → 全帧碎点计入 S_mcnt → 超过上限 → 门保持开（正反馈）。
         //   档 13（投票开、门关）= **杂码少 + 手的掩码比较全** → 这就是要的组合。
         //   → 所以**默认（档 0/1）改成"投票开 + 门关"**；门只保留一个"显式打开"的档（13）供 A/B。
-        wire        S_cfg_vote_on = ~((S_cfg == 4'd12) || (S_cfg == 4'd14));   // 12/14 = 关投票
+        // ⚠ 2026-10-16：档 14 改作"② 亮度/饱和度门 + 运动门"的**最终候选档**，
+        //   所以它必须与档 2 只差"②"这一项 → 投票**保持开**。只剩档 12 = 关投票的归因档。
+        wire        S_cfg_vote_on = (S_cfg != 4'd12);                          // 12 = 关投票
         wire        S_cfg_gate_on =  (S_cfg == 4'd13);                          // 只有 13 才开门
 
         wire [10:0] S_gate_w = S_xmax - S_xmin;
@@ -2209,7 +2341,7 @@ module recog_top #(
                               {3'b0, S_m_pick[2]} + {3'b0, S_m_pick[3]} +
                               {3'b0, S_mv_h[0]}   + {3'b0, S_mv_h[1]}   +
                               {3'b0, S_mv_h[2]}   + {3'b0, S_mv_h[3]};
-        // 投票开关同样受档位控制（12/14 = 关；见上面 S_cfg_vote_on 的说明）
+        // 投票开关同样受档位控制（只有 12 = 关；见上面 S_cfg_vote_on 的说明）
         wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && S_cfg_vote_on && (S_mv_cnt < VOTE_MIN))
                                 ? 4'd0 : S_m_pick;
 
@@ -2365,6 +2497,8 @@ module recog_top #(
             input        I_fuse;      // 融合掩码（ROI 门控 + 开运算后）
             input        I_skin;      // 原始肤色门
             input        I_motion;    // 原始运动门
+            input [7:0]  I_gray;      // 本像素灰度（视图 13 的 Y 分档用）
+            input [1:0]  I_mlv;       // 运动门归因（视图 4 用，见 F_mot_lv）
             input [2:0]  I_gest;      // M2.1 挥手提示色码（0 = 不闪）
             reg S_x_on, S_y_on, S_x_th, S_y_th, S_bx, S_by, S_border;
             begin
@@ -2395,8 +2529,20 @@ module recog_top #(
                     F_ovl_view = (S_m2_shape == 3'd2) ? 3'd5 : 3'd3;
                 else if((S_x_on && S_y_th) || (S_y_on && S_x_th))
                     F_ovl_view = 3'd2;                  // 准星（黄）：所有视图都画
+                // 【2026-10-16 ⑤】视图 13 = **肤色判据观测**：只在过肤色判据的像素上按 Y 分档
+                //   绿 = Y<96（暗） 青 = 96..159（中） 黄 = 160..199（亮） 红 = Y≥200（过亮）
+                //   用途："铁皮反光"落在哪一档一眼可见 → 定 SKIN_Y_CAP 有据可依。
+                else if(S_view == 4'd13)
+                    F_ovl_view = I_skin ? ((I_gray < 8'd96)  ? 3'd4 :
+                                           (I_gray < 8'd160) ? 3'd7 :
+                                           (I_gray < 8'd200) ? 3'd5 : 3'd3)
+                                        : (S_border ? 3'd6 : 3'd0);
                 else if(S_view == 4'd4)
-                    F_ovl_view = I_motion ? 3'd4 : (S_border ? 3'd6 : 3'd0);
+                    // 【2026-10-16 ⑤】视图 4 = **运动门归因**：红 = 两个门都过（这就是运动掩码）、
+                    //   绿 = 只过绝对门（|d| > MOTION_TH，被相对门挡下）、青 = 只过相对门。
+                    F_ovl_view = (I_mlv == 2'd3) ? 3'd1 :
+                                 (I_mlv == 2'd1) ? 3'd4 :
+                                 (I_mlv == 2'd2) ? 3'd7 : (S_border ? 3'd6 : 3'd0);
                 else if(S_view == 4'd5)
                     F_ovl_view = I_skin   ? 3'd3 : (S_border ? 3'd6 : 3'd0);
                 else if(S_view == 4'd7) begin
@@ -2414,10 +2560,10 @@ module recog_top #(
             end
         endfunction
 
-        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_gated[3], S_skin_use[3], S_motion_mask[3], S_gest_vis),
-                                 F_ovl_view(S_col2, S_y_pos, S_mask_gated[2], S_skin_use[2], S_motion_mask[2], S_gest_vis),
-                                 F_ovl_view(S_col1, S_y_pos, S_mask_gated[1], S_skin_use[1], S_motion_mask[1], S_gest_vis),
-                                 F_ovl_view(S_col0, S_y_pos, S_mask_gated[0], S_skin_use[0], S_motion_mask[0], S_gest_vis) };
+        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_gated[3], S_skin_use[3], S_motion_mask[3], S_gray3, S_mot_lv[7:6], S_gest_vis),
+                                 F_ovl_view(S_col2, S_y_pos, S_mask_gated[2], S_skin_use[2], S_motion_mask[2], S_gray2, S_mot_lv[5:4], S_gest_vis),
+                                 F_ovl_view(S_col1, S_y_pos, S_mask_gated[1], S_skin_use[1], S_motion_mask[1], S_gray1, S_mot_lv[3:2], S_gest_vis),
+                                 F_ovl_view(S_col0, S_y_pos, S_mask_gated[0], S_skin_use[0], S_motion_mask[0], S_gray0, S_mot_lv[1:0], S_gest_vis) };
 
         assign S_ovl_sel = S_ovl_rt;
 
@@ -2485,11 +2631,16 @@ module recog_top #(
     //   Q(14) = {左计数[4:0], 右计数[4:0], 下计数[3:0]} —— 上板"20 次/方向"直接对这三个数
     //   （R 保持 M1 的包围盒 y，用来同时盯掩码健康）
     wire S_m21_dbg_on = (S_cfg == 4'd10) || (S_cfg == 4'd11);
+    // 【2026-10-16 ⑤】观测档（13/14）借 P/Q 报"肤色掩码内 Y/sat 的帧内极值"：
+    //   P(16) = { 掩码内 minY, maxY }     ← 定 SKIN_Y_CAP
+    //   Q(14) = { 掩码内 minSat[6:0], maxSat[6:0] }   ← 定 SKIN_SAT_MIN
     assign O_mask_cnt_shift = S_m21_dbg_on ? {2'b0, S_gest_dir, S_gest_cnt}
+                            : S_obs_on     ? {h_obs_ymin, h_obs_ymax}
                             : S_m2_dbg_on  ? S_m2_dbg_p
                                            : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
     assign O_bbox_x         = S_m21_dbg_on ? {S_gest_cl, S_gest_cr, S_gest_cd}
+                            : S_obs_on     ? {h_obs_smin[6:0], h_obs_smax[6:0]}
                             : S_m2_dbg_on  ? S_m2_dbg_q
                                            : ((DIAG_CHROMA != 0) ? S_ch_word_x
                                                                  : {S_xmin[10:4], S_xmax[10:4]});
