@@ -17,6 +17,9 @@
 //   0x08 recog_algo[3:0]    R/W  0 = 识别停 / 1 = 手势识别（M1 消费）
 //                               KEY4 短按进 game_mode 时自动置 1、退出置 0
 //
+// 0x80~0xBF（B 段）不在本模块解析，而是用 O_b_we/O_b_addr/O_b_wdata 原样转发给
+// game_top 的 game_param；读回由 I_b_rd_data 按段选通（M4a 接通，2026-10-13）。
+
 // 模式值本身要跨到 CSI 域、在帧首提交（见 mode_sync），所以这里输出的 display_mode /
 // edge_th_sel 是"请求值"，DBG 行的 S 字段显示的是提交后的生效值。
 
@@ -72,7 +75,13 @@ module param_ctrl #(
     output reg  [7:0]  O_key4_evt,
     output reg         O_teach_req,
     output wire [15:0] O_mode_word,
-    output wire [3:0]  O_led
+    output wire [3:0]  O_led,
+
+    // ---- B 段（0x80~0xBF）写转发 / 读回（M4a 接通，C 集成）------------------
+    output wire        O_b_we,
+    output wire [5:0]  O_b_addr,
+    output wire [15:0] O_b_wdata,
+    input  wire [15:0] I_b_rd_data
 );
 
     localparam integer SW_TICKS = (CLK_HZ / 1000) * SW_DEBOUNCE_MS;
@@ -146,6 +155,12 @@ module param_ctrl #(
             S_we = 1'b0;
     end
 
+    // ---- B 段写转发（与寄存器写同拍、同仲裁结果）---------------------------
+    wire S_b_sel = (S_addr[7:6] == 2'b10);      // 0x80~0xBF
+    assign O_b_we    = S_we & S_b_sel;
+    assign O_b_addr  = S_addr[5:0];
+    assign O_b_wdata = S_wdata;
+
     // ---- 寄存器写入 ---------------------------------------------------------
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
@@ -191,6 +206,10 @@ module param_ctrl #(
                     end
                     default: ;   // 未登记地址：忽略
                 endcase
+
+                // B 段写（转发给 game_param）也计一次，便于串口确认落地
+                if(S_b_sel)
+                    O_param_wr_cnt <= O_param_wr_cnt + 1'b1;
             end
 
             // KEY4 短按：进 game_mode 就用默认手势算法（1），退出就停识别（0，省功耗）。
@@ -251,7 +270,7 @@ module param_ctrl #(
             8'h06:   O_rd_data = O_param_wr_cnt;
             8'h07:   O_rd_data = O_mode_commit_cnt;
             8'h08:   O_rd_data = {12'b0, O_recog_algo};
-            default: O_rd_data = 16'hFFFF;
+            default: O_rd_data = (I_rd_addr[7:6] == 2'b10) ? I_b_rd_data : 16'hFFFF;
         endcase
     end
 

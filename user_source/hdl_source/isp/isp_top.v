@@ -9,7 +9,10 @@ module isp_top #(
     // ⚠ 2026-10-11 M2.2 上板诊断：置 1 → 叠加（掩码高亮 + 准星 + **指尖方点**）常开，
     // 开机就能看到"掩码有没有贴住手、指尖跟不跟手"，不用按 KEY4、不用串口。
     // 交付版改回 0（那时只有 recog_algo==1 才叠加）。
-    parameter integer MASK_PREVIEW = 1,
+    // ⚠ 2026-10-16 合并队友 M4a 游戏层后改回 0（交付安全）：常开会把掩码烤进 DDR 帧，
+    // 游戏画面的背景就会带红色叠加。要"开机就看到掩码+准星+指尖点"，改回 1 即可；
+    // 或者（不改编译）用下面的诊断档：`W 08 0005 / 000C / 000D / 000E` 都会打开叠加。
+    parameter integer MASK_PREVIEW = 0,
 
     // 调试版模式选择（默认 0 = 交付行为）：
     //   1 = 用 C 的 recog_algo[15:12] 当"运行时视图号"，任一非 0 值都出叠加；
@@ -53,7 +56,12 @@ module isp_top #(
     output [15:0]   O_mask_cnt_shift,
     output [13:0]   O_bbox_x,
     output [11:0]   O_bbox_y,
-    output          O_status_toggle
+    output          O_status_toggle,
+    // M1 追踪结果（VIDEO_TAP 观测包扩展，帧锁存；像素域用 toggle 整包捕获）—— 队友 C 的
+    // 游戏层要用（6c95b87 加的 3 个口，合并时保留）
+    output [10:0]   O_track_x,
+    output [9:0]    O_track_y,
+    output          O_track_locked
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -108,10 +116,14 @@ module isp_top #(
     wire        S_teach_flash;                 // recog_top 的一键示教"闪叠加"指示（~2 s）
     wire [3:0]  S_dbg_mode = I_mode_committed[15:12];
     wire        S_gest_flash;                  // recog_top 的 M2.1 挥手提示条指示（~0.4 s）
+    // 【M2.2】归因档（5 = 只看原始肤色门；12/13/14 = 投票/门的组合）也打开叠加：
+    //   否则这几个档位下用户看不到掩码，没法做"哪一档被谁啃了"的判断。
+    wire S_dbg_ovl = (S_dbg_mode == 4'd5)  || (S_dbg_mode == 4'd12) ||
+                     (S_dbg_mode == 4'd13) || (S_dbg_mode == 4'd14);
     // 【M2.1】挥手提示条也并进叠加使能：这样 recog_algo=0（画面本来是纯摄像头）时，挥手照样
     // 会在屏幕上打一条按方向着色的横条 —— 不用串口、不用按键就能看到识别结果。
     // 代价：闪条那 ~0.4 s 里画面会从 EDGE 切回 RAW（叠加通路的时间基准锁在 RAW 流上）。
-    wire S_ovl_en = MASK_PREVIEW | S_teach_flash | S_gest_flash |
+    wire S_ovl_en = MASK_PREVIEW | S_teach_flash | S_gest_flash | S_dbg_ovl |
                     ((DIAG_MODE_SEL != 0) ? (S_dbg_mode != 4'd0) : (S_dbg_mode == 4'd1));
     wire S_bgview = (DIAG_MODE_SEL != 0) && (S_dbg_mode == 4'd2);
 
@@ -297,6 +309,9 @@ module isp_top #(
         .O_bbox_x        (O_bbox_x),
         .O_bbox_y        (O_bbox_y),
         .O_status_toggle (O_status_toggle),
+        .O_track_x       (O_track_x),
+        .O_track_y       (O_track_y),
+        .O_track_locked  (O_track_locked),
         .O_ovl_sel       (S_ovl_sel),
         .O_bg_px         (S_bg_px),
         .O_teach_flash   (S_teach_flash),
