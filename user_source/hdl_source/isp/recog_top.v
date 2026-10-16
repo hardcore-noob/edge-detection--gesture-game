@@ -28,11 +28,28 @@
 //   * 背景帧 80x45：块 = 16x16 像素（x[10:4], y[9:4]），每块一个 8 bit 灰度参考值，
 //     线性地址 = y[9:4]*80 + x[10:4]，共 3600 块 → 2 块 ERAM（eram_spram 2048x8 x2）；
 //   * 运动掩码 = |当前像素灰度 − 本块背景灰度| > MOTION_TH，与肤色掩码按位与出融合掩码；
-//   * 背景更新 = quiet 门控 + 限速蠕变：只有 |样本 − 背景| < QUIET_TH（且 QUIET_TH <
-//     MOTION_TH，形成滞回）的块才动，且每块每 2^6=64 帧最多动 1 个 LSB；
+//   * 背景更新 = quiet 门控 + 限速蠕变（2026-10-16 从新实现，见下面"M2 · 运动门"一节）；
 //   * **上电自举**：复位后前 BOOT_FRAMES 帧把每块直接装载成样本值（否则背景全是 0，
 //     运动掩码会恒 1、融合退化成纯肤色）。规划里的"KEY4 长按手动采样"要等 C 把
 //     teach_req 送进 CSI 域，见 Step 4；在那之前**开机时画面里别放手**。
+//
+// M2 · 运动门（2026-10-16 从新实现，用户指定三条前提 + 四步落地）：
+//   前提① **语义 = 背景帧差分**（不是帧间差分）。帧差等价于"背景 = 上一帧"，静止的手
+//     0.3 s 就被吸进背景 —— 规格 §3 要的是"静止的手也检出"，所以这条路不能走。
+//   前提② **粒度 = 像素 vs 块参考值**。像素级记忆要 1280×720 bit ≈ 46 块 ERAM（做梦），
+//     长时间记忆只能停在 80×45 块粒度 → 判决只能是"像素和块参考值比"，绝不能"块和块比"。
+//   前提③ **开关在运行时档位**：`recog_algo` 4 位已排满（0/1 交付、4..7 视图、8/9 旧标定、
+//     10/11/15 M2.1、12/13/14 归因）。空着的 **2 = 运动门开、3 = 关（对照）** ——
+//     一版 bit 现场 A/B，不用每次等 5 分钟编译。
+//   Step A（块参考值）：采样行轮转（frame_cnt[3:0] 选行 × 整行 16 像素 = 100% 覆盖）
+//     + 蠕变 `bg += clamp((row_mean−bg) >>> BG_K, 1..8)`（时间常数 ≈2 s）。
+//   Step B（判决）：逐像素 `|gray − bg| > MOTION_TH ∧ (|d|<<3) > bg`；**删掉旧的
+//     "帧差 + 块级锁存"**（块级太粗，正是"挥一下出三条不同颜色的条"的根源）。块级信息
+//     只剩两处用途：① 背景更新许可 ②（可选）块内活动占比门。
+//   Step C（quiet 门）：块内**活动像素数** ≤ BG_QUIET_PX 才允许背景蠕变，或"16 像素齐步
+//     同向变且幅度不大"（均匀光照漂移）也允许 → 手在块里就冻结 ⇒ 静止的手不掉掩码、
+//     灯照亮桌面时亮区还能修回来（旧 quiet 单向棘轮做不到这两件事同时成立）。
+//   Step D（融合）：掩码与软权重**同源**（同一份判据、同一个 S_bg_cur）。
 //
 // 几何提醒：肤色源用的是 RAW 的字几何（字内 [95:72] 是最左像素），而 mask_stats
 // 的列号按"列 4k-1..4k+2"（边缘流那套，边缘图整体比 RAW 左移 1 像素）算，所以
@@ -104,26 +121,19 @@ module recog_top #(
     // ---- 交付判据（2026-09-27 实测定标）----------------------------------------
     // d2 = R−Y 的下限，**交付档用它**（= 上板验证过的"档 14"判据）。3 是"桌面杂色可接受、手尽量多"的定标点。
     parameter signed [8:0] D2_MIN_DELIV = 9'sd3,
-    // SKIN_ONLY=1：掩码与软权重**只认肤色**，把运动/锁存门整体旁路。
-    //   为什么（2026-09-27 实测）：那道门**既挡不住**灯照亮的暖色桌面（交付档桌面仍有色），
-    //   **又拖累**准星 —— 锁存是 16×16 块级、断续的，会把软权重的支撑打成一片一片，
-    //   Σw 忽高忽低 → 命中/丢失反复切换 → 准星一顿一顿。设回 0 可恢复"肤色∧锁存"的旧行为。
-    // ⚠ 2026-10-11（方案 A）：这里原来是 1（交付档）——**它把运动掩码短路成全 1**
-    //   （见 `assign S_motion_mask = S_skin_only ? 4'b1111 : ...`），于是
-    //   `S_fusion_mask = 肤色 ∧ 运动` 退化成"只看肤色"，静止的暖桌面照样全过 →
-    //   "桌面高亮 + 准星被桌面拽"就是这么来的。
-    //   置 0 后：硬掩码 = 肤色 ∩ **这一块最近动过**（背景帧 + 块级活动锁存，M1 现成的，
-    //   2 块 ERAM 本来就在），软权重也恢复成 min(肤色分, 运动分) → 静止桌面两条路都不认。
-    //   代价（M1 记录过）：手**停住**超过背景自愈时间会掉掩码 → 靠 HOLD/LOCK 兜；
-    //   若"手一停准星就丢"影响体验，把它改回 1（= 只对掩码加运动门、权重仍只看肤色）。
-    // ⚠ 2026-10-11（重要教训）：上一版把它置 0 打开融合，上板结果很差——**掩码几乎不出来、
-    //   出来也只闪一下**。原因：背景帧是在开机前 32 帧自举的，而测试时**手正好在画面里**，
-    //   于是"手"被当成了背景 → 手和背景一样 → 运动分恒 0 → 融合掩码恒 0（闪一下 = 手快速
-    //   移动时偶尔超过差分门限）。M1 的注释其实写着前提："**开机时画面里别放手**"。
-    //   → 现已改回 1（只看肤色），改用滑窗多数投票（VOTE_*）去桌面斑点，**不依赖背景帧、
-    //   也不依赖开机姿态**。若以后要用融合：必须"手拿开再上电/复位"，或手拿开时长按 KEY4
-    //   重新基线化（REBASE_ON_TEACH=1）。
-    parameter integer SKIN_ONLY = 1,
+    // SKIN_ONLY=1：掩码与软权重**只认肤色**，把运动支路（2 块背景 ERAM + 全部运动逻辑）
+    //   整段从综合里裁掉 —— 0 资源，但也意味着**没有运动门可用**。
+    //   历史（2026-09-27 上板实测）：当年那道门是"帧差 + 16×16 块级锁存"，**既挡不住**灯
+    //   照亮的暖色桌面，**又拖累**准星（块级、断续，把软权重的支撑打成一片一片，Σw 忽高忽低
+    //   → 命中/丢失反复切换）。所以当年把它旁路掉了。
+    // ★ 2026-10-16（从新实现运动门）：**改回 0** —— 运动门不再是编译期开关，改成**运行时
+    //   档位**（档 2 = 开 / 档 3 = 关，见 S_mot_on）。这里必须是 0，否则运动支路不综合、
+    //   档 2 也就没有东西可开。交付档（0/1）以及所有非 2 档位仍然走"只认肤色"，
+    //   与 M1 上板定标的那一版**行为一字不变**（掩码 = 肤色，权重 = 肤色分）。
+    // ⚠ 老教训仍然有效（2026-10-11）：背景帧是开机前 32 帧自举的，**开机时画面里别放手**，
+    //   否则手会被当成背景、运动分恒 0 ⇒ 掩码几乎不出来（"闪一下"）。现在的补救：切到
+    //   档 2 会自动重建背景（Rebase），现场"手拿开 → `W 08 0002`"就等于重新采一遍背景。
+    parameter integer SKIN_ONLY = 0,
 
     // ---- 档 19/20 的**亮度上限**（2026-09-27）--------------------------------
     // 档 10 之所以能挡住"灯照亮的桌面"，本质是"过亮的像素落不进那个窗口"（旧 Y 下 k=2 的像素
@@ -133,37 +143,40 @@ module recog_top #(
 
     // 运动阈值：|当前灰度 − 背景灰度| 大于它才算"这个像素在动"。
     parameter signed [8:0] MOTION_TH = 9'sd8,
-    // quiet 阈值：块背景允许蠕变的"死区"，必须 < MOTION_TH（滞回）：
-    // 样本与背景差得少才认为这块是静背景、可以慢慢跟；差得多说明有前景，不许动。
-    parameter signed [8:0] QUIET_TH  = 9'sd4,
-    // 块内用哪一行做背景采样（16 行里的第几行，取中间行）。
-    parameter [3:0] BG_SAMPLE_ROW = 4'd7,
-    // ---- 2026-09-26 第二步：治"灯照亮的桌面一片在动" ---------------------------
     // MOTION_REL=1：运动门限随**该块自己的背景亮度**缩放（(|d|<<3) > bg，即相对差 12.5%）。
     //   亮度变化是**乘性**的，而 GLB_COMP 只按整帧均值做**加法**补偿 —— 同样的 5% 变化，
     //   均值 60 的块只变 +3，亮块 200 变 +10，补完还留 +7 残差，全堆在最亮的区域。
     parameter integer MOTION_REL = 1,
-    // BG_HEAL=1：背景"自愈"——拆掉旧的 quiet 单向棘轮（只有 |diff|<4 才允许蠕变，
-    //   误差 >=4 的块永远冻结，而出错的恰恰是这些块）。自愈：每块每 16 帧一次机会，
-    //   步长 = |diff|>>3 钳在 1..8。
-    parameter integer BG_HEAL = 1,
-    // 只自愈 |diff| <= 这个值的块。默认 255 = 全都自愈；调小可防"静止的手被吸进背景"
-    // （例如 64：光照漂移式残差会自愈，手这种大反差不动）。
-    parameter [8:0]   HEAL_MAX = 9'sd255,
-    // BG_SAMPLE2=1：背景采样用**两个**采样行（16 像素，6.25%）。原来只采一行前 8 像素（3%）。
-    parameter integer BG_SAMPLE2 = 1,
-    parameter [3:0]   BG_SAMPLE_ROW2 = 4'd15,
-    // ---- 2026-09-26 第三步：运动门改成"帧差 + 块级锁存"（治"亮区一片在动"的**结构**改法）----
-    // LATCH_MODE=1 时，运动门不再拿"和背景比"：
-    //   ① 块采样均值相对**上一帧**变化 → 这块"在动"（帧差：静态场景结构上就是 0，
-    //      跟纹理、光照、块大小全都无关）；
-    //   ② 块级锁存计数器：动过置满，之后每 4 帧减 1（LATCH_MAX=15 → 约 1.0 s）；
-    //   ③ 掩码 = 肤色 ∧ 锁存 → 手整体高亮（肤色给面积），静止的桌面没有锁存 → 0 误报。
-    // 为什么必须换：16x16 一个背景值，块内本来就有反差，背景收敛到"块内均值"之后，
-    // 块内比均值亮/暗超过门限的像素**永远**是"在动"——这是模型的分辨率下限，调阈值/加自愈都治不了。
-    parameter integer LATCH_MODE = 1,
-    parameter [3:0]   LATCH_MAX  = 4'd15,
+    // ========================================================================
+    // 【2026-10-16 从新实现运动门】三条前提（用户定死，见文件头"M2 · 运动门"）：
+    //   ① 语义 = **背景帧差分**（不是帧差）  ② 粒度 = **像素 vs 块参考值**（不是块 vs 块）
+    //   ③ 开关 = **运行时档位 2 = 开 / 3 = 关（对照）**
+    // 删掉了旧的"帧差 + 块级锁存"（LATCH_MODE=1 / LATCH_MAX / FRAME_DIFF / MASK_POLICY）：
+    //   块级判决太粗 —— 一个 16×16 块里只要有几像素在动，整块 256 像素全算"动过"，
+    //   "挥一下手出三条不同颜色的条"、"明明在挥手却报下劈"都是它造成的。
+    // ========================================================================
+    // ---- Step A：块参考值（采样密度 + 更新律）---------------------------------
+    // 采样密度：**采样行轮转** —— 本帧用 frame_cnt[3:0] 选块内哪一行，一行 16 像素
+    //   （块内 4 拍累加、phase 3 取和 >>4 = 行均值），16 帧覆盖整块 16 行 → 6.25% → **100%**。
+    // 更新律：bg += clamp((row_mean − bg) >>> BG_K, 1..BG_STEP_MAX)，
+    //   时间常数 ≈ 2^BG_K × 16 帧（BG_K=3 → 128 帧 ≈ 2.1 s @60 fps）。
+    //   替掉旧的"按块地址低位挑帧、每 64 帧 ±1"那套（它还有个真 bug：S_turn_sel 只有 6 位里
+    //   的低 4 位在比，**地址低 6 位 ≥16 的块永远拿不到更新机会**）。
+    parameter integer BG_K = 3,
+    parameter [3:0]   BG_STEP_MAX = 4'd8,
+    // ---- Step C：quiet 门（判决"这一块现在是不是纯背景"）----------------------
+    // 依据是**块内活动像素数**（活动 = 与块背景的差超过 MOTION_TH 且过相对门的像素，
+    // 与运动掩码**同一份判据**）：
+    //    cnt ≤ BG_QUIET_PX                        → 整块安静（背景 / 缓慢光照漂移）→ 允许蠕变；
+    //    cnt == 16 且 |整块均值偏差| ≤ BG_UNIF_MAX → 16 像素齐步同向变 = 均匀光照漂移
+    //                                              → 也允许蠕变（否则灯一变，亮区永远修不回来）；
+    //    其余（手在块里：只有一部分像素在动）      → **冻结** → 静止的手不会被吸进背景。
+    // "手停住不掉掩码"就是靠这条（**不靠块级锁存**）。
+    parameter [4:0]   BG_QUIET_PX = 5'd1,
+    parameter [8:0]   BG_UNIF_MAX = 9'sd40,
     // REBASE_ON_TEACH=1：提交字 bit[19:16]（teach_cnt）一变就重新自举背景（长按 KEY4 触发）。
+    //   ★ 另外**切到档 2（运动门开）那一拍**也自动重建背景 = 手动采样入口：现场
+    //   "手拿开 → `W 08 0002`"就等于重新采一遍背景（见 g_motion 里的 S_rebase_req）。
     parameter integer REBASE_ON_TEACH = 1,
     // 上电自举帧数：这几帧里每块无条件装载样本值（之后转为 quiet 蠕变）。
     // 取 32（≈0.5 s）是故意留出 AWB 收敛时间——AWB 是自适应的，开机头几帧的颜色
@@ -265,23 +278,26 @@ module recog_top #(
     parameter integer DIAG_CHROMA = 0,
 
     // ---- 打磨③：全局亮度补偿（治"光照一变就全屏在动"）------------------------
-    // 背景帧的更新被 quiet 门锁死（|样本−背景| ≥ QUIET_TH 就不许动），所以按曝光键、
+    // 背景帧的更新可能被 quiet 门冻住（块内有"活动像素"就不许动），所以按曝光键、
     // AWB 爬坡、往光源挪，都会让整幅画面**永久**判成"在动"。打开后：每帧算一个粗均值
     // （Σgray >> 20），与"上次基线时的均值"比较；差超过 GLOBAL_TH 就把**整张背景按差值
     // 平移**（不是重新采样 —— 重采样会把静止的手吃进背景），并更新基准均值。
     // AWB/曝光的整体漂移因此只让背景跟着走，手与背景的对比度保持不变。
-    // 默认 0 = 原行为。
+    // 默认 0（交付口径，整段被综合裁掉）。**下一轮（Step C）要把它真正接上**：用户定的
+    // 语义是"本帧全帧均值相对背景参考的变化 < X% 才允许 quiet 判定生效，否则整帧冻结背景"。
     parameter integer GLB_COMP = 0,
     parameter signed [8:0] GLOBAL_TH = 9'sd6,
 
     // ---- 跟手模式（默认 0 = 原行为）-------------------------------------------
+    // ⚠ `FRAME_DIFF`（= 把背景差分换成帧间差分）已随 2026-10-16 的运动门重做**整段删除**：
+    //   语义定死为**背景帧差分**。帧差等价于"背景 = 上一帧"，静止的手 0.3 s 就被吸进背景，
+    //   与规格 §3"静止的手也检出"冲突 —— 这条路已踩死。下面几行是删除前的原注释（留档）：
     // FRAME_DIFF=1：背景块**每帧无条件**写入样本 —— 存下来的就是"上一帧"的值，
     //   也就是把"背景差分"换成"**帧间差分**"。好处：再也没有"背景被光照/曝光钉死"
     //   的问题（背景永远等于上一帧，全局亮度变化天然被吸收），而移动的手/手指会
     //   **整块**被判成"在动"——不再出现"掌心/拇指漏一块"。
     // MASK_POLICY=1：搜索态只看运动（帧差）；锁定后在"上一帧包围盒 ± CORE_MARGIN"内
     //   再并上肤色（手停住时靠肤色兜住，不会马上掉锁）。
-    parameter integer FRAME_DIFF  = 0,
     parameter integer MASK_POLICY = 0,
 
     // ---- 【第 3 轮】一键示教（TEACH_EN=0 时整段逻辑在综合里消失）-------------
@@ -532,8 +548,8 @@ module recog_top #(
     // 资源：几个比较器 + 几处 mux，约 20 LUT6 / 0 ERAM / 0 DSP。
     // ========================================================================
     wire [3:0] S_cfg         = I_mode_word[15:12];
-    // ★ 运动/锁存门旁路（参数 SKIN_ONLY，默认 1）：交付档（0/1）也一起旁路。
-    wire       S_skin_only    = (SKIN_ONLY != 0);
+    // ★ 运动门（2026-10-16）：不再有编译期旁路开关 —— 支路一律综合（SKIN_ONLY=0），
+    //   "这一个 bit 里运动门开不开"由**运行时档位**决定（见下面的 S_mot_on）。
     // **修正 Y 回绕**：档 8 保留旧 Y 做对照，其余一律用不溢出的真 luma Y=(R+2G+B)/4。
     wire       S_y_new        = (S_cfg != 4'd8);
     // d2 下限：交付档取 D2_MIN_DELIV(=3)；档 9 留一个更严的标定参照（d2≥5）、档 8 是全宽松旧 Y。
@@ -1004,24 +1020,24 @@ module recog_top #(
     //   块行 = y[9:4]，地址 = 块行*80 + 块列（80 = 64+16，纯移位加法）；
     //   → 每块每行只读一次背景，同一块内 4 拍的像素共用这个值。
     //
-    // 采样（背景更新的依据）：块内第 BG_SAMPLE_ROW 行的**前 8 个像素**的均值
-    //   （2 拍 × 4 像素，>>3）。在 phase==1 算完、phase==2 写回。不用整块 256 像素
-    //   均值的原因：那要么给 80 个块各配一个 12 位部分和（≈960 FF），要么再开一块
-    //   ERAM 当暂存；而背景值只是"参考"，8 像素均值已经能压掉单像素噪声。
+    // 采样（背景更新的依据，**2026-10-16 从新实现**）：**采样行轮转** —— 本帧用
+    //   frame_cnt[3:0] 选块内哪一行，一行 **16 像素**（= 块内 4 拍累加，phase 3 取和 >>4），
+    //   16 帧覆盖整块 16 行 → 采样密度 6.25% → **100%**（老版只采 8 像素 = 3%，
+    //   灯斑/反光取不到亮处，那部分就"永久在动"）。
     //
     // ERAM 读写时序（eram_spram = 单口 + 1 拍读延迟，同一拍不能既读又写）：
-    //   phase 0/1：地址 = 本块，读（phase==0 直接用读出的数据，phase 1~3 用寄存副本）
-    //   phase 2  ：地址 = 本块，we = 更新决策（这一拍是"只写"）
+    //   phase 0/1：地址 = 本块，读（phase==0 直接用预取回来的数据，phase 1~3 用寄存副本）
+    //   phase 2  ：地址 = **上一块**，we = 上一块的更新决策（这一拍是"只写"）
     //   phase 3  ：地址 = **下一块**（地址预取），读 → 数据正好在下一块 phase==0 有效
-    //   所以 4 拍里读/写各占各的槽，既没有冲突也不需要场消隐期的额外地址生成器。
-    //   行尾（块列 79）的下一块是本块行第 0 列（下一行的同一个块行），地址要回卷。
+    //   行尾（块列 79）的下一块是本块行第 0 列（下一行的同一个块行），地址要回卷；
+    //   写回地址 = 扫描顺序的上一个块（S_addr_cur − 1，跨行/跨帧都一样）。
     //
-    // 背景更新（quiet 门控 + 限速蠕变，规划 §3 M1）：
-    //   * |样本 − 背景| < QUIET_TH 才允许动（QUIET_TH < MOTION_TH 形成滞回）；
-    //   * 每块每 64 帧最多动 1 个 LSB（"帧计数低位 == 块地址低位"挑帧，3600 块里
-    //     每帧约 56 块有更新机会）；60 fps 下等效时间常数几十秒；
-    //   * 复位后前 BOOT_FRAMES 帧例外：每块无条件装载样本值（自举），否则背景全是
-    //     0，运动掩码恒 1、融合退化成纯肤色。**开机时画面里别放手**。
+    // 背景更新（**quiet 门控 + 带系数的蠕变**，2026-10-16 从新实现，见下面的 Step A/C）：
+    //   * 允许蠕变：块内活动像素数 ≤ BG_QUIET_PX（整块安静），或"16 像素齐步同向变且
+    //     幅度 ≤ BG_UNIF_MAX"（均匀光照漂移）→ 手在块里就冻结，静止的手不会被吸进背景；
+    //   * 步长 = clamp(|行均值 − 背景| >>> BG_K, 1..BG_STEP_MAX)，每块每 16 帧一次机会
+    //     （采样行轮转天然把写入摊开）→ 时间常数 ≈ 2^BG_K × 16 帧 ≈ 2 s；
+    //   * 复位后前 BOOT_FRAMES 帧例外：每块无条件装载行均值（自举）；切到档 2 也重建一次。
     //
     // 延迟：0 拍（背景值在每块第一拍就已经拿到，与像素同拍比较）。跨域：不跨。
     //       SDC：不需要额外约束（ERAM 与像素流同一时钟域）。
@@ -1031,6 +1047,9 @@ module recog_top #(
 
     // 当前像素所在块的背景灰度（g_motion 里赋值；调试图与 DIAG_CHROMA 统计共用）
     wire [7:0] S_bg_cur;
+    // 背景帧是否已建好（自举/重建窗口内为 0）：没建好时运动门不生效（退回只认肤色）。
+    // g_motion 里由 S_bg_ready 驱动，g_nomotion（MASK_SRC≠2）恒 1。
+    wire       S_bg_rdy;
 
     generate
     if (MASK_SRC == 2 && (SKIN_ONLY == 0)) begin : g_motion
@@ -1039,10 +1058,16 @@ module recog_top #(
         wire [1:0] S_phase = S_x_grp[1:0];          // 块内第几拍（0..3）
         wire [6:0] S_blk_x = S_x_grp[6:2];          // 行内块列 0..79
         wire [5:0] S_band  = S_y_pos[9:4];          // 块行 0..44
-        // 采样拍：BG_SAMPLE2=1 时用第二个采样行（两个采样行都采齐了 S_sample 才有效）
-        wire       S_smp_beat_a = (S_y_pos[3:0] == BG_SAMPLE_ROW)  && (S_phase == 2'd1);
-        wire       S_smp_beat_b = (S_y_pos[3:0] == BG_SAMPLE_ROW2) && (S_phase == 2'd1);
-        wire       S_sample_row = (BG_SAMPLE2 != 0) ? S_smp_beat_b : S_smp_beat_a;
+        // ---- 帧计数：给"采样行轮转"用（低 4 位 = 本帧的块内采样行号）----------------
+        reg [7:0] S_frame_cnt;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)         S_frame_cnt <= 8'd0;
+            else if(I_raw_tuser) S_frame_cnt <= S_frame_cnt + 8'd1;
+        end
+        // **Step A**：本帧只更新"块内第 frame_cnt[3:0] 行"的那些块 → 16 帧把整块 16 行全采
+        //   一遍（采样密度 6.25% → **100%**），而写入天然被摊到 16 帧里，所以旧的
+        //   "按块地址低位挑帧"那套逻辑（还有那个"低 6 位 ≥16 的块永远轮不到"的 bug）整段删掉。
+        wire S_sample_row = (S_y_pos[3:0] == S_frame_cnt[3:0]);
 
         wire [11:0] S_row_base  = {S_band, 6'b0} + {S_band, 4'b0};   // 块行*80
         wire [11:0] S_addr_cur  = S_row_base + {{5{1'b0}}, S_blk_x};
@@ -1050,9 +1075,17 @@ module recog_top #(
         // 回卷到本行首块，于是"每块行的第一个块（图像最左 16 像素）"用的是上一行首块的背景
         // → 最左边一条 16 像素宽的永久竖线（很可能就是用户 2026-09-25 看到的"两条竖线"里的一条）。
         wire [11:0] S_addr_next = (S_addr_cur == 12'd3599) ? 12'd0 : (S_addr_cur + 12'd1);
+        // 写回地址 = **扫描顺序的上一个块**：决策在上一块的 phase 3 产生、写发生在这一块的
+        // phase 2（见下面的 S_pend_*）。跨行/跨帧回卷都靠这一个减法自动对上。
+        wire [11:0] S_addr_prev = (S_addr_cur == 12'd0) ? 12'd3599 : (S_addr_cur - 12'd1);
 
         // ---- 背景帧存储：2 块 ERAM（各 2048x8，够放 3600 个块）------------------
-        // 单口 + 1 拍读延迟：地址在上一块 phase==3 发出（预取）→ 本块 phase==0 有效。
+        // 单口 + 1 拍读延迟。4 拍里的两个"访问槽"（2026-10-16 改）：
+        //   phase 2 → **写回上一块**（地址 S_addr_prev、数据 S_pend_*）
+        //   phase 3 → **预取下一块**（地址 S_addr_next）→ 本块数据在下一块 phase==0 有效
+        // 为什么要改：新判决（Step A/B）要等**整行 16 像素**累加完（phase 3）才能定背景值，
+        // 而 phase 3 是预取读槽、phase 2 是写槽 —— 于是把"写"错开到下一块的 phase 2，
+        // 读/写永远各占各的槽，既不同拍撞车也不需要场消隐期的额外地址生成器。
         // 地址 bit11 选片子；读出数据的片选要用**上一拍**的地址位，所以打一拍。
         wire [11:0] S_bg_addr;
         wire        S_bg_we;
@@ -1082,27 +1115,37 @@ module recog_top #(
             .O_rdata(S_bg_q1)
         );
 
-        // ---- 帧计数：只用来"挑帧"（每块每 64 帧一次更新机会）-------------------
-        // 8 位帧号：低 2 位当"每 4 帧"节拍，整字节还当锁存时间戳用。
-        reg [7:0] S_frame_cnt;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n)         S_frame_cnt <= 8'd0;
-            else if(I_raw_tuser) S_frame_cnt <= S_frame_cnt + 8'd1;
-        end
+        // ---- 背景自举 / 重建窗口 -------------------------------------------------
+        // 窗口内每块**无条件**装载样本值（否则背景全是未初始化内容，运动掩码恒 1、
+        // 融合退化成纯肤色）。窗口取 BOOT_FRAMES（≈0.5 s）：故意留出 AWB 收敛时间
+        // （AWB 是自适应的，开机头几帧颜色还没稳）。**开机时画面里别放手**。
         wire S_boot = (S_frame_cnt < BOOT_FRAMES);
-        // ---- 一键重新基线化：提交字 bit[19:16]（teach_cnt）一变就再自举一次 ----------
-        // M1 还没有"示教"功能，先借用这个事件做"背景重建"（等效于重开机那 32 帧）。
-        // 现场长按 KEY4 就会发 teach 请求 → 背景重建，可用来验证"是不是背景错了"。
+        // ---- 手动重建背景（两个入口）---------------------------------------------
+        //   ① 提交字 bit[19:16]（teach_cnt）一变（长按 KEY4 / 串口 `W 03 0001`）→ 重建；
+        //   ② **切到档 2（运动门开）那一拍** → 重建（现场"手拿开 → W 08 0002"即重新采样）。
+        // 两者都等效于重开机那 32 帧，是"背景错了"时最靠得住的兜底。
         reg [5:0] S_reboot;
+        reg       S_rebase_req;      // 档 2 的手动重建请求（帧边界消费）
         reg [3:0] S_teach_seen;
+        reg [3:0] S_cfg2_seen;
         wire      S_teach_evt = (S_mode_word[19:16] != S_teach_seen);
+        wire      S_cfg2_now  = (S_cfg == 4'd2);
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) S_cfg2_seen <= 4'd0;
+            else         S_cfg2_seen <= {3'b0, S_cfg2_now};
+        end
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)                                 S_rebase_req <= 1'b0;
+            else if(S_cfg2_now && (S_cfg2_seen == 4'd0)) S_rebase_req <= 1'b1;
+            else if(I_raw_tuser)                         S_rebase_req <= 1'b0;
+        end
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 S_reboot     <= 6'd0;
                 S_teach_seen <= 4'd0;
             end
             else if(I_raw_tuser) begin
-                if((REBASE_ON_TEACH != 0) && S_teach_evt) begin
+                if(((REBASE_ON_TEACH != 0) && S_teach_evt) || S_rebase_req) begin
                     S_reboot     <= BOOT_FRAMES;
                     S_teach_seen <= S_mode_word[19:16];
                 end
@@ -1113,37 +1156,33 @@ module recog_top #(
         end
         wire S_boot_eff = S_boot || (S_reboot != 6'd0);
 
-        // 自举完成标志：自举期内（含"重建背景"窗口）锁存一律算"没动过"。
+        // 自举完成标志：自举期内（含"重建背景"窗口）运动门**不生效**（退回只认肤色），
+        // 免得拿一堆未初始化的 ERAM 内容当参考值。
         reg S_bg_ready;
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n)         S_bg_ready <= 1'b0;
             else if(I_raw_tuser) S_bg_ready <= ~S_boot_eff;
         end
+        assign S_bg_rdy = S_bg_ready;
 
-        // ---- 采样：本块采样行的前 8 像素均值（BG_SAMPLE2=1 时取两个采样行 = 16 像素）----
-        // 为什么加密：一个 16x16 块只采 8 个像素 = 块面积的 3%。灯斑/反光在块内本来就不均匀，
-        // 块背景取不到亮处 → 亮的那部分**永久**和"块背景"差十几二十，一直判成"在动"。
-        // 两个采样行 = 16 像素（6.25%）。成本 8 FF + 约 20 LUT。
+        // ---- Step A：整行 16 像素均值（块参考值的采样）----------------------------
+        // 一拍 4 像素 → 一行 16 像素正好是块内 4 拍：phase 0 装入、1/2 累加，
+        // phase 3 得到整行和（≤ 16×255 = 4080 < 4096，12 位够）→ >>4 得行均值。
+        // 为什么是"整行"：老版只采 8 个像素（3%），灯斑/反光在块内本来就不均匀，块背景取不到
+        //   亮处 → 亮的那部分**永久**和"块背景"差十几二十，一直判成"在动"。一行 16 像素 +
+        //   16 帧轮转 = 整块 256 像素全采到（100%）。
+        // 成本：12 位累加器 + 一个加法器 ≈ 20 LUT / 12 FF / 0 ERAM / 0 DSP。
         wire [9:0] S_sum4 = {2'b0, S_gray0} + {2'b0, S_gray1} +
-                            {2'b0, S_gray2} + {2'b0, S_gray3};
-        reg [9:0] S_row_acc;
+                            {2'b0, S_gray2} + {2'b0, S_gray3};      // 0..1020
+        reg [11:0] S_row_acc;
         always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n)          S_row_acc <= 10'd0;
-            else if(I_raw_tvalid) S_row_acc <= (S_phase == 2'd0) ? S_sum4
-                                                                 : (S_row_acc + S_sum4);
+            if(!I_rst_n)          S_row_acc <= 12'd0;
+            else if(I_raw_tvalid) S_row_acc <= (S_phase == 2'd0) ? {2'b0, S_sum4}
+                                                                 : (S_row_acc + {2'b0, S_sum4});
         end
-        // phase==1 时 S_row_acc 已经是第 0 拍的和，加上当拍就是 8 像素和 → >>3 取均值
-        wire [10:0] S_sum8    = {1'b0, S_row_acc} + {1'b0, S_sum4};
-        wire [7:0]  S_smp_now = S_sum8[10:3];
-
-        // 第一个采样行的均值先存下来，等第二个采样行到了再一起平均
-        reg [7:0] S_smp_a;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n)                          S_smp_a <= 8'd0;
-            else if(I_raw_tvalid && S_smp_beat_a) S_smp_a <= S_smp_now;
-        end
-        wire [8:0] S_smp_2  = {1'b0, S_smp_a} + {1'b0, S_smp_now};      // 两行均值之和 <= 510
-        wire [7:0] S_sample = (BG_SAMPLE2 != 0) ? S_smp_2[8:1] : S_smp_now;
+        // phase==3 当拍：S_row_acc 里是前 3 拍的和，加上本拍 = 本行 16 像素和
+        wire [11:0] S_row_sum  = S_row_acc + {2'b0, S_sum4};
+        wire [7:0]  S_row_mean = S_row_sum[11:4];       // 行均值
 
         // ---- 背景读数据：phase==0 用直通（预取刚回来），其余用寄存副本 ----------
         reg [7:0] S_bg_reg;
@@ -1201,64 +1240,15 @@ module recog_top #(
             end
         endfunction
 
-        // ---- 更新决策：自举装载 / 全局平移 / 自愈趋近 / (旧) quiet 蠕变 -----------
-        // **2026-09-26 第二步的核心**：旧的 quiet 门是个**单向棘轮** —— 只有 |diff| < QUIET_TH(4)
-        // 的块才允许蠕变，误差 >=4 的块永远冻结；而出错的恰恰是这些块。于是光照一变，亮区残差
-        // 就永久留着（"灯照亮的桌面一直高亮"的直接原因）。自愈把这条棘轮拆掉。
-        // 锁存模式必须让背景 = "上一帧的采样"（否则算出来的不是帧差）
-        wire S_fd = (LATCH_MODE != 0) || (FRAME_DIFF != 0);
-        wire signed [8:0] S_bg_diff  = {1'b0, S_sample} - {1'b0, S_bg_use};
-        wire [8:0]        S_abs_diff = S_bg_diff[8] ? (~S_bg_diff + 9'd1) : S_bg_diff;
-        wire S_quiet = (S_bg_diff > -QUIET_TH) && (S_bg_diff < QUIET_TH);
-
-        // "轮到这一块"的自查：自愈模式每 16 帧一次机会（旧行为每 64 帧）
-        wire [5:0] S_turn_sel = (BG_HEAL != 0) ? {2'b0, S_frame_cnt[3:0]} : S_frame_cnt;
-        wire       S_turn     = (S_turn_sel == S_addr_cur[5:0]);
-
-        // 自愈步长：|diff|>>3，钳在 1..8（BG_HEAL=0 时恒为 1，就是旧的 ±1 蠕变）
-        wire [4:0] S_step_raw = S_abs_diff[7:3];
-        wire [3:0] S_step     = (BG_HEAL == 0) ? 4'd1
-                              : ((S_step_raw == 5'd0) ? 4'd1
-                                                      : ((S_step_raw > 5'd8) ? 4'd8
-                                                                             : S_step_raw[3:0]));
-        wire S_heal_ok = (S_abs_diff <= HEAL_MAX) && (S_abs_diff != 9'd0);
-
-        wire S_upd   = (S_phase == 2'd1) && S_sample_row &&
-                       ((S_fd ? 1'b1 :
-                        (S_boot_eff ? 1'b1 :
-                         (S_glb_upd  ? 1'b1 :
-                          ((BG_HEAL != 0) ? (S_turn && S_heal_ok)
-                                          : (S_turn && S_quiet && (S_bg_diff != 9'sd0)))))));
-
-        wire [8:0] S_bg_p = {1'b0, S_bg_use} + {5'b0, S_step};
-        wire [8:0] S_bg_m = {1'b0, S_bg_use} - {5'b0, S_step};
-        wire [7:0] S_up_v = (S_bg_p > 9'd255) ? 8'd255 : S_bg_p[7:0];
-        wire [7:0] S_dn_v = S_bg_m[8] ? 8'd0 : S_bg_m[7:0];
-        wire [7:0] S_new = (S_fd || S_boot_eff) ? S_sample
-                         : S_glb_upd ? F_shift8(S_bg_use, S_glb_delta)
-                                     : (S_bg_diff[8] ? S_dn_v : S_up_v);
-
-        // 决策在 phase==1 产生、写发生在 phase==2，所以打一拍
-        reg       S_upd_d1;
-        reg [7:0] S_new_d1;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n) begin
-                S_upd_d1 <= 1'b0;
-                S_new_d1 <= 8'd0;
-            end
-            else begin
-                S_upd_d1 <= S_upd;
-                S_new_d1 <= S_new;
-            end
-        end
-
-        assign S_bg_addr  = (S_phase == 2'd3) ? S_addr_next : S_addr_cur;
-        assign S_bg_we    = (S_phase == 2'd2) && S_upd_d1;
-        assign S_bg_wdata = S_new_d1;
-
-        // ---- 运动门：两套实现（LATCH_MODE 选）-----------------------------------
-        // LATCH_MODE=0：旧的"逐像素和背景比"（保留做 A/B）。
-        // LATCH_MODE=1：**帧差做活动检测 + 块级锁存**（默认，见下面的说明与参数）。
+        // ======================================================================
+        // Step B：运动门 = **逐像素 vs 块参考值**（背景帧差分，不是帧差）
+        //   判据（与软权重、块内活动计数**同一份**）：|gray − bg| > MOTION_TH，
+        //   并保留相对门 (|d|<<3) > bg（12.5% 相对差，治"灯照亮的桌面"整体变亮）。
+        //   删掉了旧的块级锁存判决 `{4{S_lat_on}}` + 1 块 ERAM 的锁存表：那是
+        //   "挥一下手出三条不同颜色的条"、"往左挥却报下劈"的根源 —— 一个 16×16 块里
+        //   只要有几像素在动，整块 256 像素就全算"动过"。
+        // 成本：4 路 9 位减法/绝对值 + 4 个比较 ≈ 60 LUT6 / 0 ERAM / 0 DSP。
+        // ======================================================================
         wire signed [8:0] S_m0 = {1'b0, S_gray0} - {1'b0, S_bg_use};
         wire signed [8:0] S_m1 = {1'b0, S_gray1} - {1'b0, S_bg_use};
         wire signed [8:0] S_m2 = {1'b0, S_gray2} - {1'b0, S_bg_use};
@@ -1275,72 +1265,102 @@ module recog_top #(
             end
         endfunction
 
-        // ======================================================================
-        // 块级"活动锁存"：3600 块 x 4 bit = 1800 B → **1 块 2048x8 ERAM**
-        //   * 活动判据：这一块的采样均值相对**上一帧**变过门限（帧差 → 静态场景结构上就是 0）
-        //   * 计数：动过置 LATCH_MAX，之后每 4 帧减 1（15 -> 约 1.0 s，手停住还兜得住）
-        //   * 读：与背景 RAM 同一套预取（上一块 phase==3 发地址 → 本块 phase 0 有效），
-        //         两块共用一个字节；写发生在 phase==2（地址=当前块，预取地址=下一块，不撞）。
-        // ======================================================================
-        wire [11:0] S_lat_blk  = (S_phase == 2'd3) ? S_addr_next : S_addr_cur;
-        wire [10:0] S_lat_addr = S_lat_blk[11:1];
-        wire [7:0]  S_lat_rdata;
-        wire [3:0]  S_lat_old  = S_addr_cur[0] ? S_lat_rdata[7:4] : S_lat_rdata[3:0];
-        assign S_lat_on = (LATCH_MODE != 0) && S_bg_ready && (S_lat_old != 4'd0);
+        // bit0 = 字内最左像素，与肤色掩码同一 bit 序（否则融合会错位）
+        assign S_motion_mask = { F_motion_lv1(S_m3, S_bg_use),
+                                 F_motion_lv1(S_m2, S_bg_use),
+                                 F_motion_lv1(S_m1, S_bg_use),
+                                 F_motion_lv1(S_m0, S_bg_use) };
 
-        // 活动：本块采样均值相对上一帧的变化（LATCH_MODE=1 时背景就是上一帧的采样）
-        wire signed [8:0] S_act_d   = {1'b0, S_sample} - {1'b0, S_bg_use};
-        wire [8:0]        S_act_abs = S_act_d[8] ? (~S_act_d + 9'd1) : S_act_d;
-        wire S_act_now = (S_act_abs > MOTION_TH) &&
-                         ((MOTION_REL == 0) || ({S_act_abs, 3'b0} > {1'b0, S_bg_use}));
-        wire S_act     = S_sample_row && S_act_now;      // 决策在采样那一拍
-        reg  S_act_d1;
+        // ---- 块内活动像素数（0..16）：Step C 的 quiet 门的依据 -------------------
+        // 块级信息现在**只剩一个用途**：背景更新的许可（另一个可选用途 = 块内占比门）。
+        wire [2:0] S_act_pop = {2'b0, S_motion_mask[0]} + {2'b0, S_motion_mask[1]} +
+                               {2'b0, S_motion_mask[2]} + {2'b0, S_motion_mask[3]};
+        reg  [4:0] S_act_cnt;
         always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n) S_act_d1 <= 1'b0;
-            else         S_act_d1 <= S_act;              // 写发生在下一拍（phase==2）
+            if(!I_rst_n)          S_act_cnt <= 5'd0;
+            else if(I_raw_tvalid) S_act_cnt <= (S_phase == 2'd0) ? {2'b0, S_act_pop}
+                                                                 : (S_act_cnt + {2'b0, S_act_pop});
+        end
+        // 判决在 phase==3 那一拍做，而 S_act_cnt 寄存器里是"前 3 拍"的数，所以要加上本拍
+        // （否则每个块内最后 4 个像素的"在动"会被漏掉）。
+        wire [4:0] S_act_all = S_act_cnt + {2'b0, S_act_pop};
+
+        // ---- Step C：quiet 门（判决"这一块现在是不是纯背景"）--------------------
+        //   ① cnt ≤ BG_QUIET_PX：整块安静（背景 / 缓慢漂移）→ 允许蠕变；
+        //   ② cnt == 16 且 |整块均值偏差| ≤ BG_UNIF_MAX：16 像素齐步同向变 = 均匀光照漂移
+        //      → 也允许蠕变（否则灯一变，亮区残差就永远修不回来 —— 旧 quiet 单向棘轮的坑）；
+        //   ③ 其余（手在块里：只有一部分像素在动）→ **冻结**。
+        //   ③ 就是"静止的手不掉掩码"的机制（**不靠锁存**）。
+        wire signed [8:0] S_row_diff = {1'b0, S_row_mean} - {1'b0, S_bg_use};
+        wire [8:0]        S_row_abs  = S_row_diff[8] ? (~S_row_diff + 9'd1) : S_row_diff;
+        wire S_quiet_blk = (S_act_all <= BG_QUIET_PX) ||
+                           ((S_act_all == 5'd16) && (S_row_abs <= BG_UNIF_MAX));
+
+        // ---- Step A：更新律 = 带系数的蠕变 --------------------------------------
+        // 步长 = clamp(|d| >>> BG_K, 1..BG_STEP_MAX)。钳到 ≥1 是**必须**的：纯移位在
+        // |d| < 2^BG_K 时截成 0，小残差永远修不回来（旧代码同样把它钳在 1..8）。
+        wire [4:0] S_step_raw = S_row_abs[7:3];   // |d| >> BG_K（BG_K=3；|d| ≤ 255 → ≤ 31）
+        wire [3:0] S_step     = (S_step_raw == 5'd0) ? 4'd1
+                              : ((S_step_raw > {1'b0, BG_STEP_MAX}) ? BG_STEP_MAX
+                                                                    : S_step_raw[3:0]);
+        wire [8:0] S_bg_p = {1'b0, S_bg_use} + {5'b0, S_step};
+        wire [8:0] S_bg_m = {1'b0, S_bg_use} - {5'b0, S_step};
+        wire [7:0] S_up_v = (S_bg_p > 9'd255) ? 8'd255 : S_bg_p[7:0];
+        wire [7:0] S_dn_v = S_bg_m[8] ? 8'd0 : S_bg_m[7:0];
+
+        // 三种写入时机：① 自举/重建（全帧、无条件）② 全局平移（全帧，GLB_COMP=1）
+        //               ③ 蠕变（只有"轮到的那一行"——每块每 16 帧一次机会）
+        wire S_upd_full = S_boot_eff || S_glb_upd;
+        wire S_need_upd = S_upd_full || (S_sample_row && S_quiet_blk && (S_row_abs != 9'd0));
+        wire [7:0] S_new = S_boot_eff ? S_row_mean
+                         : S_glb_upd  ? F_shift8(S_bg_use, S_glb_delta)
+                                      : (S_row_diff[8] ? S_dn_v : S_up_v);
+
+        // ---- 写回：决策在 phase==3 产生（整行和、活动计数都齐了），写发生在**下一块的
+        //      phase==2**（地址 = S_addr_prev）→ 与 phase 3 的预取读各占一个槽，不会撞车。
+        //      3 拍延迟用"一对寄存器 + 消费后清零"实现（同一块只写一次）。
+        reg       S_pend_we;
+        reg [7:0] S_pend_data;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_pend_we   <= 1'b0;
+                S_pend_data <= 8'd0;
+            end
+            else if(S_phase == 2'd3) begin
+                S_pend_we   <= S_need_upd;
+                S_pend_data <= S_new;
+            end
+            else if(S_phase == 2'd2) begin
+                S_pend_we   <= 1'b0;
+            end
         end
 
-        wire       S_lat_tick = (S_frame_cnt[1:0] == 2'd0);           // 每 4 帧一次
-        wire [3:0] S_lat_dec  = (S_lat_old == 4'd0) ? 4'd0 : (S_lat_old - 4'd1);
-        wire [3:0] S_lat_newv = S_boot_eff ? 4'd0
-                              : (S_act_d1 ? LATCH_MAX
-                                          : (S_lat_tick ? S_lat_dec : S_lat_old));
-        wire       S_lat_chg   = (S_lat_newv != S_lat_old);
-        wire [7:0] S_lat_wdata = S_addr_cur[0] ? {S_lat_newv, S_lat_rdata[3:0]}
-                                               : {S_lat_rdata[7:4], S_lat_newv};
-        wire       S_lat_we    = (S_phase == 2'd2) && S_lat_chg;
-
-        eram_spram #(.DATA_WIDTH(8), .ADDR_WIDTH(11)) u_lat_mem (
-            .I_clk  (I_clk),
-            .I_we   (S_lat_we),
-            .I_addr (S_lat_addr),
-            .I_wdata(S_lat_wdata),
-            .O_rdata(S_lat_rdata)
-        );
-
-        // bit0 = 字内最左像素，与肤色掩码同一 bit 序（否则融合会错位）
-        // 预设 8/9（S_skin_only）：运动门**恒开** → 融合掩码退化成"只看肤色"。
-        // 这一档专门回答："把运动门拿掉，灯照亮的桌面到底会不会被当成手。"
-        assign S_motion_mask = S_skin_only ? 4'b1111 :
-                               ((LATCH_MODE != 0) ? {4{S_lat_on}}
-                                                  : { F_motion_lv1(S_m3, S_bg_use),
-                                                      F_motion_lv1(S_m2, S_bg_use),
-                                                      F_motion_lv1(S_m1, S_bg_use),
-                                                      F_motion_lv1(S_m0, S_bg_use) });
+        assign S_bg_addr  = (S_phase == 2'd3) ? S_addr_next
+                          : (S_phase == 2'd2) ? S_addr_prev
+                                              : S_addr_cur;
+        assign S_bg_we    = (S_phase == 2'd2) && S_pend_we;
+        assign S_bg_wdata = S_pend_data;
 
     end
     else begin : g_nomotion
-        // 不建运动支路时（MASK_SRC = 0/1）：融合掩码退化成肤色掩码，且 0 资源开销
+        // 不建运动支路时（MASK_SRC = 0/1，或 SKIN_ONLY=1）：融合掩码退化成肤色掩码，
+        // 且 0 资源开销
         assign S_motion_mask = 4'b1111;
         assign S_bg_cur      = 8'd0;
-        assign S_lat_on      = 1'b0;
+        assign S_bg_rdy      = 1'b1;
     end
     endgenerate
 
-    wire [3:0] S_fusion_mask = S_skin_use & S_motion_mask;
-    // 块级"最近动过"（活动锁存）：g_motion 里给，g_nomotion（MASK_SRC=0/1）恒 0。
-    // 声明放在模块级，因为 g_cent（软权重）要读它，而它与 g_motion 是两个 generate 分支。
-    wire       S_lat_on;
+    // ---- 运动门：**运行时档位开关**（2026-10-16）---------------------------------
+    //   档 2 = 运动门**开**（融合 = 肤色 ∩ 运动），档 3 = **关**（对照，= 只看肤色）。
+    //   其余档位（含交付档 0/1）一律**关** → 与 M1 上板定标的那一版行为一字不变。
+    //   背景还没建好（自举/重建窗口，S_bg_rdy=0）时也不生效：拿未初始化的 ERAM 内容当参考
+    //   只会乱报，退回"只看肤色"更安全。
+    //   一版 bit 现场 A/B：`W 08 0002`（开）/ `W 08 0003`（关），画面里掩码 + 准星都在
+    //   （isp_top 的 S_dbg_ovl 把 2/3 也并进叠加使能了）。
+    wire S_mot_on  = (S_cfg == 4'd2);
+    wire S_mot_use = S_mot_on && S_bg_rdy;
+    wire [3:0] S_fusion_mask = S_skin_use & (S_mot_use ? S_motion_mask : 4'b1111);
 
     // ---- 掩码源选择（编译期常量 → 综合后没有 mux，也没有多余负载）------------
     wire [3:0] S_mask_sel = (MASK_SRC == 2) ? S_fusion_mask :
@@ -1422,7 +1442,6 @@ module recog_top #(
 
         function [1:0] F_w_rgb;
             input [7:0] I_r, I_g, I_b, I_gray;
-            input       I_lat;            // 这一块"最近动过"（块级锁存）
             input       I_in_rect;        // 该像素在肤色矩形内（与掩码同一判据，调用侧传 S_skin_mask[i]）
             reg [7:0] S_hi, S_lo;
             reg [1:0] S_sk, S_mo;
@@ -1437,16 +1456,16 @@ module recog_top #(
                 // 不再被桌面拽"，而不只是"掩码亮不亮"。
                 S_sk = I_in_rect ? ({1'b0, ((I_r > I_g) && (I_r > I_b))} +
                                     {1'b0, ((S_hi - S_lo) >= SAT_MIN)}) : 2'd0;
-                if(S_skin_only) begin
-                    // 预设 8..12：运动分恒满 → 权重 = 肤色分（完全不要运动门）
+                // **2026-10-16 Step D：掩码与软权重必须同源** —— 运动分就用与
+                // `S_motion_mask` 完全相同的逐像素判据（同一块背景 `S_bg_cur`、同一对
+                // 门限 MOTION_TH / 2×MOTION_TH、同一个相对门）。历史上踩过
+                // "掩码走新判据、权重还喂老判据"的坑：桌面不涂红、却照样把准星拽过去。
+                if(!S_mot_use) begin
+                    // 运动门关（非 2 档 / 背景未就绪）→ 权重只看肤色，= M1 交付行为
                     S_mo = 2'd2;
                 end
-                else if(LATCH_MODE != 0) begin
-                    // 锁存模式：运动分不再由"和背景比"给 —— 这一块最近动过就算"在动"，
-                    // 权重仍然取 min(肤色, 运动) → 手整体高亮，静止场景权重为 0。
-                    S_mo = I_lat ? 2'd2 : 2'd0;
-                end
                 else begin
+                    // 运动分：> 2×MOTION_TH 给 2 分、> MOTION_TH 给 1 分，否则 0 分
                     S_d  = {1'b0, I_gray} - {1'b0, S_bg_cur};
                     S_da = S_d[8] ? (~S_d + 9'd1) : S_d;
                     if((S_da > S_th2) && ((MOTION_REL == 0) || ({S_da, 2'b0} > {1'b0, S_bg_cur})))
@@ -1479,13 +1498,13 @@ module recog_top #(
         //   `S_skin_mask`（老绝对窗），归一化打开后两条路判据不同：桌面可能不再被涂红、却仍把**准星**
         //   拽过去（M1 踩过同一个坑，结论就是"准星与掩码同源"）。改成 `S_skin_use` 即可。
         wire [1:0]  S_w0 = F_w_inroi(S_wc0, S_y_pos)
-                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_lat_on, S_skin_use[0]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_skin_use[0]) : 2'd0;
         wire [1:0]  S_w1 = F_w_inroi(S_wc1, S_y_pos)
-                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_lat_on, S_skin_use[1]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_skin_use[1]) : 2'd0;
         wire [1:0]  S_w2 = F_w_inroi(S_wc2, S_y_pos)
-                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_lat_on, S_skin_use[2]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_skin_use[2]) : 2'd0;
         wire [1:0]  S_w3 = F_w_inroi(S_wc3, S_y_pos)
-                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_lat_on, S_skin_use[3]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_skin_use[3]) : 2'd0;
 
         // w∈0..2：w·x = (w[0] ? x : 0) + (w[1] ? x<<1 : 0) —— 移位加法，不碰 DSP
         wire [11:0] S_wx0 = (S_w0[0] ? {1'b0,S_wc0} : 12'd0) + (S_w0[1] ? {S_wc0,1'b0} : 12'd0);
