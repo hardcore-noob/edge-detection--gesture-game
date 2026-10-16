@@ -289,7 +289,13 @@ module recog_top #(
     // 一次触发 = 一个约 1 秒（60 帧）的采样窗；窗内把"固定中央区"里通过宽松前置门的
     // 像素并进 (d1,d2) 包络，窗末判定通过就把包络外扩后写进 4 个运行时窗口寄存器。
     // （设计见 docs/A-20260929-交接给新对话.md §5；第 4 轮的"2 秒闪叠加"还没接。）
-    parameter integer TEACH_EN = 1,
+    // ⚠ 2026-10-16 **改成 0（砍掉）**：归一化判据（SKIN_NORM=1）不再读运行时窗口寄存器，
+    //   示教学出来的 `S_win_d1_lo/hi`、`S_win_d2_lo/hi` **没有任何读者**（唯一读点属于被综合
+    //   裁掉的老判据）→ 按 KEY4 只会闪 2 秒、掩码一个像素都不变。**留一个"看着能用、其实
+    //   没用"的用户功能比没有更糟**，所以整段撤掉（省 ≈200 LUT6 + ≈75 FF）。
+    //   要恢复正确的一键示教：让示教**教比例**（学 `d2/Y`、`|d1|/Y` 的包络 → 落成一对移位
+    //   档 lo/hi，判据用 `Y>>reg` 或一张小 case 表选档），约 +30 LUT6 —— 见 CHANGELOG 待办。
+    parameter integer TEACH_EN = 0,
     // 采样窗长度（帧）
     parameter [7:0]   TEACH_WIN_FRAMES = 8'd60,
     // 采样区：固定中央区（不用 ROI —— ROI 边界跟着跟踪状态跳，示教结果会漂）
@@ -381,7 +387,9 @@ module recog_top #(
     parameter [3:0]    M2_TIP_R = 4'd3,
     // 调试口径：1 = 把 DBG 的 P/Q 借给指尖/手型（P={峰数,指尖行}、Q={手型,指尖列}），
     //          0 = P/Q 仍是 M1 的掩码像素数 / 包围盒 x。上板定标那一版用 1。
-    parameter integer  M2_DBG = 1,
+    // ⚠ 2026-10-16 交付口径改 0：P/Q 回到 M1 语义（掩码像素数 / 包围盒 x）—— 这两个字段
+    //   对我们盯"掩码健康"更有用。要读 M2.2 的{峰数,指尖行}/{手型,指尖列}，临时置 1 重编。
+    parameter integer  M2_DBG = 0,
     // ---- M2.2 修正（2026-10-11，用户提议）：肤色判据改成"按亮度归一化"------------
     // 老判据是**绝对值窗**：d2 = R−Y ≥ 3、|d1| = Y−B ∈ [5, 100]。光照一暗，R/B/Y 一起变小、
     //   差值按比例缩小 → 暗处的手掉出窗口（上板实测"手指放到暗一点的地方，指尖就不全"）。
@@ -414,7 +422,11 @@ module recog_top #(
     // 三个门：① 掩码像素数 > MAX_MASK_PX（默认 12 万 ≈ 13% 画面）② 宽 > 4×高 ③ 高 > 4×宽。
     // 命中不了就**不更新位置、丢锁**（照 HOLD/LOCK 的兜底）；同时**叠加里也不再涂红那个掩码**，
     //   所以"桌面被高亮"在画面上也会消失（否则门只挡住跟踪、屏幕上还是红的）。
-    parameter integer  GATE_EN = 1,
+    // ⚠ 2026-10-16 改 0（交付口径）：门的**比较器本身**在综合里，因为它的开关是"运行时的
+    //   档位 mux"（`S_cfg_gate_on = (S_cfg == 4'd13)`）—— 默认不生效却照样占 ~40 LUT6。
+    //   实测四档归因里门的净作用是负的（自锁），所以整段撤掉。副作用：**档 13 不再是"开门"
+    //   （变成和档 12 一样 = 都不开）**，剩下的有效档位见 CHANGELOG 的档位表。
+    parameter integer  GATE_EN = 0,
     parameter [19:0]   MAX_MASK_PX = 20'd120000,
     parameter [2:0]    GATE_AR_SHIFT = 3'd2     // 长宽比门限 = 4:1
 ,
@@ -2384,45 +2396,19 @@ module recog_top #(
     );
 
     // ---- M2.1：GEST_DBG=1 时把 P/Q/R 借给"挥手方向"观测 ------------------------
-    // 编码见上面 g_gest 的段落注释：P = {Σdx,Σdy}（±127 钳位 +128）、
-    // Q = {方向, 事件计数}、R = {本帧 dx, 本帧 dy}（±31 钳位 +32）。
-    // GEST_DBG=0（交付口径）时下面三行与 M1 逐字节一致。
-    function [7:0] F_gest_sat8;     // 12 位有符号 → 钳 ±127 后 +128（0x80 = 0）
-        input signed [11:0] I_v;
-        begin
-            if(I_v > 12'sd127)        F_gest_sat8 = 8'hFF;
-            else if(I_v < -12'sd127)  F_gest_sat8 = 8'h01;
-            else                      F_gest_sat8 = I_v[7:0] + 8'd128;
-        end
-    endfunction
-
-    function [5:0] F_gest_sat6;     // 12 位有符号 → 钳 ±31 后 +32（0x20 = 0）
-        input signed [11:0] I_v;
-        begin
-            if(I_v > 12'sd31)         F_gest_sat6 = 6'd63;
-            else if(I_v < -12'sd31)   F_gest_sat6 = 6'd1;
-            else                      F_gest_sat6 = I_v[5:0] + 6'd32;
-        end
-    endfunction
-
-    wire S_gest_dbg_on = (GEST_EN != 0) && (GEST_DBG != 0) &&
-                         (MASK_SRC != 0) && (USE_CENTROID != 0);
-
-    // M2.2 先借：P = {峰数[3:0], 2'b0, 指尖行[9:0]}、Q = {手型[2:0], 指尖列[10:0]}（见 M2_* 参数）
+    // ⚠ 2026-10-16：**两套饱和函数（`F_gest_sat8/sat6`）和 M2.1 的 DBG 借用分支一起删掉**
+    //   （用户要求）。理由：M2.1 已冻结（`GEST_VIS=0` / `GEST_DBG=0`），这条分支早就被常量
+    //   折叠掉了、一份 LUT 都没占；但留着它就是"下次把 `GEST_DBG` 一开就悄悄涨 LUT"的陷阱。
+    //   要复活 M2.1 的 P/Q/R 读数，从 git 历史里恢复这段（见 CHANGELOG 2026-10-11 各轮）。
+    // M2.2 按 `M2_DBG` 借 P/Q：P = {峰数[3:0], 2'b0, 指尖行[9:0]}、Q = {手型[2:0], 指尖列[10:0]}
     assign O_mask_cnt_shift = S_m2_dbg_on ? S_m2_dbg_p
-                            : S_gest_dbg_on
-                              ? { F_gest_sat8(S_gest_sx), F_gest_sat8(S_gest_sy) }
-                              : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
+                                          : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
     assign O_bbox_x         = S_m2_dbg_on ? S_m2_dbg_q
-                            : S_gest_dbg_on
-                              ? { S_gest_dir, S_gest_cnt }
-                              : ((DIAG_CHROMA != 0) ? S_ch_word_x
-                                                    : {S_xmin[10:4], S_xmax[10:4]});
-    assign O_bbox_y         = S_gest_dbg_on
-                              ? { F_gest_sat6(S_gest_dx), F_gest_sat6(S_gest_dy) }
-                              : ((DIAG_CHROMA != 0) ? S_ch_word_y
-                                                    : {S_ymin[9:4],  S_ymax[9:4]});
+                                          : ((DIAG_CHROMA != 0) ? S_ch_word_x
+                                                                : {S_xmin[10:4], S_xmax[10:4]});
+    assign O_bbox_y         = (DIAG_CHROMA != 0) ? S_ch_word_y
+                                                 : {S_ymin[9:4],  S_ymax[9:4]};
 
 
     // 用边沿流（比 raw 流晚 2 拍）的帧首翻 toggle：此刻 tap 计数与掩码统计都已锁存
