@@ -71,6 +71,18 @@
 //   * 档 13 的 Y 分档阈值改成 32/64/128（贴合低亮度场，可用 `OBS_Y_T1..T3` 一行改）；
 //     另加**档 12 = 亮度灰阶**（画面直接换成 8 位灰度 Y，一眼看亮度分布）。
 //
+// M2 · 运动门 第 4 轮（2026-10-16，用户上板读数："档 14 都是红色和青色、档 13 都是青色和绿色、
+//   档 14 杂码还是有点多"）：
+//   * **② 加绝对下限**（用户指令）：`sat ≥ max(Y/8, 8)` —— 暗场里 Y/8 只有 4~6 等于没门槛，
+//     加 8 直接砍暗噪点；亮场里仍是比例式主导。
+//   * **加 ① 块级占比门**（用户指令，`OCC_EN` / `OCC_MIN`）：32×32 块（920 块 → **1 块 ERAM**）
+//     每块存 1 字节 = {上一帧达标标志, 本帧累计合格像素数}，块内每 8 行采 1 行（128 采样点），
+//     占比 ≥ `OCC_MIN/128` 才保留那一块的像素。与亮度无关 ⇒ 换场景也站得住。
+//     作用在**选中的掩码**和**软权重**上（保持同源）。
+//   * 档位：**15 = ② + 运动门 + ①（交付候选）**、14 = ② + 运动门（A/B 对照，只差 ①）、
+//     12 = 亮度灰阶、13 = 肤色 Y 分档。⚠ 15 原来叫"M2.1 关"，现在改成"全家桶"；
+//     M2.1 的关档等价于任意不进 10/11 的档位。
+//
 // 几何提醒：肤色源用的是 RAW 的字几何（字内 [95:72] 是最左像素），而 mask_stats
 // 的列号按"列 4k-1..4k+2"（边缘流那套，边缘图整体比 RAW 左移 1 像素）算，所以
 // 肤色掩码的列号整体偏左 1 像素 —— Q 是 16 像素粒度，看不出来；M2 做指尖坐标
@@ -471,6 +483,10 @@ module recog_top #(
     parameter [7:0]    SKIN_Y_MIN   = 8'd16,
     parameter [7:0]    SKIN_Y_CAP   = 8'd200,
     parameter [2:0]    SKIN_SAT_SH  = 3'd3,     // sat ≥ (Y >> 它)：3 = Y/8、4 = Y/16（更松）
+    // ★ 2026-10-16 第 3 版（用户指令）：比例门再加**绝对下限** `sat ≥ max(Y/8, 8)` ——
+    //   暗场里 Y/8 只有 4~6，等于没门槛；加 8 之后"暗噪点"直接砍掉，亮场里仍是比例式主导。
+    //   `sat ≥ a && sat ≥ b` 等价于 `sat ≥ max(a,b)`，所以只是**多一个比较器**，不用求 max。
+    parameter [7:0]    SKIN_SAT_MIN = 8'd8,
     // ---- 【2026-10-16 第 2 版】档 13 观测视图的 Y 分档阈值 --------------------------
     // 上板实测：这一场的肤色像素 **Y<96**（档 13 全绿）—— 原来的 96/160/200 三档全废。
     // 改成**贴合低亮度场**的四档（都可在参数里一行改）：
@@ -479,6 +495,21 @@ module recog_top #(
     parameter [7:0]    OBS_Y_T1 = 8'd32,
     parameter [7:0]    OBS_Y_T2 = 8'd64,
     parameter [7:0]    OBS_Y_T3 = 8'd128,
+    // ---- 【2026-10-16 ①：块级占比门】"这一块是实的"才保留 ---------------------------
+    // 为什么（用户）：水平 8 像素多数投票只能灭 1~2 像素孤点；"没有固定形状的一大片"杂码
+    //   要靠**块级占比**兜，而且它与亮度无关 —— 换个场景也站得住。
+    // 做法：32×32 块（40×23 = 920 块 → **1 块 ERAM**），每块 1 字节 =
+    //   {上一帧的达标标志(bit7), 本帧已累计的合格像素数(7bit、饱和 127)}。
+    //   块内每 8 行采 1 行（`y[2:0]==0` → 4 行 × 32 像素 = 128 个采样点），
+    //   占比 ≥ `OCC_MIN/128` 才算"实"。**判决用上一帧的标志**：这样不会出现
+    //   "块顶几行被切掉"的阶梯状缺口（用本帧上方的累计值就会那样）。
+    //   计数源 = **最终肤色判据**（`S_skin_use`）；门作用在**选中的掩码**与**软权重**上
+    //   （保持"掩码与权重同源"这条不变量）。
+    // 档 15 = ① 生效（配合 ② + 运动门 = 交付候选）；档 14 = 同一套但不带 ①（A/B 对照）。
+    // 资源：1 块 ERAM + ≈150 LUT6 + ≈30 FF，0 DSP。OCC_EN=0 时整段不综合。
+    parameter integer  OCC_EN  = 1,
+    // 达标门限（采样点口径：128 = 100%）。16 ≈ 12.5%；要更狠就调到 24~32。
+    parameter [6:0]    OCC_MIN = 7'd16,
     // ---- M2.2 修正（2026-10-11 用户提议）：**最大尺寸门 + 形状门**--------------------
     // 为什么需要：归一化判据再怎么调也分不开"皮肤(d2/Y≈0.2)"与"暖木桌(d2/Y≈0.25)" —— 间隔太窄。
     //   但两者的**形状/尺寸**完全不同：手再近也占不到大半个画面，桌面/墙面经常是。
@@ -1076,19 +1107,23 @@ module recog_top #(
                         F_min3(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0]);
     wire [7:0] S_sat3 = F_max3(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0]) -
                         F_min3(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0]);
-    // 比例饱和门：sat ≥ (Y >> SKIN_SAT_SH)。Y 用与肤色判据同一份灰度（S_gray）。
+    // 饱和门 = **比例 + 绝对下限**：`sat ≥ (Y >> SKIN_SAT_SH)` 且 `sat ≥ SKIN_SAT_MIN`
+    // （两条 AND 等价于 `sat ≥ max(Y/8, 8)`，省掉求 max 的硬件）。Y 用与肤色判据
+    // 同一份灰度（S_gray）。
     wire [3:0] S_cappx = { (S_gray3 >= SKIN_Y_MIN) && (S_gray3 <= SKIN_Y_CAP) &&
-                           (S_sat3 >= {5'b0, S_gray3[7:SKIN_SAT_SH]}),
+                           (S_sat3 >= {5'b0, S_gray3[7:SKIN_SAT_SH]}) && (S_sat3 >= SKIN_SAT_MIN),
                            (S_gray2 >= SKIN_Y_MIN) && (S_gray2 <= SKIN_Y_CAP) &&
-                           (S_sat2 >= {5'b0, S_gray2[7:SKIN_SAT_SH]}),
+                           (S_sat2 >= {5'b0, S_gray2[7:SKIN_SAT_SH]}) && (S_sat2 >= SKIN_SAT_MIN),
                            (S_gray1 >= SKIN_Y_MIN) && (S_gray1 <= SKIN_Y_CAP) &&
-                           (S_sat1 >= {5'b0, S_gray1[7:SKIN_SAT_SH]}),
+                           (S_sat1 >= {5'b0, S_gray1[7:SKIN_SAT_SH]}) && (S_sat1 >= SKIN_SAT_MIN),
                            (S_gray0 >= SKIN_Y_MIN) && (S_gray0 <= SKIN_Y_CAP) &&
-                           (S_sat0 >= {5'b0, S_gray0[7:SKIN_SAT_SH]}) };
+                           (S_sat0 >= {5'b0, S_gray0[7:SKIN_SAT_SH]}) && (S_sat0 >= SKIN_SAT_MIN) };
     wire [3:0] S_skin_cap_mask = S_skin_norm_mask & S_cappx;
-    // 档 14 = ② 开（同时把运动门也开 = 最终候选配置）；档 13 = 观测档（② 关）
-    wire       S_cap_on = (S_cfg == 4'd14);
-    wire       S_mot_on = (S_cfg == 4'd2) || (S_cfg == 4'd14);
+    // 档 14 = ② 开 + 运动门（候选）；档 15 = 再叠**块级占比门**（"全家桶" = 交付候选）；
+    // 档 13 = 观测档（② 关）
+    wire       S_cap_on  = (S_cfg == 4'd14) || (S_cfg == 4'd15);
+    wire       S_mot_on  = (S_cfg == 4'd2)  || (S_cfg == 4'd14) || (S_cfg == 4'd15);
+    wire       S_occ_act = (S_cfg == 4'd15);   // ① 块级占比门只在 15 档生效（A/B 用 14）
 
     // 最终使用的肤色掩码（编译期常量选择，没选中的判据会被综合裁掉）
     wire [3:0] S_skin_use = (SKIN_RULE2 != 0) ? S_skin2_mask :
@@ -1112,7 +1147,7 @@ module recog_top #(
     //   仍然够用（反光/手的面积远大于 4 像素），而成本降到 1/4（≈60 LUT6）。
     //   只在档 13/14 借 P/Q；其余档位 P/Q/R 一字不动。
     // ========================================================================
-    wire S_obs_on = (S_cfg == 4'd13) || (S_cfg == 4'd14);
+    wire S_obs_on = (S_cfg == 4'd13) || (S_cfg == 4'd14) || (S_cfg == 4'd15);
     reg [7:0] a_obs_ymin, a_obs_ymax, a_obs_smin, a_obs_smax;
     reg [7:0] h_obs_ymin, h_obs_ymax, h_obs_smin, h_obs_smax;
     // 饱和先钳到 127（Q 只有 7 位给它）：皮肤/反光的 sat 都远小于 127，钳位不影响判读
@@ -1522,9 +1557,116 @@ module recog_top #(
     wire S_mot_use = S_mot_on && S_bg_rdy;
     wire [3:0] S_fusion_mask = S_skin_use & (S_mot_use ? S_motion_mask : 4'b1111);
 
+    // ========================================================================
+    // 【2026-10-16 ①：块级占比门】32×32 块"过判据像素占比 ≥ N 才保留"
+    //   数据结构：每块 1 字节 = {上一帧达标标志, 本帧累计合格像素数(7bit)}
+    //   地址：行 = y[9:5]（0..22）、列 = x_grp[7:3]（0..39）→ addr = 行×40 + 列（≤919）
+    //   读到字节后：用 bit7 当本块**所有像素**的门；本行 8 拍的合格像素数累加进低 7 位。
+    //   写回：访问槽照搬背景 RAM 那套 —— beat7 发下一块的地址（预取），beat0 写**上一块**
+    //   （把刚才算完的那一字节落盘）→ 两个槽不同拍，不撞车。
+    //   清零：块的最后一行（y[4:0]==31）写回 {达标标志, 0}，顺带把计数器复位，
+    //   所以不需要额外的清屏扫描。
+    // ========================================================================
+    wire S_occ_keep;      // 1 = 这一块的像素保留（门开着 / 这一块是"实的"）
+    generate
+    if ((MASK_SRC != 0) && (OCC_EN != 0)) begin : g_occ
+
+        wire [2:0] S_obeat = S_x_grp[2:0];              // 块内第几拍（8 拍 = 32 像素）
+        wire [5:0] S_ocol  = S_x_grp[7:3];              // 块列 0..39
+        wire [4:0] S_orow  = S_y_pos[9:5];              // 块行 0..22
+        wire [9:0] S_obase = {S_orow, 5'b0} + {S_orow, 3'b0};   // 行 × 40（32 + 8）
+        wire [9:0] S_ocur  = S_obase + {4'b0, S_ocol};
+        wire [9:0] S_onext = (S_ocur == 10'd919) ? 10'd0 : (S_ocur + 10'd1);
+        wire [9:0] S_oprev = (S_ocur == 10'd0)   ? 10'd919 : (S_ocur - 10'd1);
+
+        wire S_osmp  = (S_y_pos[2:0] == 3'd0);          // 采样行：块内每 8 行采 1 行
+        // 块的最后一行 → 结算。⚠ 最底下那一块行只有 16 行（720 = 22×32 + 16），
+        // 永远等不到 y[4:0]==31，所以**帧的最后一行**也当结算点。
+        wire S_olast = (S_y_pos[4:0] == 5'd31) || (S_y_pos == 10'd719);
+
+        wire [9:0] S_oaddr;
+        wire       S_owe;
+        wire [7:0] S_owdata;
+        wire [7:0] S_ordata;
+
+        eram_spram #(.DATA_WIDTH(8), .ADDR_WIDTH(10)) u_occ_mem (
+            .I_clk  (I_clk),
+            .I_we   (S_owe),
+            .I_addr (S_oaddr),
+            .I_wdata(S_owdata),
+            .O_rdata(S_ordata)
+        );
+
+        assign S_oaddr = (S_obeat == 3'd7) ? S_onext
+                       : (S_obeat == 3'd0) ? S_oprev
+                                           : S_ocur;
+
+        // 本块这一行的字节（beat0 抓到预取回来的值，整块 8 拍都有效）
+        reg [7:0] S_obyte;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) S_obyte <= 8'd0;
+            else if(I_raw_tvalid && (S_obeat == 3'd0)) S_obyte <= S_ordata;
+        end
+
+        // 本拍 4 个像素里"过最终肤色判据"的个数（0..4）
+        wire [2:0] S_ocnt_beat = {2'b0, S_skin_use[0]} + {2'b0, S_skin_use[1]} +
+                                 {2'b0, S_skin_use[2]} + {2'b0, S_skin_use[3]};
+        // 饱和累加（饱和到 127）：beat0 载入"存量 + 本拍"，其余拍"累加 + 本拍"
+        reg  [6:0] S_oacc;
+        wire [7:0] S_osum_a = {1'b0, S_obyte[6:0]} + {5'b0, S_ocnt_beat};
+        wire [7:0] S_osum_b = {1'b0, S_oacc}       + {5'b0, S_ocnt_beat};
+        wire [6:0] S_ocnt_a = (S_osum_a > 8'd127) ? 7'd127 : S_osum_a[6:0];
+        wire [6:0] S_ocnt_b = (S_osum_b > 8'd127) ? 7'd127 : S_osum_b[6:0];
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) S_oacc <= 7'd0;
+            else if(I_raw_tvalid && S_osmp) begin
+                if(S_obeat == 3'd0) S_oacc <= S_ocnt_a;
+                else                S_oacc <= S_ocnt_b;
+            end
+        end
+
+        // 结算与写回：beat7 时本行的累计值就是 S_ocnt_b（含本拍）
+        wire S_owin = (S_obyte[6:0] >= OCC_MIN);        // 最后一行用字节里的总计数判决
+        reg       S_opend_we;
+        reg [7:0] S_opend_data;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_opend_we   <= 1'b0;
+                S_opend_data <= 8'd0;
+            end
+            else if(S_obeat == 3'd7) begin
+                S_opend_we   <= S_osmp || S_olast;
+                S_opend_data <= S_olast ? {S_owin, 7'd0}
+                                        : {S_obyte[7], S_ocnt_b};
+            end
+            else if(S_obeat == 3'd0) begin
+                S_opend_we   <= 1'b0;
+            end
+        end
+        assign S_owe    = (S_obeat == 3'd0) && S_opend_we;
+        assign S_owdata = S_opend_data;
+
+        // 上电头几帧 ERAM 内容未定义 → 强制放行（过了 4 帧才开始按标志门控）
+        reg [2:0] S_ofrm;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)                      S_ofrm <= 3'd0;
+            else if(I_raw_tuser && !(&S_ofrm)) S_ofrm <= S_ofrm + 3'd1;
+        end
+        assign S_occ_keep = !S_occ_act ||
+                            ((&S_ofrm) && S_obyte[7]);
+
+    end
+    else begin : g_occ_off
+        // 关掉时（MASK_SRC=0 或 OCC_EN=0）门恒开，0 资源
+        assign S_occ_keep = 1'b1;
+    end
+    endgenerate
+
     // ---- 掩码源选择（编译期常量 → 综合后没有 mux，也没有多余负载）------------
-    wire [3:0] S_mask_sel = (MASK_SRC == 2) ? S_fusion_mask :
-                            (MASK_SRC == 1) ? S_skin_mask   : S_edge_mask;
+    // ① 块级占比门作用在**选中的掩码**上（下游的显示/统计/指尖/挥手全都跟着受益）
+    wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ? S_fusion_mask :
+                                (MASK_SRC == 1) ? S_skin_mask   : S_edge_mask;
+    wire [3:0] S_mask_sel = S_occ_keep ? S_mask_sel_raw : 4'b0000;
 
     // ---- mask_stats 的输出（Step 3 要用"上一帧"的包围盒/计数，先声明）---------
     wire [19:0] S_mcnt;
@@ -1657,13 +1799,15 @@ module recog_top #(
         // ★ 2026-10-11（用户指出）：软权重（质心/准星的观测源）**必须与掩码同源** —— 原来这里喂的是
         //   `S_skin_mask`（老绝对窗），归一化打开后两条路判据不同：桌面可能不再被涂红、却仍把**准星**
         //   拽过去（M1 踩过同一个坑，结论就是"准星与掩码同源"）。改成 `S_skin_use` 即可。
-        wire [1:0]  S_w0 = F_w_inroi(S_wc0, S_y_pos)
+        // ⚠ 2026-10-16 ① 块级占比门**同样作用在软权重上**：掩码与权重必须同源
+        //   （历史教训：掩码被门挡下、权重还照投 → 掩码看不见了、准星却被那片东西拽走）。
+        wire [1:0]  S_w0 = (F_w_inroi(S_wc0, S_y_pos) && S_occ_keep)
                            ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_skin_use[0]) : 2'd0;
-        wire [1:0]  S_w1 = F_w_inroi(S_wc1, S_y_pos)
+        wire [1:0]  S_w1 = (F_w_inroi(S_wc1, S_y_pos) && S_occ_keep)
                            ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_skin_use[1]) : 2'd0;
-        wire [1:0]  S_w2 = F_w_inroi(S_wc2, S_y_pos)
+        wire [1:0]  S_w2 = (F_w_inroi(S_wc2, S_y_pos) && S_occ_keep)
                            ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_skin_use[2]) : 2'd0;
-        wire [1:0]  S_w3 = F_w_inroi(S_wc3, S_y_pos)
+        wire [1:0]  S_w3 = (F_w_inroi(S_wc3, S_y_pos) && S_occ_keep)
                            ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_skin_use[3]) : 2'd0;
 
         // w∈0..2：w·x = (w[0] ? x : 0) + (w[1] ? x<<1 : 0) —— 移位加法，不碰 DSP
