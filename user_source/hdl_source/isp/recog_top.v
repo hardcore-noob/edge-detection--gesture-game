@@ -337,8 +337,11 @@ module recog_top #(
     parameter [7:0]    GEST_SEG_MAX = 8'd150,
     // 左/右挥：整段 |ΔX| 门限（像素）
     parameter [11:0]   GEST_X_TH = 12'd60,
+    // 【2026-10-16 复活】松档：`recog_algo == 11` 用这一对（先确保"能看到事件"，再收紧）
+    parameter [11:0]   GEST_X_TH_LOOSE = 12'd40,
     // 下劈：整段 ΔY（掩码最高行下移）门限（像素）
     parameter [11:0]   GEST_Y_TH = 12'd120,
+    parameter [11:0]   GEST_Y_TH_LOOSE = 12'd90,
     // 下劈：**整段横向峰值**上限（横向全程几乎没动才认，像素）
     parameter [11:0]   GEST_Y_XMAX = 12'd40,
     // "看到了动作但够不上任何判据"要闪青色提示的最小整段位移（小于它当噪声，不闪）
@@ -356,10 +359,9 @@ module recog_top #(
     // 不用串口、不用按键：这个"闪条"同时并进 isp_top 的叠加使能（S_ovl_en |= O_gest_flash），
     // 所以哪怕 recog_algo=0（画面本来是纯摄像头）也会闪 —— 挥手就有反应。
     // 想连掩码/准星一起看：短按 KEY4（= 进游戏模式，顺带把 recog_algo 置 1）。
-    // ⚠ 2026-10-11：M2.1（挥手方向）用户实测后决定**先跳过**（识别效果不理想），本行置 0
-    // → 整段挥手逻辑连同可视化一起被综合裁掉，交付版增量 0（额度让给 M2.2）。
-    // 复活办法：本行置 1，同时把 `isp_top.v` 的 `GEST_DBG_SEL` 置 1（那是 DBG P/Q/R 口径）。
-    parameter integer  GEST_VIS = 0,
+    // 【2026-10-16 复活】置回 1：提示条逻辑回到综合里。**但它只在 M2.1 档（10/11）才输出**
+    //   （见 g_gest 里的 S_m21_on），交付档（0/1）画面照样干净；15 档是"关"的对照组。
+    parameter integer  GEST_VIS = 1,
     parameter [7:0]    GEST_FLASH_FRAMES = 8'd24,
     // 提示条画在**对应屏幕边缘**（不是固定条换颜色）：左挥 = 左边竖条、右挥 = 右边竖条、
     // 下劈 = 底部横条、方向不明确 = 顶部细横条。边缘条宽度 = GEST_VIS_W。
@@ -1643,6 +1645,8 @@ module recog_top #(
     wire signed [11:0] S_gest_dy;    // 每帧 dy（用掩码最高行算）
     wire        S_gest_flash;   // 挥手事件后 ~0.4 s 高（并进 isp_top 的叠加使能）
     wire [2:0]  S_gest_vis;     // 闪条色码：0=不闪、3=左(红)、4=右(绿)、6=下(蓝)
+    wire [4:0]  S_gest_cl, S_gest_cr;   // 【2026-10-16】分方向计数：左 / 右（饱和 31）
+    wire [3:0]  S_gest_cd;              //                          下（饱和 15）
 
     generate
     if ((GEST_EN != 0) && (MASK_SRC != 0) && (USE_CENTROID != 0)) begin : g_gest
@@ -1687,6 +1691,10 @@ module recog_top #(
         reg [7:0]  S_gflash;         // 提示条倒计时
         reg [2:0]  S_gdir;           // 1=左 2=右 3=下 4=动作结束但方向不明确
         reg [10:0] S_gcnt;           // 事件计数（只数真事件）
+        // 【2026-10-16 复活】**分方向计数**（上板验收"20 次/方向、≥18/20"直接读这三个，
+        //   比"总数 + 最后一次方向"好对账；5/5/4 位饱和，够 20 次/方向）
+        reg [4:0]  S_gcnt_l, S_gcnt_r;
+        reg [3:0]  S_gcnt_d;
 
         wire S_gmove = S_gok && ((S_gax > GEST_START_TH) || (S_gay > GEST_START_TH));
         wire S_gstop = !S_gok || ((S_gax <= GEST_QUIET_TH) && (S_gay <= GEST_QUIET_TH));
@@ -1698,8 +1706,17 @@ module recog_top #(
         //   起点 → ΔX≈0，剩下的纵向分量（手臂摆动 + 掩码最高行被 ROI 重裁）就把动作判成
         //   下劈 —— 这就是上板实测"横挥出蓝条"的根因。峰值口径下左挥的横向峰值是几百像素，
         //   "下劈要求横向峰值 < GEST_Y_XMAX"结构上不可能成立（判据互斥，不是调门限）。
-        wire S_ghx = (S_gaxm > GEST_X_TH) && ({1'b0, S_gaxm} > {1'b0, S_gaym, 1'b0});
-        wire S_ghy = (S_gdym > GEST_Y_TH) && (S_gaxm < GEST_Y_XMAX);
+        // ---- 【2026-10-16 复活】运行时分档（一版 bit、串口切，照 M2.2 那招）-------------
+        //   档 **10** = M2.1 开 + 默认阈值（X_TH=60 / Y_TH=120）
+        //   档 **11** = M2.1 开 + **松档**（X_TH=40 / Y_TH=90）：先确保"能看到事件"再收紧
+        //   档 **15** = M2.1 **关**（对照：确认画面/准星不变）
+        //   其余档（含交付档 0/1）= M2.1 关（保持交付行为不变）。
+        //   10/11/15 是老肤色预设编号，归一化判据下那些语义已失效，正好拿来给 M2.1 用。
+        wire S_m21_on = (S_cfg == 4'd10) || (S_cfg == 4'd11);
+        wire [11:0] S_x_th = (S_cfg == 4'd11) ? GEST_X_TH_LOOSE : GEST_X_TH;
+        wire [11:0] S_y_th = (S_cfg == 4'd11) ? GEST_Y_TH_LOOSE : GEST_Y_TH;
+        wire S_ghx = (S_gaxm > S_x_th) && ({1'b0, S_gaxm} > {1'b0, S_gaym, 1'b0});
+        wire S_ghy = (S_gdym > S_y_th) && (S_gaxm < GEST_Y_XMAX);
         // "看到了动作但够不上任何一条"：只有整段幅度明显大于噪声才打青色提示，
         // 否则掩码抖两下也会算一段、没完没了地闪
         wire S_gbig  = (S_gaxm > GEST_NOISE_TH) || (S_gaym > GEST_NOISE_TH);
@@ -1716,6 +1733,7 @@ module recog_top #(
                 S_gqc  <= 4'd0;  S_glen <= 8'd0;
                 S_gxpk <= 12'sd0; S_gaxm <= 12'd0; S_gaym <= 12'd0; S_gdym <= 12'd0;
                 S_gdir <= 3'd0;  S_gcnt <= 11'd0; S_gflash <= 8'd0;
+        S_gcnt_l <= 5'd0; S_gcnt_r <= 5'd0; S_gcnt_d <= 4'd0;
             end
             else if(I_raw_tuser) begin
                 if(S_gflash != 8'd0) S_gflash <= S_gflash - 8'd1;
@@ -1733,6 +1751,12 @@ module recog_top #(
                         S_gdir   <= S_ghx ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
                         S_gcnt   <= (S_gcnt == 11'h7FF) ? 11'h7FF : (S_gcnt + 11'd1);
                         S_gflash <= GEST_FLASH_FRAMES;
+                        // 分方向计数（只在 M2.1 档口才累加，见 S_m21_on 的注释）
+                        if(S_m21_on) begin
+                            if(S_ghx &&  S_gright) S_gcnt_r <= (S_gcnt_r == 5'h1F) ? 5'h1F : (S_gcnt_r + 5'd1);
+                            else if(S_ghx)         S_gcnt_l <= (S_gcnt_l == 5'h1F) ? 5'h1F : (S_gcnt_l + 5'd1);
+                            else                   S_gcnt_d <= (S_gcnt_d == 4'hF)  ? 4'hF  : (S_gcnt_d + 4'd1);
+                        end
                     end
                     else if(S_ghunk) begin
                         S_gdir   <= 3'd4;                     // 青色：动作看到了、方向够不上
@@ -1769,11 +1793,16 @@ module recog_top #(
             end
         end
 
-        assign S_gest_left  = S_ghevt &  S_ghx & ~S_gright;
-        assign S_gest_right = S_ghevt &  S_ghx &  S_gright;
-        assign S_gest_down  = S_ghevt & ~S_ghx;
+        // 【2026-10-16】事件与提示条都**只在 10/11 档**输出（15 档及交付档 = 完全静默，
+        //   但引擎仍在综合里 —— 这就是"一版 bit 多档现场切"的代价）。
+        assign S_gest_left  = S_m21_on & S_ghevt &  S_ghx & ~S_gright;
+        assign S_gest_right = S_m21_on & S_ghevt &  S_ghx &  S_gright;
+        assign S_gest_down  = S_m21_on & S_ghevt & ~S_ghx;
         assign S_gest_dir   = S_gdir;
         assign S_gest_cnt   = S_gcnt;
+        assign S_gest_cl    = S_gcnt_l;
+        assign S_gest_cr    = S_gcnt_r;
+        assign S_gest_cd    = S_gcnt_d;
         // DBG P：**上一段的整段峰值幅度**（横向 / 向下），一直留到下一段开始 —— 所以
         // 挥完之后再读日志就能看到"这一挥到底走了多少像素"，用来定门限（不用盯着实时值）。
         assign S_gest_sx    = S_gaxm;
@@ -1781,11 +1810,12 @@ module recog_top #(
         assign S_gest_dx    = S_gfx;                     // DBG R：每帧 dx / dy（手顶）
         assign S_gest_dy    = S_gfy;
         // 挥手提示：方向 → 颜色（左红 3 / 右绿 4 / 下蓝 6 / 不明确青 7）；GEST_VIS=0 时恒 0
-        assign S_gest_vis = ((GEST_VIS == 0) || (S_gflash == 8'd0)) ? 3'd0 :
+        // 【2026-10-16】提示条也只在 10/11 档出（交付档 0/1 画面保持干净）
+        assign S_gest_vis = ((GEST_VIS == 0) || (S_gflash == 8'd0) || !S_m21_on) ? 3'd0 :
                             ((S_gdir == 3'd1) ? 3'd3 :
                             ((S_gdir == 3'd2) ? 3'd4 :
                             ((S_gdir == 3'd3) ? 3'd6 : 3'd7)));
-        assign S_gest_flash = (GEST_VIS != 0) && (S_gflash != 8'd0);
+        assign S_gest_flash = (GEST_VIS != 0) && (S_gflash != 8'd0) && S_m21_on;
 
     end
     else begin : g_gest_off
@@ -1801,6 +1831,9 @@ module recog_top #(
         assign S_gest_dy    = 12'sd0;
         assign S_gest_flash = 1'b0;
         assign S_gest_vis   = 3'd0;
+        assign S_gest_cl    = 5'd0;
+        assign S_gest_cr    = 5'd0;
+        assign S_gest_cd    = 4'd0;
     end
     endgenerate
 
@@ -2401,12 +2434,19 @@ module recog_top #(
     //   折叠掉了、一份 LUT 都没占；但留着它就是"下次把 `GEST_DBG` 一开就悄悄涨 LUT"的陷阱。
     //   要复活 M2.1 的 P/Q/R 读数，从 git 历史里恢复这段（见 CHANGELOG 2026-10-11 各轮）。
     // M2.2 按 `M2_DBG` 借 P/Q：P = {峰数[3:0], 2'b0, 指尖行[9:0]}、Q = {手型[2:0], 指尖列[10:0]}
-    assign O_mask_cnt_shift = S_m2_dbg_on ? S_m2_dbg_p
-                                          : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
+    // 【2026-10-16 复活】M2.1 档（10/11）借 P/Q 报事件：
+    //   P(16) = {2'b0, 方向[2:0], 事件总数[10:0]}   —— 方向 1=左 2=右 3=下 4=不明确
+    //   Q(14) = {左计数[4:0], 右计数[4:0], 下计数[3:0]} —— 上板"20 次/方向"直接对这三个数
+    //   （R 保持 M1 的包围盒 y，用来同时盯掩码健康）
+    wire S_m21_dbg_on = (S_cfg == 4'd10) || (S_cfg == 4'd11);
+    assign O_mask_cnt_shift = S_m21_dbg_on ? {2'b0, S_gest_dir, S_gest_cnt}
+                            : S_m2_dbg_on  ? S_m2_dbg_p
+                                           : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
-    assign O_bbox_x         = S_m2_dbg_on ? S_m2_dbg_q
-                                          : ((DIAG_CHROMA != 0) ? S_ch_word_x
-                                                                : {S_xmin[10:4], S_xmax[10:4]});
+    assign O_bbox_x         = S_m21_dbg_on ? {S_gest_cl, S_gest_cr, S_gest_cd}
+                            : S_m2_dbg_on  ? S_m2_dbg_q
+                                           : ((DIAG_CHROMA != 0) ? S_ch_word_x
+                                                                 : {S_xmin[10:4], S_xmax[10:4]});
     assign O_bbox_y         = (DIAG_CHROMA != 0) ? S_ch_word_y
                                                  : {S_ymin[9:4],  S_ymax[9:4]};
 
