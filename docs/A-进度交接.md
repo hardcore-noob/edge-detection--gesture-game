@@ -993,6 +993,38 @@ bit：`bits/M2_NORMSKIN3_20261011.bit`（SHA256 `5147924FB9097A34B6077CD411DE13E
 
 ## 2026-10-11（续 11）　方案 A 落地：**打开 肤色 ∩ 运动 融合**（`SKIN_ONLY` 1→0）
 
+## 2026-10-16　同步上游：队友的 M1（压扁）+ M4a 游戏层已合入本分支（构建通过）
+
+**拉取**：`git fetch --all` → `upstream/main` 从 `f55ee2b` 推到 **`18344ed`**（新 tag
+`m1-done` / `m4a-fruit-screen` / `m4a-gesture-wired`）。队友做了三件事：
+
+1. `69f876b` 把我们的 M1 **压扁**进 main（历史不同源，但内容与我们 `6cc1562` **逐字节一致**
+   —— 用 `git diff 6cc1562 upstream/main -- isp/` 验证过）；
+2. 新增 **M4a 切水果游戏层**：`game_top/game_fruit/game_render/game_sprite_rom/game_param/
+   game_input` + `game_sprite.dat` + `.al` 登记；
+3. `6c95b87` 把游戏层接到参数与追踪：给 `isp_top` 加 `O_track_x/y/locked` 三个输出口；
+   给 `param_ctrl` 加 **B 段 0x80~0xBF 写转发/读回**（`game_param`）——**A 段档位语义未动**，
+   `W 08 000N` 照旧可用。
+   另外他修了 `mask_stats.v` 的 `S_n * S_col_base` → 移位加法（消掉 M1 踩过的 DSP 8→10），
+   这条直接采纳。
+
+**合并（本地 `67edf96`）**：4 个冲突的解法：
+
+- `recog_top.v`（17 块）：队友对该文件**零改动** → 直接取我方（M1+M2 超集），未丢任何队友内容；
+- `isp_top.v`（3 块）：补回队友的 3 个追踪口 + 保留我方 M2.1/M2.2 口；
+  **`MASK_PREVIEW` 改回 0**（常开会把掩码烤进 DDR 帧 → 游戏背景带红叠加）；
+  另加 `S_dbg_ovl`：档 **5/12/13/14 也打开叠加**，否则做归因时看不到掩码；
+- 两个文档：**双方内容都保留**（我方 10-11 的 M2 记录 + 队友 10-13~16 的记录）。
+
+**构建**：合并后先报 `HDL-8007 game_* is a black box` —— 正是开工包写明的坑（新增 `.v` 必须
+同步进两个 `.prj`）→ 跑 `tools/new_worktree_runs.ps1 -SyncOnly`（补登记 5 个 game 模块 ×2）后
+**一次 PnR 通过**：`13710 LUT6 / 15919 slices（75.03%）/ ERAM 72 / DSP 8 / Setup +465 ps /
+Hold +20 ps`（slices ≤85%、WNS ≥+300 ps 都过）。bit：
+`bits/M2_MERGED_M4A_20261016.bit`（SHA256 `1337103DFD0DFC42E1D5D3991F6F5011BA60020AD12F53530F3B594C252E5D93`）。
+
+**下一步**：M2.2 四档归因可在这一版 bit 上继续（档位语义未变）；本地领先 `origin/feat/m1-mask`
+**28 个提交**，未推送（等用户明确说"去 PR"）。
+
 **关键发现**：`MASK_SRC` 本来就是 2（融合），但 **`SKIN_ONLY=1` 把运动掩码短路成了全 1** ——
 `assign S_motion_mask = S_skin_only ? 4'b1111 : ...`，于是 `融合 = 肤色 ∧ 运动` 退化成
 "只看肤色"，静止的暖桌面全过。这才是"桌面高亮 + 准星被桌面拽"的**总开关**。
