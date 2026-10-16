@@ -378,6 +378,9 @@ module recog_top #(
     //   * 滞回：连续 M2_LOCK_FRAMES 帧同类才改状态（照 M1 的 LOCK_FRAMES 写法）。
     //   * 可视化：在指尖画画一个小方点，颜色 = 手型（黄=张开 / 红=握拳 / 不画=未知）。
     parameter integer  M2_EN = 1,
+    // 【2026-10-16】准星观测源：**1 = 指尖**（M2.2 的掩码最高点，用户指定）、
+    //   0 = 退回 M1 的掩码质心（同板 A/B 用）。只换观测源，α-β/死区/HOLD/LOCK/ROI 都不动。
+    parameter integer  TRACK_FROM_TIP = 1,
     // 顶带：以"上一帧掩码最高行 S_ymin"为中心，向上 M2_TOP_UP、向下 M2_TOP_DN 像素
     parameter [9:0]    M2_TOP_UP = 10'd16,
     parameter [9:0]    M2_TOP_DN = 10'd48,
@@ -1647,6 +1650,10 @@ module recog_top #(
     wire [2:0]  S_gest_vis;     // 闪条色码：0=不闪、3=左(红)、4=右(绿)、6=下(蓝)
     wire [4:0]  S_gest_cl, S_gest_cr;   // 【2026-10-16】分方向计数：左 / 右（饱和 31）
     wire [3:0]  S_gest_cd;              //                          下（饱和 15）
+    // 【2026-10-16】M2.2 指尖导出（给跟踪器当观测源；g_track 里产生，g_notrack 里给 0）
+    wire [10:0] S_tip_x;
+    wire [9:0]  S_tip_y;
+    wire        S_tip_ok;
 
     generate
     if ((GEST_EN != 0) && (MASK_SRC != 0) && (USE_CENTROID != 0)) begin : g_gest
@@ -1999,9 +2006,18 @@ module recog_top #(
         wire [9:0]  S_obs_y_raw = TRACK_Y_FROM_TOP ? S_ymin[9:0] : S_by_sum[10:1];
         // 质心由模块级 generate 块 g_cent / g_cent_off 产生（见下面"质心 ÷ 像素数"
         // 那一段）；质心不可信（像素数不够 / USE_CENTROID=0）时退回包围盒中心。
-        // S1：观测源统一 —— 始终用**质心**（质心无效时保持上一帧有效值，不再跳去包围盒中心）
-        wire [10:0] S_obs_x = S_cent_x;
-        wire [9:0]  S_obs_y = S_cent_y;
+        // 【2026-10-16 用户指定】观测源：**掩码质心 → 指尖**（M2.2 的掩码最高点）。
+        //   其余一律不动：α-β 平滑、死区、HOLD/LOCK 滞回、ROI 门控照旧。
+        //   相位对齐：`S_tip_*` 由 g_track 的 M2.2 段在**帧首锁存**，与 `S_cent_*` 同为
+        //   "刚结束那一帧"的结果 ⇒ 直接替换即可，不需要额外延时。
+        //   有效性：指尖没找到（`S_tip_ok=0`）时**不喂旧值**，而是让 `S_hit` 判为未命中
+        //   （见下面的 S_hit）—— 位置冻结、连续 HOLD_FRAMES 帧才丢锁，行为与 M1 一致。
+        //   回退口径：`TRACK_FROM_TIP=0` 就退回质心（M1 的 S1 行为），同板 A/B 用。
+        // 防呆：`TRACK_FROM_TIP=1` 但 `M2_EN=0`（指尖整段被裁）时自动退回质心，
+        // 否则 S_tip_ok 恒 0 → 永远命中不了、准星永远锁不上。
+        wire S_use_tip = (TRACK_FROM_TIP != 0) && (M2_EN != 0);
+        wire [10:0] S_obs_x = S_use_tip ? S_tip_x : S_cent_x;
+        wire [9:0]  S_obs_y = S_use_tip ? S_tip_y : S_cent_y;
         // 目标门控：像素数够 + 包围盒够大 + 不细长（挡掉唇膏/笔/碎噪声这类非手目标）
         wire [10:0] S_w     = S_xmax - S_xmin;
         wire [10:0] S_h     = S_ymax - S_ymin;
@@ -2040,7 +2056,8 @@ module recog_top #(
                                  ((S_mcnt > MAX_MASK_PX) ||                       // ① 太大
                                   (S_gate_w > (S_gate_h << GATE_AR_SHIFT)) ||    // ② 又宽又扁（桌子）
                                   (S_gate_h > (S_gate_w << GATE_AR_SHIFT)));     // ③ 又高又窄
-        wire        S_hit   = ((SOFT_TRACK != 0)
+        wire        S_hit   = (!S_use_tip || S_tip_ok) &&
+                             ((SOFT_TRACK != 0)
                             ? ((S_wsum_h >= MIN_WSUM) ||
                                (S_locked && (S_wsum_h >= MIN_WSUM_HOLD)))
                                                 : (S_mcnt >= MIN_CNT)) && !S_gate_bad;
@@ -2214,6 +2231,7 @@ module recog_top #(
         reg [4:0]  a_m2_max;            // 本帧各行的最大段数
         reg [10:0] h_m2_tx, h_m2_ty;    // 上一帧结果（画点 / DBG 用）
         reg [4:0]  h_m2_max;
+        reg        h_m2_got;            // 上一帧有没有找到指尖（2026-10-16：准星观测源要用它判有效）
         reg [2:0]  S_m2_shape;          // 手型状态：0=未知 1=握拳 2=张开
         reg [3:0]  S_m2_agree;          // 连续同类帧数（滞回用）
 
@@ -2235,12 +2253,13 @@ module recog_top #(
                 a_m2_tx <= 11'd0; a_m2_ty <= 11'd0; a_m2_got <= 1'b0;
                 a_m2_py <= 10'd0; a_m2_prev <= 1'b0;
                 a_m2_runs <= 5'd0; a_m2_max <= 5'd0;
-                h_m2_tx <= 11'd0; h_m2_ty <= 11'd0; h_m2_max <= 5'd0;
+                h_m2_tx <= 11'd0; h_m2_ty <= 11'd0; h_m2_max <= 5'd0; h_m2_got <= 1'b0;
                 S_m2_shape <= 3'd0; S_m2_agree <= 4'd0;
             end
             else if(I_raw_tuser) begin
                 // 帧首：锁存这一帧的结果（画点/DBG 用），并清零累加器
                 h_m2_tx  <= a_m2_tx;  h_m2_ty <= a_m2_ty;  h_m2_max <= a_m2_max;
+                h_m2_got <= a_m2_got;
                 a_m2_tx  <= 11'd0;    a_m2_ty <= 11'd0;    a_m2_got <= 1'b0;
                 a_m2_py  <= 10'd0;    a_m2_prev <= 1'b0;
                 a_m2_runs <= 5'd0;    a_m2_max <= 5'd0;
@@ -2281,6 +2300,11 @@ module recog_top #(
         // 给叠加画点用（上一帧结果，帧内稳定）
         wire [10:0] S_m2_tx = h_m2_tx;
         wire [10:0] S_m2_ty = h_m2_ty;
+        // 【2026-10-16】把指尖导出给跟踪器当**观测源**（见上面 S_obs_x/S_obs_y）：
+        //   这里是"上一帧结果"，与 S_cent_* 同相位（都是刚结束那一帧），所以直接可用。
+        assign S_tip_x  = h_m2_tx;
+        assign S_tip_y  = h_m2_ty[9:0];
+        assign S_tip_ok = h_m2_got;
         // DBG 借用：P = {峰数[3:0], 2'b0, 指尖行[9:0]}、Q = {手型[2:0], 指尖列[10:0]}
         assign S_m2_dbg_p  = { h_m2_max[3:0], 2'b0, h_m2_ty[9:0] };
         assign S_m2_dbg_q  = { S_m2_shape, h_m2_tx };
@@ -2388,6 +2412,9 @@ module recog_top #(
         assign S_m2_dbg_p   = 16'd0;
         assign S_m2_dbg_q   = 14'd0;
         assign S_m2_dbg_on  = 1'b0;
+        assign S_tip_x      = 11'd0;
+        assign S_tip_y      = 10'd0;
+        assign S_tip_ok     = 1'b0;
         assign S_roi_x0_w   = 11'd0;
         assign S_roi_x1_w   = 11'd1279;
         assign S_roi_y0_w   = 10'd0;
