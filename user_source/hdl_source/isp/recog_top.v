@@ -1286,6 +1286,8 @@ module recog_top #(
     wire       S_bg_rdy;
     // 【v2 ③】上一帧是否判为"全局光照事件"（在动的块占比超阈值）：整帧冻结背景 + 压掉掩码。
     wire       S_glb_evt;
+    // 光照事件已持续 ≥30 帧（≈0.5 s）⇒ 不是"灯闪一下"，而是光照基线变了 → 强制重建背景。
+    wire       S_evt_long;
     // 运动门归因（视图 4 用）：每像素 2 bit，见 g_motion 里的 F_mot_lv。
     wire [7:0] S_mot_lv;
 
@@ -1383,7 +1385,7 @@ module recog_top #(
                 S_teach_seen <= 4'd0;
             end
             else if(I_raw_tuser) begin
-                if(((REBASE_ON_TEACH != 0) && S_teach_evt) || S_rebase_req) begin
+                if(((REBASE_ON_TEACH != 0) && S_teach_evt) || S_rebase_req || S_evt_long) begin
                     S_reboot     <= BOOT_FRAMES;
                     S_teach_seen <= S_mode_word[19:16];
                 end
@@ -1560,22 +1562,41 @@ module recog_top #(
         // 每块 16×16 的活动像素数（S_act_all）已经数出来了，只要再数"有多少块在动"。
         //   h_mvblk ≥ GLOBAL_BLK_TH（默认 900/3600 = 25%）⇒ 判为**光照事件**：
         //     本帧不更新背景（冻结）、掩码压掉一帧、跟踪 coast（不更新位置）。
-        reg [11:0] a_mvblk, h_mvblk;
+        // ⚠ 2026-10-17 修正（用户指出）：原来只在 phase==3 判、**每个块每帧会数 16 次**
+        //   （3600 块 × 16 行 = 57600，12 位立刻饱和）⇒ S_glb_evt 恒为 1 ⇒ **档 15 掩码全被压掉**。
+        //   现在只在**每个 16×16 块的最后一行**（y[3:0]==15）数一次，上限才是 3600。
+        //   另外加一道保险：事件要求**连续 2 帧**成立（暗场噪声偶尔一帧超阈值不触发）。
+        reg [11:0] a_mvblk, h_mvblk, h_mvblk_p;
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 a_mvblk <= 12'd0;
                 h_mvblk <= 12'd0;
+                h_mvblk_p <= 12'd0;
             end
             else if(I_raw_tuser) begin
-                h_mvblk <= a_mvblk;
-                a_mvblk <= 12'd0;
+                h_mvblk_p <= h_mvblk;
+                h_mvblk   <= a_mvblk;
+                a_mvblk   <= 12'd0;
             end
-            else if(I_raw_tvalid && (S_phase == 2'd3) && (S_act_all >= 5'd4) &&
+            else if(I_raw_tvalid && (S_phase == 2'd3) && (S_y_pos[3:0] == 4'd15) &&
+                    (S_act_all >= 5'd4) &&
                     (a_mvblk != 12'hFFF)) begin
                 a_mvblk <= a_mvblk + 12'd1;
             end
         end
-        assign S_glb_evt = (h_mvblk >= GLOBAL_BLK_TH);
+        assign S_glb_evt = (h_mvblk >= GLOBAL_BLK_TH) && (h_mvblk_p >= GLOBAL_BLK_TH);
+        // 【保险 2】事件持续 >30 帧（≈0.5 s）就一定不是"灯闪一下"，而是**光照基线变了**：
+        //   继续冻背景会永远卡在"全屏在动"（掩码永远被压掉）。这时强制重建背景（复用 S_reboot），
+        //   让基线跟上新灯；重建收敛后事件自然解除。
+        reg [7:0] S_evt_cnt;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)         S_evt_cnt <= 8'd0;
+            else if(I_raw_tuser) begin
+                if(S_glb_evt)    S_evt_cnt <= (S_evt_cnt >= 8'd30) ? 8'd30 : (S_evt_cnt + 8'd1);
+                else             S_evt_cnt <= 8'd0;
+            end
+        end
+        assign S_evt_long = (S_evt_cnt >= 8'd30);
 
         // ---- Step A：更新律 = 带系数的蠕变 --------------------------------------
         // 步长 = clamp(|d| >>> BG_K, 1..BG_STEP_MAX)。钳到 ≥1 是**必须**的：纯移位在
@@ -1643,6 +1664,7 @@ module recog_top #(
         assign S_bg_cur      = 8'd0;
         assign S_bg_rdy      = 1'b1;
         assign S_glb_evt     = 1'b0;
+        assign S_evt_long    = 1'b0;
     end
     endgenerate
 
