@@ -92,6 +92,18 @@
 //   * 绝对常数按 ×2 重定：`SKIN_Y_MIN` 16→32、`SKIN_SAT_MIN` 8→12、`OBS_Y_T*` 32/64/128→64/128/192；
 //     **比例项（Y/8、Y/21）不动** —— 这正是当初换成比例判据的意义。
 //
+// M2 · 运动门 第 6 轮（2026-10-17，用户提出 v2 架构，**档 15**）：
+//   ① **颜色从"门"降级为"分数"**：旧 `肤色 ∧ 运动` 是两个硬门相与，而它们**不是独立证据**
+//      （暖铁皮同时"暖"且"被灯照得在闪"）。v2 改成"**运动给候选区、颜色只在候选区内加权**"：
+//      - 统计/跟踪 → **颜色**（`S_mask_sel` 在 v2 就是颜色掩码，窗口放宽成"暖色方向 + Y/饱和"）；
+//      - 显示/指尖 → **运动 ∩ 颜色**（`S_mask_disp`）⇒ 桌面/铁皮不会被涂红。
+//   ② **静止的手靠跟踪器**：v2 的观测源切回**颜色加权质心**、权重只取颜色分、HOLD 放宽到
+//      40 帧（≈0.67 s）、ROI 收紧到 80；同时**背景快速吸手**（步长 |d|>>1、不看 quiet 门）
+//      —— 手停住后运动掩码消失，但颜色质心继续跟。⇒ quiet 门/区间记忆/自愈大半不再需要。
+//   ③ **全局 vs 局部**：数"本帧有多少块在动"（16×16 块、活动像素 ≥4）。占比 ≥25%
+//      （`GLOBAL_BLK_TH=900/3600`）⇒ 判为**光照事件**：冻结背景、掩码压一帧、跟踪 coast。
+//   档位：**15 = v2**；14 = 旧"② + 运动硬门"（A/B 对照）；① 块级占比门（OCC_EN）退休。
+//
 // 几何提醒：肤色源用的是 RAW 的字几何（字内 [95:72] 是最左像素），而 mask_stats
 // 的列号按"列 4k-1..4k+2"（边缘流那套，边缘图整体比 RAW 左移 1 像素）算，所以
 // 肤色掩码的列号整体偏左 1 像素 —— Q 是 16 像素粒度，看不出来；M2 做指尖坐标
@@ -523,9 +535,21 @@ module recog_top #(
     //   （保持"掩码与权重同源"这条不变量）。
     // 档 15 = ① 生效（配合 ② + 运动门 = 交付候选）；档 14 = 同一套但不带 ①（A/B 对照）。
     // 资源：1 块 ERAM + ≈150 LUT6 + ≈30 FF，0 DSP。OCC_EN=0 时整段不综合。
-    parameter integer  OCC_EN  = 1,
+    // ⚠ 2026-10-17 v2：块级占比门**退休**（用户改主意：密度类判据是错的方向，
+    //   改用"运动候选区"给颜色划定范围）。代码留在下面，OCC_EN=1 可随时复活。
+    parameter integer  OCC_EN  = 0,
     // 达标门限（采样点口径：128 = 100%）。16 ≈ 12.5%；要更狠就调到 24~32。
     parameter [6:0]    OCC_MIN = 7'd16,
+    // ---- 【2026-10-17 v2，档 15】三条新参数 ----------------------------------------
+    // ③ 全局光照事件：本帧"在动的块"（16×16，活动像素 ≥4）超过它 ⇒ 判为光照事件。
+    //    3600 块 → 900 = 25%（用户建议 25~30%）。
+    parameter [11:0]   GLOBAL_BLK_TH = 12'd900,
+    // ② 静止的手靠跟踪器：v2 的"丢失保持"放宽到 40 帧（≈0.67 s @60 fps），
+    //    因为背景会**主动吸手**（步长 |d|>>1），手停住时运动掩码会消失 —— 这时靠
+    //    **颜色质心在 ROI 内继续跟**（不是靠背景模型）。
+    parameter [5:0]    HOLD_FRAMES_V2 = 6'd40,
+    // ② v2 的 ROI 收紧（颜色只在"手大概在哪"的小范围里加权，别让旁边的铁皮抢票）
+    parameter [10:0]   ROI_MARGIN_V2  = 11'd80,
     // ---- M2.2 修正（2026-10-11 用户提议）：**最大尺寸门 + 形状门**--------------------
     // 为什么需要：归一化判据再怎么调也分不开"皮肤(d2/Y≈0.2)"与"暖木桌(d2/Y≈0.25)" —— 间隔太窄。
     //   但两者的**形状/尺寸**完全不同：手再近也占不到大半个画面，桌面/墙面经常是。
@@ -1135,16 +1159,40 @@ module recog_top #(
                            (S_gray0 >= SKIN_Y_MIN) && (S_gray0 <= SKIN_Y_CAP) &&
                            (S_sat0 >= {5'b0, S_gray0[7:SKIN_SAT_SH]}) && (S_sat0 >= SKIN_SAT_MIN) };
     wire [3:0] S_skin_cap_mask = S_skin_norm_mask & S_cappx;
-    // 档 14 = ② 开 + 运动门（候选）；档 15 = 再叠**块级占比门**（"全家桶" = 交付候选）；
-    // 档 13 = 观测档（② 关）
-    wire       S_cap_on  = (S_cfg == 4'd14) || (S_cfg == 4'd15);
-    wire       S_mot_on  = (S_cfg == 4'd2)  || (S_cfg == 4'd14) || (S_cfg == 4'd15);
-    wire       S_occ_act = (S_cfg == 4'd15);   // ① 块级占比门只在 15 档生效（A/B 用 14）
+    // ========================================================================
+    // 【2026-10-17 v2 架构，档 15】① "颜色从门降级为分数"
+    //   旧：肤色硬窗 ∧ 运动硬门 —— 两个门**不是独立证据**（暖铁皮既"暖"又被灯照得在闪），
+    //       一起失效。
+    //   新：**运动给候选区，颜色只在候选区内当分数** —— 颜色不再需要和全世界竞争，
+    //       只要在"手大概在哪"的范围里分辨手指与背景。所以这里把窄比例窗**放开**，
+    //       只留"暖色方向 + Y/饱和合理性"（②的门），窗口判据只给非 v2 档用。
+    //   "暖"= B<Y 且 R>Y（d1<0、d2>0）；② 的 Y 上下限与饱和下限仍然保留（挡近黑与发白）。
+    // ========================================================================
+    function F_skin_warm_px;
+        input signed [8:0] I_d1, I_d2;
+        input [7:0]        I_y, I_sat;
+        begin
+            F_skin_warm_px = I_d1[8] && (I_d2 > 9'sd0) &&
+                             (I_y >= SKIN_Y_MIN) && (I_y <= SKIN_Y_CAP) &&
+                             (I_sat >= SKIN_SAT_MIN) &&
+                             (I_sat >= (I_y >> SKIN_SAT_SH));
+        end
+    endfunction
+    wire [3:0] S_skin_warm_mask = { F_skin_warm_px(S_d1_3, S_d2_3, S_gray3, S_sat3),
+                                    F_skin_warm_px(S_d1_2, S_d2_2, S_gray2, S_sat2),
+                                    F_skin_warm_px(S_d1_1, S_d2_1, S_gray1, S_sat1),
+                                    F_skin_warm_px(S_d1_0, S_d2_0, S_gray0, S_sat0) };
+    // 档 15 = **v2 架构**；档 14 = 旧"② 硬门 + 运动门"（A/B 对照）；档 13 = 观测档
+    wire       S_v2      = (S_cfg == 4'd15);
+    wire       S_cap_on  = (S_cfg == 4'd14);
+    wire       S_mot_on  = (S_cfg == 4'd2) || (S_cfg == 4'd14) || (S_cfg == 4'd15);
+    wire       S_occ_act = 1'b0;               // ① 块级占比门已退休（v2 用运动候选区代替）
 
     // 最终使用的肤色掩码（编译期常量选择，没选中的判据会被综合裁掉）
     wire [3:0] S_skin_use = (SKIN_RULE2 != 0) ? S_skin2_mask :
-                            (S_cap_on ? S_skin_cap_mask :
-                             ((SKIN_NORM != 0)  ? S_skin_norm_mask : S_skin_mask));
+                            (S_v2      ? S_skin_warm_mask :
+                             (S_cap_on ? S_skin_cap_mask :
+                              ((SKIN_NORM != 0)  ? S_skin_norm_mask : S_skin_mask)));
 
     // ========================================================================
     // 【2026-10-16 ⑤：观测档】肤色掩码内 Y / 饱和度的**帧内最小、最大值**
@@ -1236,6 +1284,8 @@ module recog_top #(
     // 背景帧是否已建好（自举/重建窗口内为 0）：没建好时运动门不生效（退回只认肤色）。
     // g_motion 里由 S_bg_ready 驱动，g_nomotion（MASK_SRC≠2）恒 1。
     wire       S_bg_rdy;
+    // 【v2 ③】上一帧是否判为"全局光照事件"（在动的块占比超阈值）：整帧冻结背景 + 压掉掩码。
+    wire       S_glb_evt;
     // 运动门归因（视图 4 用）：每像素 2 bit，见 g_motion 里的 F_mot_lv。
     wire [7:0] S_mot_lv;
 
@@ -1505,13 +1555,43 @@ module recog_top #(
         wire S_quiet_blk = (S_act_all <= BG_QUIET_PX) ||
                            ((S_act_all == 5'd16) && (S_row_abs <= BG_UNIF_MAX));
 
+        // ---- 【v2 ③】"全局 vs 局部"：数本帧有多少块在动 ---------------------------
+        // 铁皮反光的闪来自灯/AWB 的**全局**变化，手是**局部**的 —— 这一点几乎免费：
+        // 每块 16×16 的活动像素数（S_act_all）已经数出来了，只要再数"有多少块在动"。
+        //   h_mvblk ≥ GLOBAL_BLK_TH（默认 900/3600 = 25%）⇒ 判为**光照事件**：
+        //     本帧不更新背景（冻结）、掩码压掉一帧、跟踪 coast（不更新位置）。
+        reg [11:0] a_mvblk, h_mvblk;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                a_mvblk <= 12'd0;
+                h_mvblk <= 12'd0;
+            end
+            else if(I_raw_tuser) begin
+                h_mvblk <= a_mvblk;
+                a_mvblk <= 12'd0;
+            end
+            else if(I_raw_tvalid && (S_phase == 2'd3) && (S_act_all >= 5'd4) &&
+                    (a_mvblk != 12'hFFF)) begin
+                a_mvblk <= a_mvblk + 12'd1;
+            end
+        end
+        assign S_glb_evt = (h_mvblk >= GLOBAL_BLK_TH);
+
         // ---- Step A：更新律 = 带系数的蠕变 --------------------------------------
         // 步长 = clamp(|d| >>> BG_K, 1..BG_STEP_MAX)。钳到 ≥1 是**必须**的：纯移位在
         // |d| < 2^BG_K 时截成 0，小残差永远修不回来（旧代码同样把它钳在 1..8）。
         wire [4:0] S_step_raw = S_row_abs[7:3];   // |d| >> BG_K（BG_K=3；|d| ≤ 255 → ≤ 31）
-        wire [3:0] S_step     = (S_step_raw == 5'd0) ? 4'd1
-                              : ((S_step_raw > {1'b0, BG_STEP_MAX}) ? BG_STEP_MAX
-                                                                    : S_step_raw[3:0]);
+        // 【v2】背景**允许快速吸手**：步长改成 |d|>>1（钳 1..15）。理由（用户 ②）：
+        //   静止的手不靠背景模型保命 —— 跟踪器用**颜色质心**继续跟，背景爱上手就让它上，
+        //   这样 quiet 门/区间记忆/自愈一大半都不需要了。
+        wire [4:0] S_step_raw2 = S_row_abs[7:1];  // |d| >> 1（≤ 127）
+        wire [3:0] S_step     = S_v2
+                              ? ((S_step_raw2 == 5'd0) ? 4'd1
+                                                       : ((S_step_raw2 > 5'd15) ? 4'd15
+                                                                                : S_step_raw2[3:0]))
+                              : ((S_step_raw == 5'd0) ? 4'd1
+                                                      : ((S_step_raw > {1'b0, BG_STEP_MAX}) ? BG_STEP_MAX
+                                                                                           : S_step_raw[3:0]));
         wire [8:0] S_bg_p = {1'b0, S_bg_use} + {5'b0, S_step};
         wire [8:0] S_bg_m = {1'b0, S_bg_use} - {5'b0, S_step};
         wire [7:0] S_up_v = (S_bg_p > 9'd255) ? 8'd255 : S_bg_p[7:0];
@@ -1520,7 +1600,11 @@ module recog_top #(
         // 三种写入时机：① 自举/重建（全帧、无条件）② 全局平移（全帧，GLB_COMP=1）
         //               ③ 蠕变（只有"轮到的那一行"——每块每 16 帧一次机会）
         wire S_upd_full = S_boot_eff || S_glb_upd;
-        wire S_need_upd = S_upd_full || (S_sample_row && S_quiet_blk && (S_row_abs != 9'd0));
+        // v2：**不再看 quiet 门**（背景可以放心吸手），只保留"采样行轮转"和"全局事件冻结"。
+        // 非 v2：保留原来的 quiet 门（块内活动像素数 / 均匀漂移）。
+        wire S_upd_ok   = S_v2 ? 1'b1 : S_quiet_blk;
+        wire S_need_upd = S_upd_full ||
+                          (S_sample_row && S_upd_ok && !(S_v2 && S_glb_evt) && (S_row_abs != 9'd0));
         wire [7:0] S_new = S_boot_eff ? S_row_mean
                          : S_glb_upd  ? F_shift8(S_bg_use, S_glb_delta)
                                       : (S_row_diff[8] ? S_dn_v : S_up_v);
@@ -1558,6 +1642,7 @@ module recog_top #(
         assign S_mot_lv      = 8'd0;
         assign S_bg_cur      = 8'd0;
         assign S_bg_rdy      = 1'b1;
+        assign S_glb_evt     = 1'b0;
     end
     endgenerate
 
@@ -1679,10 +1764,14 @@ module recog_top #(
     endgenerate
 
     // ---- 掩码源选择（编译期常量 → 综合后没有 mux，也没有多余负载）------------
-    // ① 块级占比门作用在**选中的掩码**上（下游的显示/统计/指尖/挥手全都跟着受益）
-    wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ? S_fusion_mask :
+    // 【v2，档 15】**统计/跟踪走颜色，显示/指尖走运动候选区**（见 g_track 里的 S_mask_disp）：
+    //   颜色负责"手大概在哪"（静止的手也能算质心，靠跟踪器保命），
+    //   运动负责"画面上哪块在动"（叠加/指尖只看候选区，桌面和铁皮不会涂红）。
+    // 非 v2 档维持旧的"肤色 ∧ 运动"硬融合。
+    // 全局光照事件（③）期间整帧压掉掩码（否则会"突然糊一片红"）。
+    wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ? (S_v2 ? S_skin_use : S_fusion_mask) :
                                 (MASK_SRC == 1) ? S_skin_mask   : S_edge_mask;
-    wire [3:0] S_mask_sel = S_occ_keep ? S_mask_sel_raw : 4'b0000;
+    wire [3:0] S_mask_sel = (S_occ_keep && !(S_v2 && S_glb_evt)) ? S_mask_sel_raw : 4'b0000;
 
     // ---- mask_stats 的输出（Step 3 要用"上一帧"的包围盒/计数，先声明）---------
     wire [19:0] S_mcnt;
@@ -1778,8 +1867,10 @@ module recog_top #(
                 // `S_motion_mask` 完全相同的逐像素判据（同一块背景 `S_bg_cur`、同一对
                 // 门限 MOTION_TH / 2×MOTION_TH、同一个相对门）。历史上踩过
                 // "掩码走新判据、权重还喂老判据"的坑：桌面不涂红、却照样把准星拽过去。
-                if(!S_mot_use) begin
-                    // 运动门关（非 2 档 / 背景未就绪）→ 权重只看肤色，= M1 交付行为
+                if(!S_mot_use || S_v2) begin
+                    // 运动门关（非 2 档 / 背景未就绪）→ 权重只看肤色，= M1 交付行为。
+                    // 【v2，档 15】**颜色单独成"分"**：运动只负责给出候选区（掩码/显示），
+                    //   权重不再乘运动分 —— 否则静止的手权重归零、质心就没得算了（用户 ②）。
                     S_mo = 2'd2;
                 end
                 else begin
@@ -2270,6 +2361,8 @@ module recog_top #(
     // 资源：≈120~180 LUT6 + ≈90 FF，0 ERAM / 0 DSP。
     // ========================================================================
     wire [3:0]  S_mask_gated;
+    // v2：叠加/指尖专用的掩码（= S_mask_gated ∩ 运动；非 v2 档与 S_mask_gated 相同）
+    wire [3:0]  S_mask_disp;
     wire [10:0] S_trk_x;
     wire [9:0]  S_trk_y;
     wire        S_trk_locked;
@@ -2331,7 +2424,9 @@ module recog_top #(
 
         // ---- 帧首：命中/丢失计数、锁定状态机、α-β、ROI 窗口 ------------------
         reg               S_locked;
-        reg [3:0]         S_hit_cnt, S_miss_cnt;
+        reg [3:0]         S_hit_cnt;
+        // 丢失计数放宽到 6 位：v2 的 HOLD 是 40 帧（≈0.67 s），4 位放不下
+        reg [5:0]         S_miss_cnt;
         reg signed [12:0] S_pos_x, S_pos_y;
         reg signed [12:0] S_vel_x, S_vel_y;
 
@@ -2354,7 +2449,13 @@ module recog_top #(
         //   回退口径：`TRACK_FROM_TIP=0` 就退回质心（M1 的 S1 行为），同板 A/B 用。
         // 防呆：`TRACK_FROM_TIP=1` 但 `M2_EN=0`（指尖整段被裁）时自动退回质心，
         // 否则 S_tip_ok 恒 0 → 永远命中不了、准星永远锁不上。
-        wire S_use_tip = (TRACK_FROM_TIP != 0) && (M2_EN != 0);
+        // 【v2，档 15】观测源切回**颜色加权质心**（用户 ②：静止的手靠跟踪器 ——
+        //   颜色在 ROI 内继续算质心；运动掩码把手吸掉之后仍然跟得住）。
+        wire S_use_tip = (TRACK_FROM_TIP != 0) && (M2_EN != 0) && !S_v2;
+        // 丢失保持阈值：v2 = 40 帧（≈0.67 s），其余档 = HOLD_FRAMES(5)
+        wire [5:0] S_hold_th = S_v2 ? HOLD_FRAMES_V2 : {2'b0, HOLD_FRAMES};
+        // ROI 余量：v2 收紧到 80（颜色只在"手大概在哪"的小范围里加权）
+        wire [10:0] S_roi_m = S_v2 ? ROI_MARGIN_V2 : ROI_MARGIN;
         wire [10:0] S_obs_x = S_use_tip ? S_tip_x : S_cent_x;
         wire [9:0]  S_obs_y = S_use_tip ? S_tip_y : S_cent_y;
         // 目标门控：像素数够 + 包围盒够大 + 不细长（挡掉唇膏/笔/碎噪声这类非手目标）
@@ -2397,7 +2498,8 @@ module recog_top #(
                                  ((S_mcnt > MAX_MASK_PX) ||                       // ① 太大
                                   (S_gate_w > (S_gate_h << GATE_AR_SHIFT)) ||    // ② 又宽又扁（桌子）
                                   (S_gate_h > (S_gate_w << GATE_AR_SHIFT)));     // ③ 又高又窄
-        wire        S_hit   = (!S_use_tip || S_tip_ok) &&
+        // 【v2 ③】全局光照事件那一帧**强制 coast**（不更新位置），跟踪器靠 HOLD 撑过去。
+        wire        S_hit   = (!(S_v2 && S_glb_evt)) && (!S_use_tip || S_tip_ok) &&
                              ((SOFT_TRACK != 0)
                             ? ((S_wsum_h >= MIN_WSUM) ||
                                (S_locked && (S_wsum_h >= MIN_WSUM_HOLD)))
@@ -2421,21 +2523,21 @@ module recog_top #(
             if(!I_rst_n) begin
                 S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
                 S_roi_y0 <= 10'd0;    S_roi_y1 <= 10'd719;
-                S_locked <= 1'b0;     S_hit_cnt <= 4'd0;  S_miss_cnt <= 4'd0;
+                S_locked <= 1'b0;     S_hit_cnt <= 4'd0;  S_miss_cnt <= 6'd0;
                 S_pos_x  <= 13'sd640; S_pos_y  <= 13'sd360;
                 S_vel_x  <= 13'sd0;   S_vel_y  <= 13'sd0;
             end
             else if(I_raw_tuser) begin
                 // (1) 命中/丢失计数与锁定状态
                 if(S_hit) begin
-                    S_miss_cnt <= 4'd0;
+                    S_miss_cnt <= 6'd0;
                     S_hit_cnt  <= (S_hit_cnt == 4'hF) ? 4'hF : (S_hit_cnt + 4'd1);
                     if(!S_locked && (S_hit_cnt >= LOCK_FRAMES)) S_locked <= 1'b1;
                 end
                 else begin
                     S_hit_cnt  <= 4'd0;
-                    S_miss_cnt <= (S_miss_cnt == 4'hF) ? 4'hF : (S_miss_cnt + 4'd1);
-                    if(S_locked && (S_miss_cnt >= HOLD_FRAMES)) S_locked <= 1'b0;
+                    S_miss_cnt <= (S_miss_cnt == 6'h3F) ? 6'h3F : (S_miss_cnt + 6'd1);
+                    if(S_locked && (S_miss_cnt >= S_hold_th)) S_locked <= 1'b0;
                 end
 
                 // (2) α-β 滤波：命中→按观测修正；**丢失→冻结**（不再按速度外推：
@@ -2453,12 +2555,12 @@ module recog_top #(
 
                 // (3) ROI 窗口：命中→按新包围盒外扩；丢失且未锁定→回全帧重搜
                 if(S_hit) begin
-                    S_roi_x0 <= (S_xmin > ROI_MARGIN) ? (S_xmin - ROI_MARGIN) : 11'd0;
-                    S_roi_x1 <= (S_xmax > (11'd1279 - ROI_MARGIN)) ? 11'd1279
-                                                                  : (S_xmax + ROI_MARGIN);
-                    S_roi_y0 <= (S_ymin > ROI_MARGIN) ? (S_ymin[9:0] - ROI_MARGIN[9:0]) : 10'd0;
-                    S_roi_y1 <= (S_ymax > (10'd719 - ROI_MARGIN[9:0])) ? 10'd719
-                                                                       : (S_ymax + ROI_MARGIN[9:0]);
+                    S_roi_x0 <= (S_xmin > S_roi_m) ? (S_xmin - S_roi_m) : 11'd0;
+                    S_roi_x1 <= (S_xmax > (11'd1279 - S_roi_m)) ? 11'd1279
+                                                               : (S_xmax + S_roi_m);
+                    S_roi_y0 <= (S_ymin > S_roi_m) ? (S_ymin[9:0] - S_roi_m[9:0]) : 10'd0;
+                    S_roi_y1 <= (S_ymax > (10'd719 - S_roi_m[9:0])) ? 10'd719
+                                                                    : (S_ymax + S_roi_m[9:0]);
                 end
                 else if(!S_locked) begin
                     S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
@@ -2535,8 +2637,18 @@ module recog_top #(
         wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && S_cfg_vote_on && (S_mv_cnt < VOTE_MIN))
                                 ? 4'd0 : S_m_pick;
 
+        // ---- 【v2，档 15】**显示/指尖 vs 统计/跟踪 分流** -------------------------
+        //   统计（mask_stats → 包围盒/质心 → 跟踪）用**颜色**（S_mask_sel 在 v2 里就是颜色），
+        //     这样手停住、背景把它吸掉之后，跟踪器仍然有得算（用户 ②）。
+        //   显示/指尖用**运动候选区 ∩ 颜色**：桌面/铁皮这些"暖但不动"的东西不会被涂红。
+        wire [3:0] S_m_pick_d = S_v2 ? (S_m_pick_v & S_motion_mask) : S_m_pick_v;
+
         // 喂给 mask_stats 的就是这个"（选中的）开运算 + 多数投票 + ROI 门控"后的掩码
         assign S_mask_gated = S_m_pick_v &
+                              { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
+                                F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
+        // 叠加/指尖用的掩码（v2 额外 ∩ 运动；其余档与 S_mask_gated 完全相同）
+        assign S_mask_disp  = S_m_pick_d &
                               { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
                                 F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
 
@@ -2560,7 +2672,8 @@ module recog_top #(
         // ★ 2026-10-16 解耦：**不再用 S_mask_gated（ROI 门控后）**，改用未门控的 `S_m_pick_v`
         //   （选中的掩码 = 开运算 + 多数投票）+ **M2.2 自己的 x 窗**。这样跟踪器收紧 ROI
         //   不会裁掉指尖/手型；而"只在手附近找"这个约束由 M2 窗自己保证（见 M2_MARGIN）。
-        wire [3:0] S_m2_top  = S_m_pick_v & {4{S_m2_band}} &
+        // v2：指尖/手型也只看**运动候选区**（静止的暖背景不该被当成指尖）
+        wire [3:0] S_m2_top  = S_m_pick_d & {4{S_m2_band}} &
                                { F_in_m2(S_col3), F_in_m2(S_col2),
                                  F_in_m2(S_col1), F_in_m2(S_col0) };
 
@@ -2751,10 +2864,11 @@ module recog_top #(
             end
         endfunction
 
-        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_gated[3], S_skin_use[3], S_motion_mask[3], S_gray3, S_mot_lv[7:6], S_gest_vis),
-                                 F_ovl_view(S_col2, S_y_pos, S_mask_gated[2], S_skin_use[2], S_motion_mask[2], S_gray2, S_mot_lv[5:4], S_gest_vis),
-                                 F_ovl_view(S_col1, S_y_pos, S_mask_gated[1], S_skin_use[1], S_motion_mask[1], S_gray1, S_mot_lv[3:2], S_gest_vis),
-                                 F_ovl_view(S_col0, S_y_pos, S_mask_gated[0], S_skin_use[0], S_motion_mask[0], S_gray0, S_mot_lv[1:0], S_gest_vis) };
+        // 叠加用 S_mask_disp（v2 已 ∩ 运动；其余档与 S_mask_gated 相同）
+        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_disp[3], S_skin_use[3], S_motion_mask[3], S_gray3, S_mot_lv[7:6], S_gest_vis),
+                                 F_ovl_view(S_col2, S_y_pos, S_mask_disp[2], S_skin_use[2], S_motion_mask[2], S_gray2, S_mot_lv[5:4], S_gest_vis),
+                                 F_ovl_view(S_col1, S_y_pos, S_mask_disp[1], S_skin_use[1], S_motion_mask[1], S_gray1, S_mot_lv[3:2], S_gest_vis),
+                                 F_ovl_view(S_col0, S_y_pos, S_mask_disp[0], S_skin_use[0], S_motion_mask[0], S_gray0, S_mot_lv[1:0], S_gest_vis) };
 
         assign S_ovl_sel = S_ovl_rt;
 
@@ -2762,6 +2876,7 @@ module recog_top #(
     else begin : g_notrack
         // MASK_SRC=0（边缘自检回归）时不要 ROI/平滑，保持 M0 的行为
         assign S_mask_gated = S_mask_sel;
+        assign S_mask_disp  = S_mask_sel;
         assign S_trk_x      = 11'd640;
         assign S_trk_y      = 10'd360;
         assign S_trk_locked = 1'b0;
