@@ -1303,7 +1303,9 @@ module recog_top #(
 
         // 行内字号 S_x_grp / 行号 S_y_pos 现在在模块顶部统一维护（ROI/准星也要用）
         wire [1:0] S_phase = S_x_grp[1:0];          // 块内第几拍（0..3）
-        wire [6:0] S_blk_x = S_x_grp[6:2];          // 行内块列 0..79
+        // 【2026-10-18】块列 = x_grp[8:2]（0..79）。原来写的是 [6:2]（只有 5 位、
+        // 0..31），右 2/3 的块全部复用左边 32 个地址，背景/块均值一直是混的。
+        wire [6:0] S_blk_x = S_x_grp[8:2];          // 行内块列 0..79
         wire [5:0] S_band  = S_y_pos[9:4];          // 块行 0..44
         // ---- 帧计数：给"采样行轮转"用（低 4 位 = 本帧的块内采样行号）----------------
         reg [7:0] S_frame_cnt;
@@ -1448,18 +1450,23 @@ module recog_top #(
         // 逐像素 vs 块均值等于纹理检测（木纹/铁皮静止也永远差 20%+）。这里改为块均值
         // 时间差分：一个 16×16 块只有一个"在动/不动"判决，手形仍由像素级肤色决定。
         // 块均值 = 16 行 × 16 像素；每行 phase 3 累加本行和 S_row_sum（12 位）。
-        reg [15:0] S_blk_acc;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n)
-                S_blk_acc <= 16'd0;
-            else if(I_raw_tvalid && (S_phase == 2'd3))
-                S_blk_acc <= (S_y_pos[3:0] == 4'd0) ? {4'b0, S_row_sum}
-                                                   : (S_blk_acc + {4'b0, S_row_sum});
-        end
-        // 块末当拍：累加器里是前 15 行，加上本行 = 整块 256 像素和（≤65280，16 位）
-        wire [16:0] S_blk_sum = ((S_y_pos[3:0] == 4'd0) ? 17'd0 : {1'b0, S_blk_acc}) +
+        // 80 个块各存一个 16 位行和。横扫描下**不能**用一个全局寄存器：
+        // 一行会依次经过 80 个块，每个块的 phase 3 都会把本行和加进同一个寄存器。
+        // phase 2 发地址、phase 3 读回 + 加本行 + 写回；行 0 直接覆盖（天然清零）。
+        wire [6:0]  S_blk_acc_addr = S_blk_x[6:0];
+        wire [15:0] S_blk_acc_q;
+        wire        S_blk_acc_we = I_raw_tvalid && (S_phase == 2'd3);
+        wire [16:0] S_blk_sum = ((S_y_pos[3:0] == 4'd0) ? 17'd0 : {1'b0, S_blk_acc_q}) +
                                 {5'b0, S_row_sum};
         wire [7:0]  S_blk_mean = S_blk_sum[15:8];
+
+        eram_spram #(.DATA_WIDTH(16), .ADDR_WIDTH(7)) u_blk_acc (
+            .I_clk  (I_clk),
+            .I_we   (S_blk_acc_we),
+            .I_addr (S_blk_acc_addr),
+            .I_wdata(S_blk_sum[15:0]),
+            .O_rdata(S_blk_acc_q)
+        );
 
         wire signed [8:0] S_blk_d   = {1'b0, S_blk_mean} - {1'b0, S_bg_use};
         wire [8:0]        S_blk_abs = S_blk_d[8] ? (~S_blk_d + 9'd1) : S_blk_d;
