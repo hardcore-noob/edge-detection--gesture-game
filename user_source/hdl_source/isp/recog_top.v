@@ -2489,6 +2489,42 @@ module recog_top #(
         reg signed [12:0] S_pos_x, S_pos_y;
         reg signed [12:0] S_vel_x, S_vel_y;
 
+        // ---- 【2026-10-18】准星专用位置：掩码质心 + 轻量平滑 -------------------
+        // 游戏刀尖 O_track_x/y 仍走 S_trk_x/y（指尖）；准星单独走质心，避免
+        // 掩码顶边抖动/手指之间跳变把准星带得一直抖。
+        reg [10:0] S_cross_x;
+        reg [9:0]  S_cross_y;
+        wire signed [12:0] S_cross_dx = {2'b0, S_cent_x} - {2'b0, S_cross_x};
+        wire signed [12:0] S_cross_dy = {2'b0, S_cent_y} - {2'b0, S_cross_y};
+        // $signed 必须显式加：无符号位拼接 + 有符号右移的混合表达式默认按无符号算，
+        // 负的修正量会被当成大正数。
+        wire signed [12:0] S_cross_nx = $signed({2'b0, S_cross_x}) + (S_cross_dx >>> 2);
+        wire signed [12:0] S_cross_ny = $signed({2'b0, S_cross_y}) + (S_cross_dy >>> 2);
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_cross_x <= 11'd640;
+                S_cross_y <= 10'd360;
+            end
+            else if(I_raw_tuser) begin
+                if(!S_locked) begin
+                    // 未锁定：直接贴住质心，首次锁定第一帧就在手上
+                    S_cross_x <= S_cent_x;
+                    S_cross_y <= S_cent_y;
+                end
+                else begin
+                    // 锁定后：死区 2 px + α=1/4，滤掉质心残余的 1~2 px 抖动
+                    if((S_cross_dx > 13'sd2) || (S_cross_dx < -13'sd2))
+                        S_cross_x <= S_cross_nx[12] ? 11'd0 :
+                                     (S_cross_nx > 13'sd1279) ? 11'd1279 :
+                                                                S_cross_nx[10:0];
+                    if((S_cross_dy > 13'sd2) || (S_cross_dy < -13'sd2))
+                        S_cross_y <= S_cross_ny[12] ? 10'd0 :
+                                     (S_cross_ny > 13'sd719) ? 10'd719 :
+                                                               S_cross_ny[9:0];
+                end
+            end
+        end
+
         // ---- 观测值：质心（默认）或上一帧包围盒中心（A/B 回退）-----------------
         // 位宽提醒：S_xmin/S_xmax 各 11 位，直接相加会按 11 位回绕（目标到画面右侧
         // 就算错中心），所以先扩宽再 >>1；y 同理（10 → 11 位）。
@@ -2867,10 +2903,11 @@ module recog_top #(
             reg S_x_on, S_y_on, S_x_th, S_y_th, S_bx, S_by, S_border;
             begin
                 // 臂长 ±CROSS_LEN、线宽 ±CROSS_TH（十字两个方向各一条粗线）
-                S_x_on = (I_x + CROSS_LEN >= S_trk_x) && (I_x <= S_trk_x + CROSS_LEN);
-                S_y_on = (I_y + CROSS_LEN >= S_trk_y) && (I_y <= S_trk_y + CROSS_LEN);
-                S_x_th = (I_x + CROSS_TH  >= S_trk_x) && (I_x <= S_trk_x + CROSS_TH);
-                S_y_th = (I_y + CROSS_TH  >= S_trk_y) && (I_y <= S_trk_y + CROSS_TH);
+                // 【2026-10-18】准星走独立的质心通道，不再跟 S_trk_x/y（指尖）。
+                S_x_on = (I_x + CROSS_LEN >= S_cross_x) && (I_x <= S_cross_x + CROSS_LEN);
+                S_y_on = (I_y + CROSS_LEN >= S_cross_y) && (I_y <= S_cross_y + CROSS_LEN);
+                S_x_th = (I_x + CROSS_TH  >= S_cross_x) && (I_x <= S_cross_x + CROSS_TH);
+                S_y_th = (I_y + CROSS_TH  >= S_cross_y) && (I_y <= S_cross_y + CROSS_TH);
                 // ROI 窗口边框：2 像素粗
                 S_bx = ((I_x + 2 >= S_roi_x0) && (I_x <= S_roi_x0 + 1)) ||
                        ((I_x + 2 >= S_roi_x1) && (I_x <= S_roi_x1 + 1));
@@ -2891,8 +2928,8 @@ module recog_top #(
                         (I_y + {6'b0, M2_TIP_R} >= S_m2_ty[9:0]) &&
                         (I_y <= S_m2_ty[9:0] + {6'b0, M2_TIP_R}))
                     F_ovl_view = (S_m2_shape == 3'd2) ? 3'd5 : 3'd3;
-                else if((S_x_on && S_y_th) || (S_y_on && S_x_th))
-                    F_ovl_view = 3'd2;                  // 准星（黄）：所有视图都画
+                else if(S_locked && ((S_x_on && S_y_th) || (S_y_on && S_x_th)))
+                    F_ovl_view = 3'd2;                  // 准星（黄）：锁定后才画
                 // 【2026-10-16 ⑤】视图 13 = **肤色判据观测**：只在过肤色判据的像素上按 Y 分档
                 //   绿 = Y<OBS_Y_T1  青 = T1..T2-1  黄 = T2..T3-1  红 = Y≥OBS_Y_T3。
                 //   阈值按**现场亮度**定（实测肤色 Y<96 ⇒ 默认 32/64/128，反光多半落"红"档）；
