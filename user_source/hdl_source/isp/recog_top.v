@@ -199,7 +199,7 @@ module recog_top #(
     // 【2026-10-18】块级运动门：16×16 块均值 vs 背景块均值。块均值是 256 像素平均，
     // 噪声很低，5 个灰度级就能稳定判出"这块和背景不一样"；逐像素 vs 块均值是纹理检测，
     // 木纹/铁皮静止也永远过门。
-    parameter signed [8:0] BLK_MOTION_TH = 9'sd5,
+    parameter signed [8:0] BLK_MOTION_TH = 9'sd4,
     // MOTION_REL=1：运动门限随**该块自己的背景亮度**缩放（(|d|<<3) > bg，即相对差 12.5%）。
     //   亮度变化是**乘性**的，而 GLB_COMP 只按整帧均值做**加法**补偿 —— 同样的 5% 变化，
     //   均值 60 的块只变 +3，亮块 200 变 +10，补完还留 +7 残差，全堆在最亮的区域。
@@ -1285,6 +1285,8 @@ module recog_top #(
     // 资源：2 块 ERAM + ≈60 FF + ≈150~250 LUT6，0 DSP。
     // ========================================================================
     wire [3:0] S_motion_mask;
+    // 【2026-10-18】该块均值差超过 3×阈值（手覆盖比例高）→ 整块填满，灭手掌内部空洞
+    wire       S_mot_fill;
 
     // 当前像素所在块的背景灰度（g_motion 里赋值；调试图与 DIAG_CHROMA 统计共用）
     wire [7:0] S_bg_cur;
@@ -1489,9 +1491,17 @@ module recog_top #(
         // 那样上一帧稳定=0 会把计数永久锁死。raw new=1 时 +1、new=0 清零，
         // 计数 ≥2 才算稳定在动；单帧纹理闪烁/噪点最多到 1，不会显示。
         wire [1:0] S_mot_cnt = (S_phase == 2'd0) ? S_mot_q[1:0] : S_mot_reg;
+        // 【2026-10-18】把"强块填充"编进 2 位计数的第 3 个状态，避免独立位被 TD 当死逻辑裁掉：
+        //   0 = 静止
+        //   1 = 在动 1 帧（未确认）
+        //   2 = 连续 2 帧在动（弱块，肤色收边）
+        //   3 = 块均值差 ≥16（强块，整块填满）
+        // new=0 清零；new=1 且强块直接到 3；弱块 1→2 饱和。
         wire [1:0] S_mot_cnt_new = !S_mot_blk_new ? 2'd0 :
-                                   (S_mot_cnt == 2'd3) ? 2'd3 : (S_mot_cnt + 2'd1);
+                                   (|S_blk_abs[8:4]) ? 2'd3 :
+                                   ((S_mot_cnt >= 2'd2) ? 2'd2 : (S_mot_cnt + 2'd1));
         wire S_mot_px = (S_mot_cnt >= 2'd2);
+        assign S_mot_fill = (S_mot_cnt == 2'd3);
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 S_mot_reg       <= 2'd0;
@@ -1517,7 +1527,6 @@ module recog_top #(
             .I_wdata({6'b0, S_mot_pend_data}),
             .O_rdata(S_mot_q)
         );
-
         // ---- 打磨③：帧粗均值 → 全局漂移检测（GLB_COMP=1 时生效）--------------
         // Σgray 用 28 位：921600 × 253 = 2.33e8 < 2^28 ✓。粗均值取 Σ>>20（≈真实均值
         // ×0.879，做相对比较够用，省掉除法器）。
@@ -1714,6 +1723,7 @@ module recog_top #(
         // 不建运动支路时（MASK_SRC = 0/1，或 SKIN_ONLY=1）：融合掩码退化成肤色掩码，
         // 且 0 资源开销
         assign S_motion_mask = 4'b1111;
+        assign S_mot_fill    = 1'b0;
         assign S_mot_lv      = 8'd0;
         assign S_bg_cur      = 8'd0;
         assign S_bg_rdy      = 1'b1;
@@ -1732,7 +1742,12 @@ module recog_top #(
     //   ⚠ `S_mot_on` 在**肤色那一段**就定义了（档 2 或档 14）—— 因为档 14 = ② + 运动门
     //     同时开的"最终候选配置"。
     wire S_mot_use = S_mot_on && S_bg_rdy;
-    wire [3:0] S_fusion_mask = S_skin_use & (S_mot_use ? S_motion_mask : 4'b1111);
+    // 【2026-10-18】强运动块整块填满（灭手掌内部空洞）；弱运动块仍用像素级肤色收边。
+    // 注意填充必须**绕过肤色**：写在 S_skin_use & 里面时两个分支都是 skin，填充是空操作
+    // （TD 会直接把它当死逻辑裁掉）。
+    wire [3:0] S_fusion_mask = S_mot_use ?
+        (S_mot_fill ? 4'b1111 : (S_skin_use & S_motion_mask)) :
+        S_skin_use;
 
     // ========================================================================
     // 【2026-10-16 ①：块级占比门】32×32 块"过判据像素占比 ≥ N 才保留"
