@@ -1745,8 +1745,24 @@ module recog_top #(
     // 【2026-10-18】强运动块整块填满（灭手掌内部空洞）；弱运动块仍用像素级肤色收边。
     // 注意填充必须**绕过肤色**：写在 S_skin_use & 里面时两个分支都是 skin，填充是空操作
     // （TD 会直接把它当死逻辑裁掉）。
+    // 【2026-10-18】填充的逐行释放门：只有上一行（同块 16 像素）有肤色时才填。
+    // 手离开后，没有肤色的下一行不再被整块填充拖着，旧位置最多多亮 1 行。
+    reg S_row_skin_acc, S_row_skin_prev;
+    wire S_beat_skin = |S_skin_use;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            S_row_skin_acc  <= 1'b0;
+            S_row_skin_prev <= 1'b0;
+        end
+        else if(I_raw_tvalid) begin
+            S_row_skin_acc <= (S_x_grp[1:0] == 2'd0) ? S_beat_skin
+                                                     : (S_row_skin_acc | S_beat_skin);
+            if(S_x_grp[1:0] == 2'd3)
+                S_row_skin_prev <= S_row_skin_acc | S_beat_skin;
+        end
+    end
     wire [3:0] S_fusion_mask = S_mot_use ?
-        (S_mot_fill ? 4'b1111 : (S_skin_use & S_motion_mask)) :
+        ((S_mot_fill && S_row_skin_prev) ? 4'b1111 : (S_skin_use & S_motion_mask)) :
         S_skin_use;
 
     // ========================================================================
@@ -2646,6 +2662,23 @@ module recog_top #(
         wire signed [12:0] S_pos_hx = S_pos_x + S_vel_x;   // 丢失时按速度外推
         wire signed [12:0] S_pos_hy = S_pos_y + S_vel_y;
 
+        // 【2026-10-18】ROI 以**预测位置**为中心，而不是从“被 ROI 裁剪后的包围盒”反推：
+        // 旧写法形成正反馈 —— 手移出旧 ROI → 掩码被裁 → 包围盒跟着被裁 → ROI 只能
+        // 按 160 px/帧慢慢追，看起来就是“掩码停在原地几帧”。中心取 S_pos_nx/ny
+        // （α-β 已含速度预测），半宽 = 包围盒半宽 + ROI 余量（总尺寸不变）。
+        wire [10:0] S_roi_bw = S_xmax - S_xmin;
+        wire [10:0] S_roi_bh = S_ymax - S_ymin;
+        wire [11:0] S_roi_half_x12 = {1'b0, (S_roi_bw >> 1)} + {1'b0, S_roi_m};
+        wire [11:0] S_roi_half_y12 = {1'b0, (S_roi_bh >> 1)} + {1'b0, S_roi_m[9:0]};
+        wire [10:0] S_roi_half_x = (S_roi_half_x12 > 12'd1279) ? 11'd1279
+                                                               : S_roi_half_x12[10:0];
+        wire [9:0]  S_roi_half_y = (S_roi_half_y12 > 12'd719) ? 10'd719
+                                                              : S_roi_half_y12[9:0];
+        wire signed [13:0] S_roi_px_l = $signed({1'b0, S_pos_nx}) - $signed({3'b0, S_roi_half_x});
+        wire signed [13:0] S_roi_px_h = $signed({1'b0, S_pos_nx}) + $signed({3'b0, S_roi_half_x});
+        wire signed [13:0] S_roi_py_l = $signed({1'b0, S_pos_ny}) - $signed({4'b0, S_roi_half_y});
+        wire signed [13:0] S_roi_py_h = $signed({1'b0, S_pos_ny}) + $signed({4'b0, S_roi_half_y});
+
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
@@ -2680,14 +2713,16 @@ module recog_top #(
                     S_vel_y <= 13'sd0;
                 end
 
-                // (3) ROI 窗口：命中→按新包围盒外扩；丢失且未锁定→回全帧重搜
+                // (3) ROI 窗口：命中→以预测位置为中心；丢失且未锁定→回全帧重搜
                 if(S_hit) begin
-                    S_roi_x0 <= (S_xmin > S_roi_m) ? (S_xmin - S_roi_m) : 11'd0;
-                    S_roi_x1 <= (S_xmax > (11'd1279 - S_roi_m)) ? 11'd1279
-                                                               : (S_xmax + S_roi_m);
-                    S_roi_y0 <= (S_ymin > S_roi_m) ? (S_ymin[9:0] - S_roi_m[9:0]) : 10'd0;
-                    S_roi_y1 <= (S_ymax > (10'd719 - S_roi_m[9:0])) ? 10'd719
-                                                                    : (S_ymax + S_roi_m[9:0]);
+                    S_roi_x0 <= S_roi_px_l[13] ? 11'd0 :
+                                ((S_roi_px_l > 14'sd1279) ? 11'd1279 : S_roi_px_l[10:0]);
+                    S_roi_x1 <= S_roi_px_h[13] ? 11'd0 :
+                                ((S_roi_px_h > 14'sd1279) ? 11'd1279 : S_roi_px_h[10:0]);
+                    S_roi_y0 <= S_roi_py_l[13] ? 10'd0 :
+                                ((S_roi_py_l > 14'sd719) ? 10'd719 : S_roi_py_l[9:0]);
+                    S_roi_y1 <= S_roi_py_h[13] ? 10'd0 :
+                                ((S_roi_py_h > 14'sd719) ? 10'd719 : S_roi_py_h[9:0]);
                 end
                 else if(!S_locked) begin
                     S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
