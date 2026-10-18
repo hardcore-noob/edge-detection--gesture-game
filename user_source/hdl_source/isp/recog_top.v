@@ -196,6 +196,10 @@ module recog_top #(
 
     // 运动阈值：|当前灰度 − 背景灰度| 大于它才算"这个像素在动"。
     parameter signed [8:0] MOTION_TH = 9'sd8,
+    // 【2026-10-18】块级运动门：16×16 块均值 vs 背景块均值。块均值是 256 像素平均，
+    // 噪声很低，5 个灰度级就能稳定判出"这块和背景不一样"；逐像素 vs 块均值是纹理检测，
+    // 木纹/铁皮静止也永远过门。
+    parameter signed [8:0] BLK_MOTION_TH = 9'sd5,
     // MOTION_REL=1：运动门限随**该块自己的背景亮度**缩放（(|d|<<3) > bg，即相对差 12.5%）。
     //   亮度变化是**乘性**的，而 GLB_COMP 只按整帧均值做**加法**补偿 —— 同样的 5% 变化，
     //   均值 60 的块只变 +3，亮块 200 变 +10，补完还留 +7 残差，全堆在最亮的区域。
@@ -338,8 +342,8 @@ module recog_top #(
     // AWB/曝光的整体漂移因此只让背景跟着走，手与背景的对比度保持不变。
     // 默认 0（交付口径，整段被综合裁掉）。**下一轮（Step C）要把它真正接上**：用户定的
     // 语义是"本帧全帧均值相对背景参考的变化 < X% 才允许 quiet 判定生效，否则整帧冻结背景"。
-    parameter integer GLB_COMP = 0,
-    parameter signed [8:0] GLOBAL_TH = 9'sd6,
+    parameter integer GLB_COMP = 1,
+    parameter signed [8:0] GLOBAL_TH = 9'sd4,
 
     // ---- 跟手模式（默认 0 = 原行为）-------------------------------------------
     // ⚠ `FRAME_DIFF`（= 把背景差分换成帧间差分）已随 2026-10-16 的运动门重做**整段删除**：
@@ -1434,6 +1438,68 @@ module recog_top #(
         wire [7:0] S_bg_use = (S_phase == 2'd0) ? S_bg_rdata : S_bg_reg;
         assign S_bg_cur = S_bg_use;     // 调试图出口
 
+        // ---- 【2026-10-18】块级运动门：16×16 块均值 vs 背景块均值 -----------------
+        // 逐像素 vs 块均值等于纹理检测（木纹/铁皮静止也永远差 20%+）。这里改为块均值
+        // 时间差分：一个 16×16 块只有一个"在动/不动"判决，手形仍由像素级肤色决定。
+        // 块均值 = 16 行 × 16 像素；每行 phase 3 累加本行和 S_row_sum（12 位）。
+        reg [15:0] S_blk_acc;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)
+                S_blk_acc <= 16'd0;
+            else if(I_raw_tvalid && (S_phase == 2'd3))
+                S_blk_acc <= (S_y_pos[3:0] == 4'd0) ? {4'b0, S_row_sum}
+                                                   : (S_blk_acc + {4'b0, S_row_sum});
+        end
+        // 块末当拍：累加器里是前 15 行，加上本行 = 整块 256 像素和（≤65280，16 位）
+        wire [16:0] S_blk_sum = ((S_y_pos[3:0] == 4'd0) ? 17'd0 : {1'b0, S_blk_acc}) +
+                                {5'b0, S_row_sum};
+        wire [7:0]  S_blk_mean = S_blk_sum[15:8];
+
+        wire signed [8:0] S_blk_d   = {1'b0, S_blk_mean} - {1'b0, S_bg_use};
+        wire [8:0]        S_blk_abs = S_blk_d[8] ? (~S_blk_d + 9'd1) : S_blk_d;
+        wire S_mot_blk_new = S_bg_rdy && (S_blk_abs > BLK_MOTION_TH);
+        wire S_mot_blk_we  = I_raw_tvalid && (S_phase == 2'd3) &&
+                             (S_y_pos[3:0] == 4'd15);
+
+        // 1-bit 块图（8 位宽只用 bit0）。读写槽与背景 RAM 完全一致：
+        //   phase 2 写上一块、phase 3 预取下一块、块首用直通读出值。
+        // 因此运动判决是"上一帧的块状态"，允许 1 帧延迟。
+        wire [11:0] S_mot_addr;
+        wire [7:0]  S_mot_q;
+        reg         S_mot_reg;
+        reg         S_mot_pend_we;
+        reg         S_mot_pend_data;
+        wire        S_mot_we = (S_phase == 2'd2) && S_mot_pend_we;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_mot_reg       <= 1'b0;
+                S_mot_pend_we   <= 1'b0;
+                S_mot_pend_data <= 1'b0;
+            end
+            else if(I_raw_tvalid) begin
+                if(S_phase != 2'd3)
+                    S_mot_reg <= S_mot_q[0];
+                if(S_phase == 2'd3) begin
+                    S_mot_pend_we   <= S_mot_blk_we;
+                    S_mot_pend_data <= S_mot_blk_new;
+                end
+                else if(S_phase == 2'd2) begin
+                    S_mot_pend_we <= 1'b0;
+                end
+            end
+        end
+        assign S_mot_addr = (S_phase == 2'd3) ? S_addr_next :
+                            (S_phase == 2'd2) ? S_addr_prev : S_addr_cur;
+        wire S_mot_px = (S_phase == 2'd0) ? S_mot_q[0] : S_mot_reg;
+
+        eram_spram #(.DATA_WIDTH(8), .ADDR_WIDTH(12)) u_mot_map (
+            .I_clk  (I_clk),
+            .I_we   (S_mot_we),
+            .I_addr (S_mot_addr),
+            .I_wdata({7'b0, S_mot_pend_data}),
+            .O_rdata(S_mot_q)
+        );
+
         // ---- 打磨③：帧粗均值 → 全局漂移检测（GLB_COMP=1 时生效）--------------
         // Σgray 用 28 位：921600 × 253 = 2.33e8 < 2^28 ✓。粗均值取 Σ>>20（≈真实均值
         // ×0.879，做相对比较够用，省掉除法器）。
@@ -1481,56 +1547,16 @@ module recog_top #(
         endfunction
 
         // ======================================================================
-        // Step B：运动门 = **逐像素 vs 块参考值**（背景帧差分，不是帧差）
-        //   判据（与软权重、块内活动计数**同一份**）：|gray − bg| > MOTION_TH，
-        //   并保留相对门 (|d|<<3) > bg（12.5% 相对差，治"灯照亮的桌面"整体变亮）。
-        //   删掉了旧的块级锁存判决 `{4{S_lat_on}}` + 1 块 ERAM 的锁存表：那是
-        //   "挥一下手出三条不同颜色的条"、"往左挥却报下劈"的根源 —— 一个 16×16 块里
-        //   只要有几像素在动，整块 256 像素就全算"动过"。
-        // 成本：4 路 9 位减法/绝对值 + 4 个比较 ≈ 60 LUT6 / 0 ERAM / 0 DSP。
+        // Step B：运动门 = **块级时间差分**（16×16 块均值 vs 背景块均值）
+        //   旧版逐像素 vs 块均值在数学上是纹理检测：木纹/铁皮的单像素天然偏离块均值
+        //   20%+，静止也永远过门。现在每个块只有一个判决，整块同动/同静；手形仍由
+        //   像素级肤色决定。判决来自上一帧的 1-bit 块图 u_mot_map（1 帧延迟）。
         // ======================================================================
-        wire signed [8:0] S_m0 = {1'b0, S_gray0} - {1'b0, S_bg_use};
-        wire signed [8:0] S_m1 = {1'b0, S_gray1} - {1'b0, S_bg_use};
-        wire signed [8:0] S_m2 = {1'b0, S_gray2} - {1'b0, S_bg_use};
-        wire signed [8:0] S_m3 = {1'b0, S_gray3} - {1'b0, S_bg_use};
-
-        function F_motion_lv1;
-            input signed [8:0] I_d;
-            input [7:0]        I_bg;
-            reg   signed [8:0] S_a;
-            begin
-                S_a = I_d[8] ? (~I_d + 9'd1) : I_d;                  // |d|
-                F_motion_lv1 = (S_a > MOTION_TH) &&
-                               ((MOTION_REL == 0) || ({S_a, 3'b0} > {1'b0, I_bg}));
-            end
-        endfunction
-
         // bit0 = 字内最左像素，与肤色掩码同一 bit 序（否则融合会错位）
-        assign S_motion_mask = { F_motion_lv1(S_m3, S_bg_use),
-                                 F_motion_lv1(S_m2, S_bg_use),
-                                 F_motion_lv1(S_m1, S_bg_use),
-                                 F_motion_lv1(S_m0, S_bg_use) };
-
-        // ---- 【2026-10-16 ⑤】运动门的**归因**（视图 4 用）：每像素 2 bit
-        //   0 = 两个门都不过（静）   1 = 只过绝对门（|d| > MOTION_TH，被相对门挡下）
-        //   2 = 只过相对门（(|d|<<3) > bg，但 |d| 不够）   3 = 两个门都过（= 运动掩码）
-        //   用途：一眼看出"铁皮那片的 |d| 到底有多大、是哪个门把它挡下来的/没挡住"。
-        function [1:0] F_mot_lv;
-            input signed [8:0] I_d;
-            input [7:0]        I_bg;
-            reg   signed [8:0] S_a;
-            reg                S_pa, S_pr;
-            begin
-                S_a  = I_d[8] ? (~I_d + 9'd1) : I_d;         // |d|
-                S_pa = (S_a > MOTION_TH);                     // 绝对门
-                S_pr = (MOTION_REL != 0) && ({S_a, 3'b0} > {1'b0, I_bg});  // 相对门
-                F_mot_lv = (S_pa & S_pr) ? 2'd3 :
-                           (S_pa         ? 2'd1 :
-                            (S_pr        ? 2'd2 : 2'd0));
-            end
-        endfunction
-        assign S_mot_lv = { F_mot_lv(S_m3, S_bg_use), F_mot_lv(S_m2, S_bg_use),
-                            F_mot_lv(S_m1, S_bg_use), F_mot_lv(S_m0, S_bg_use) };
+        assign S_motion_mask = {4{S_mot_px}};
+        // 视图 4：3 = 该块在动（红），0 = 静止；块级判决不再区分绝对/相对门。
+        assign S_mot_lv = { {2{S_mot_px}}, {2{S_mot_px}},
+                            {2{S_mot_px}}, {2{S_mot_px}} };
 
         // ---- 块内活动像素数（0..16）：Step C 的 quiet 门的依据 -------------------
         // 块级信息现在**只剩一个用途**：背景更新的许可（另一个可选用途 = 块内占比门）。
@@ -1554,8 +1580,9 @@ module recog_top #(
         //   ③ 就是"静止的手不掉掩码"的机制（**不靠锁存**）。
         wire signed [8:0] S_row_diff = {1'b0, S_row_mean} - {1'b0, S_bg_use};
         wire [8:0]        S_row_abs  = S_row_diff[8] ? (~S_row_diff + 9'd1) : S_row_diff;
-        wire S_quiet_blk = (S_act_all <= BG_QUIET_PX) ||
-                           ((S_act_all == 5'd16) && (S_row_abs <= BG_UNIF_MAX));
+        // 【2026-10-18】背景更新许可 = 上一帧该块"不动"。静止的手块均值持续偏离
+        // 背景 → 块标志一直为 1 → 手永远不会被吸进背景；手离开后自动恢复更新。
+        wire S_quiet_blk = !S_mot_px;
 
         // ---- 【v2 ③】"全局 vs 局部"：数本帧有多少块在动 ---------------------------
         // 铁皮反光的闪来自灯/AWB 的**全局**变化，手是**局部**的 —— 这一点几乎免费：
@@ -2670,7 +2697,9 @@ module recog_top #(
                               { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
                                 F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
         // 叠加/指尖用的掩码（v2 额外 ∩ 运动；其余档与 S_mask_gated 完全相同）
-        assign S_mask_disp  = S_m_pick_d &
+        // 【2026-10-18】未锁定时不画掩码：跟踪器丢失后 ROI 会退回全帧，若不锁显示，
+        // 手一离开画面就会把全屏杂码暴露出来。统计/捕获仍用 S_mask_gated，不受影响。
+        assign S_mask_disp  = S_m_pick_d & {4{S_locked}} &
                               { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
                                 F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
 
