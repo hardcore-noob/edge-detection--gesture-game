@@ -1389,7 +1389,10 @@ module recog_top #(
                 S_teach_seen <= 4'd0;
             end
             else if(I_raw_tuser) begin
-                if(((REBASE_ON_TEACH != 0) && S_teach_evt) || S_rebase_req || S_evt_long) begin
+                // 【2026-10-18】全屏 80% 以上同时判成在动 → 只可能是背景模型坏了
+                // （手不可能盖住 80%），强制重建，避免错误背景把更新门锁死。
+                if(((REBASE_ON_TEACH != 0) && S_teach_evt) || S_rebase_req ||
+                   S_evt_long || S_badbg_evt) begin
                     S_reboot     <= BOOT_FRAMES;
                     S_teach_seen <= S_mode_word[19:16];
                 end
@@ -1510,6 +1513,7 @@ module recog_top #(
         reg  [7:0]  S_mean_ref;
         reg  signed [8:0] S_glb_delta;
         reg         S_glb_upd;
+        reg         S_glb_shift;     // 整帧有效的全局平移标志（块末消费）
 
         // 刚结束这一帧的粗均值与基准之差（9 位有符号：−255..255）
         wire signed [8:0] S_mean_last = {1'b0, a_gsum[27:20]} - {1'b0, S_mean_ref};
@@ -1522,10 +1526,12 @@ module recog_top #(
                 S_mean_ref  <= 8'd0;
                 S_glb_delta <= 9'sd0;
                 S_glb_upd   <= 1'b0;
+                S_glb_shift <= 1'b0;
             end
             else if(I_raw_tuser) begin
                 S_glb_delta <= S_mean_last;      // 下一帧按这个差值整体平移
                 S_glb_upd   <= S_glb_need;
+                S_glb_shift <= S_glb_need;
                 if(S_glb_need) S_mean_ref <= a_gsum[27:20];
                 a_gsum      <= 28'd0;
             end
@@ -1612,6 +1618,8 @@ module recog_top #(
             end
         end
         assign S_glb_evt = (h_mvblk >= GLOBAL_BLK_TH) && (h_mvblk_p >= GLOBAL_BLK_TH);
+        // 背景模型坏掉的保险：80% 以上块同时判成在动（3600 × 0.8 = 2880）。
+        assign S_badbg_evt = (h_mvblk >= 12'd2880) && (h_mvblk_p >= 12'd2880);
         // 【保险 2】事件持续 >30 帧（≈0.5 s）就一定不是"灯闪一下"，而是**光照基线变了**：
         //   继续冻背景会永远卡在"全屏在动"（掩码永远被压掉）。这时强制重建背景（复用 S_reboot），
         //   让基线跟上新灯；重建收敛后事件自然解除。
@@ -1628,11 +1636,12 @@ module recog_top #(
         // ---- Step A：更新律 = 带系数的蠕变 --------------------------------------
         // 步长 = clamp(|d| >>> BG_K, 1..BG_STEP_MAX)。钳到 ≥1 是**必须**的：纯移位在
         // |d| < 2^BG_K 时截成 0，小残差永远修不回来（旧代码同样把它钳在 1..8）。
-        wire [4:0] S_step_raw = S_row_abs[7:3];   // |d| >> BG_K（BG_K=3；|d| ≤ 255 → ≤ 31）
+        // 【2026-10-18】步长改用**块均值差**（与运动门同一个量），不再用行均值。
+        wire [4:0] S_step_raw = S_blk_abs[7:3];   // |d| >> BG_K（BG_K=3；|d| ≤ 255 → ≤ 31）
         // 【v2】背景**允许快速吸手**：步长改成 |d|>>1（钳 1..15）。理由（用户 ②）：
         //   静止的手不靠背景模型保命 —— 跟踪器用**颜色质心**继续跟，背景爱上手就让它上，
         //   这样 quiet 门/区间记忆/自愈一大半都不需要了。
-        wire [4:0] S_step_raw2 = S_row_abs[7:1];  // |d| >> 1（≤ 127）
+        wire [4:0] S_step_raw2 = S_blk_abs[7:1];  // |d| >> 1（≤ 127）
         wire [3:0] S_step     = S_v2
                               ? ((S_step_raw2 == 5'd0) ? 4'd1
                                                        : ((S_step_raw2 > 5'd15) ? 4'd15
@@ -1645,17 +1654,18 @@ module recog_top #(
         wire [7:0] S_up_v = (S_bg_p > 9'd255) ? 8'd255 : S_bg_p[7:0];
         wire [7:0] S_dn_v = S_bg_m[8] ? 8'd0 : S_bg_m[7:0];
 
-        // 三种写入时机：① 自举/重建（全帧、无条件）② 全局平移（全帧，GLB_COMP=1）
-        //               ③ 蠕变（只有"轮到的那一行"——每块每 16 帧一次机会）
-        wire S_upd_full = S_boot_eff || S_glb_upd;
-        // v2：**不再看 quiet 门**（背景可以放心吸手），只保留"采样行轮转"和"全局事件冻结"。
-        // 非 v2：保留原来的 quiet 门（块内活动像素数 / 均匀漂移）。
-        wire S_upd_ok   = S_v2 ? 1'b1 : S_quiet_blk;
-        wire S_need_upd = S_upd_full ||
-                          (S_sample_row && S_upd_ok && !(S_v2 && S_glb_evt) && (S_row_abs != 9'd0));
-        wire [7:0] S_new = S_boot_eff ? S_row_mean
-                         : S_glb_upd  ? F_shift8(S_bg_use, S_glb_delta)
-                                      : (S_row_diff[8] ? S_dn_v : S_up_v);
+        // 【2026-10-18】三种写入时机全部只在**块末**产生一次写请求：
+        //   ① 自举/重建 ② 全局平移 ③ 块均值蠕变。
+        // 旧版在每一行的 phase 3 都写，自举时同一个块被写 16 次，最后一行胜出；
+        // 背景存的是行均值、运动门比的是块均值，纹理背景上必然全屏判成在动。
+        // v2 不看块标志（背景可以快速吸手），非 v2 在动的块冻结。
+        wire S_upd_ok   = S_v2 ? 1'b1 : !S_mot_blk_new;
+        wire S_need_upd = S_mot_blk_we &&
+                          (S_boot_eff || S_glb_shift ||
+                           (S_upd_ok && !(S_v2 && S_glb_evt) && (S_blk_abs != 9'd0)));
+        wire [7:0] S_new = S_boot_eff ? S_blk_mean
+                         : S_glb_shift ? F_shift8(S_bg_use, S_glb_delta)
+                                       : (S_blk_d[8] ? S_dn_v : S_up_v);
 
         // ---- 写回：决策在 phase==3 产生（整行和、活动计数都齐了），写发生在**下一块的
         //      phase==2**（地址 = S_addr_prev）→ 与 phase 3 的预取读各占一个槽，不会撞车。
