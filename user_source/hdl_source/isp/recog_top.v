@@ -488,9 +488,9 @@ module recog_top #(
     // 上界 = min(Y/4, 硬帽)：比例界（Y>>2）+ M1 的老绝对上限**双保险**。
     //   皮肤 d2/Y≈0.2、|d1|/Y≈0.16 照样过；亮暖桌面（0.3~0.5）被比例界挡，
     //   而"特别亮、比例看着正常但绝对值离谱"的杂光被硬帽挡。
-    parameter [3:0]    NORM_HI_SH  = 4'd2,
-    parameter [8:0]    NORM_D2_HARD = 9'd70,    // M1 的 D2_MAX
-    parameter [8:0]    NORM_D1_HARD = 9'd100    // M1 的 |d1| 上限
+    parameter [3:0]    NORM_HI_SH  = 4'd1,
+    parameter [8:0]    NORM_D2_HARD = 9'd120,   // 放宽：手边缘的 d2 常超过旧 70
+    parameter [8:0]    NORM_D1_HARD = 9'd140    // 放宽：手边缘的 |d1| 常超过旧 100
 ,
     // ---- 【2026-10-16 ②：亮暖反射（铁皮高光）】Y 上下限 + **比例饱和** -------------
     // 用户实测："光反射到铁皮，会显示红色的掩码" —— 铁皮上的灯光反射**又亮又暖**，
@@ -1089,12 +1089,20 @@ module recog_top #(
         input signed [8:0] I_d1, I_d2;   // d1 = B−Y、d2 = R−Y
         input [7:0]        I_y;          // 真 luma
         reg [8:0] S_l, S_h, S_a1;
+        reg signed [9:0] S_band, S_band_a;
+        reg [9:0] S_bmax;
         begin
             // 下界 ≈ (Y>>4) − (Y>>6) ≈ Y/21.3（不用乘法）；再钳到 ≥1 防极暗退化
             S_l  = {5'b0, I_y[7 : NORM_LO_SH]} - {7'b0, I_y[7 : NORM_LO_SUB]};
             S_l  = (S_l <= 9'd1) ? 9'd1 : S_l;
             S_h  = {1'b0, I_y[7 : NORM_HI_SH]};                   // Y >> NORM_HI_SH（默认 Y/4）
             S_a1 = I_d1[8] ? (~I_d1 + 9'd1) : I_d1;               // |d1|
+            // 【2026-10-18】真实肤色在 (|d1|, d2) 平面上是一条斜率≈1 的斜带：
+            // d2 随 |d1| 一起增大。轴对齐矩形会切掉斜带两端、又放进两个角；
+            // 用 |d2 − |d1|| ≤ Y/8（钳 ≥8）作为斜带判据，只用加减/比较。
+            S_band   = {1'b0, I_d2} - {1'b0, S_a1};
+            S_band_a = S_band[9] ? (~S_band + 10'd1) : S_band;
+            S_bmax   = ({2'b0, I_y[7:3]} < 10'd8) ? 10'd8 : {2'b0, I_y[7:3]};
             // ★ 2026-10-11 补的关键条件：d1 = B−Y **必须为负**（皮肤比 Y 更暖，B 小于 Y）。
             //   第一版漏了它、只比 |d1| 的幅度 → 偏冷/中性的表面也满足比例窗 → **整屏变红**。
             //   注意 d2 的正负不用单独判：d2 < 0 时零扩展是个大正数，必然超过上界 S_h。
@@ -1103,7 +1111,8 @@ module recog_top #(
                              (S_a1 >= S_l) && (S_a1 <= S_h) &&
                              (S_a1 <= NORM_D1_HARD) &&
                              ({1'b0, I_d2} >= S_l) && ({1'b0, I_d2} <= S_h) &&
-                             ({1'b0, I_d2} <= NORM_D2_HARD);
+                             ({1'b0, I_d2} <= NORM_D2_HARD) &&
+                             (S_band_a <= S_bmax);
         end
     endfunction
 
@@ -1876,7 +1885,15 @@ module recog_top #(
     //   运动负责"画面上哪块在动"（叠加/指尖只看候选区，桌面和铁皮不会涂红）。
     // 非 v2 档维持旧的"肤色 ∧ 运动"硬融合。
     // 全局光照事件（③）期间整帧压掉掩码（否则会"突然糊一片红"）。
-    wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ? (S_v2 ? S_skin_use : S_fusion_mask) :
+    // 【2026-10-18】显示/统计只走颜色 + ROI：块运动门/整块填充退出显示路径
+    // （它们仍服务背景更新与捕获）。这样不会再出现块级闪烁、横条缺口。
+    // 捕获态（未锁定）仍用"肤色 ∩ 块运动"搜索：避免空场时被静止的暖色桌面/墙面
+    // 先锁住；一旦锁定就切回纯肤色，手形完整、不再受 16×16 块量化影响。
+    // v2（档 15）本来就是颜色统计，不受这一行影响。
+    wire       S_cap_locked;   // 跟踪器已锁定（由 g_track / g_notrack 驱动）
+    wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ?
+                                (S_v2 ? S_skin_use :
+                                 (S_cap_locked ? S_skin_use : S_fusion_mask)) :
                                 (MASK_SRC == 1) ? S_skin_mask   : S_edge_mask;
     wire [3:0] S_mask_sel = (S_occ_keep && !(S_v2 && S_glb_evt)) ? S_mask_sel_raw : 4'b0000;
 
@@ -2516,11 +2533,55 @@ module recog_top #(
         // 只用同一个 96 位字里的水平邻居（j-1 / j / j+1），所以**不引入任何拍延迟**、
         // 不破坏与像素和坐标的对齐、也不占 ERAM；列首/列尾没有外侧邻居时用自身近似。
         // 代价：宽度 ≤2 像素的细窄结构会被抹掉（对手部掩膜是有益的去噪）。
+        // ---- 【2026-10-18】3×3 闭运算：先膨胀再腐蚀，填 1～2 px 肤色小洞 ----
+        // 4 个 320×4 行缓冲（hd/he 各两行）→ 分布式 RAM；输出相对当前行延迟 1 行。
+        // 水平 3 点用上一拍的最右像素做左邻；右边界用本拍最右像素近似。
+        reg [3:0] S_hd_l0 [0:319];
+        reg [3:0] S_hd_l1 [0:319];
+        reg [3:0] S_he_l0 [0:319];
+        reg [3:0] S_he_l1 [0:319];
+        reg [3:0] S_m_prev3;
+        reg [3:0] S_vd_prev3;
+        wire [8:0] S_cidx = S_x_grp[8:0];
+        wire [3:0] S_m_dil = {
+            S_mask_sel[2] | S_mask_sel[3],
+            S_mask_sel[1] | S_mask_sel[2] | S_mask_sel[3],
+            S_mask_sel[0] | S_mask_sel[1] | S_mask_sel[2],
+            S_m_prev3[3] | S_mask_sel[0] | S_mask_sel[1] };
+        wire [3:0] S_vd = S_m_dil | S_hd_l0[S_cidx] | S_hd_l1[S_cidx];
+        wire [3:0] S_vd_ero = {
+            S_vd[2] & S_vd[3],
+            S_vd[1] & S_vd[2] & S_vd[3],
+            S_vd[0] & S_vd[1] & S_vd[2],
+            S_vd_prev3[3] & S_vd[0] & S_vd[1] };
+        wire [3:0] S_close_now = S_vd_ero & S_he_l0[S_cidx] & S_he_l1[S_cidx];
+        // 帧首前两行缓冲未填满，直通原掩码
+        wire [3:0] S_mask_closed = (S_y_pos >= 10'd2) ? S_close_now : S_mask_sel;
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n) begin
+                S_m_prev3  <= 4'd0;
+                S_vd_prev3 <= 4'd0;
+            end
+            else if(I_raw_tuser) begin
+                S_m_prev3  <= 4'd0;
+                S_vd_prev3 <= 4'd0;
+            end
+            else if(I_raw_tvalid) begin
+                // 行首清掉水平左邻，避免上一行末尾串到本行开头
+                S_m_prev3  <= (S_x_grp == 11'd0) ? 4'd0 : S_mask_sel;
+                S_vd_prev3 <= (S_x_grp == 11'd0) ? 4'd0 : S_vd;
+                S_hd_l1[S_cidx] <= S_hd_l0[S_cidx];
+                S_hd_l0[S_cidx] <= S_m_dil;
+                S_he_l1[S_cidx] <= S_he_l0[S_cidx];
+                S_he_l0[S_cidx] <= S_vd_ero;
+            end
+        end
+
         wire [3:0] S_m_erode, S_m_open;
-        assign S_m_erode[0] = S_mask_sel[0] &  S_mask_sel[1];
-        assign S_m_erode[1] = S_mask_sel[1] &  S_mask_sel[0] & S_mask_sel[2];
-        assign S_m_erode[2] = S_mask_sel[2] &  S_mask_sel[1] & S_mask_sel[3];
-        assign S_m_erode[3] = S_mask_sel[3] &  S_mask_sel[2];
+        assign S_m_erode[0] = S_mask_closed[0] &  S_mask_closed[1];
+        assign S_m_erode[1] = S_mask_closed[1] &  S_mask_closed[0] & S_mask_closed[2];
+        assign S_m_erode[2] = S_mask_closed[2] &  S_mask_closed[1] & S_mask_closed[3];
+        assign S_m_erode[3] = S_mask_closed[3] &  S_mask_closed[2];
         assign S_m_open[0]  = S_m_erode[0]  |  S_m_erode[1];
         assign S_m_open[1]  = S_m_erode[1]  |  S_m_erode[0] | S_m_erode[2];
         assign S_m_open[2]  = S_m_erode[2]  |  S_m_erode[1] | S_m_erode[3];
@@ -2692,7 +2753,10 @@ module recog_top #(
                 if(S_hit) begin
                     S_miss_cnt <= 6'd0;
                     S_hit_cnt  <= (S_hit_cnt == 4'hF) ? 4'hF : (S_hit_cnt + 4'd1);
-                    if(!S_locked && (S_hit_cnt >= LOCK_FRAMES)) S_locked <= 1'b1;
+                    // 背景模型没建好之前不允许首次锁定（自举期融合掩码会退回纯肤色，
+                    // 空场里静止的暖色桌面/墙面会把跟踪器先锁走）。
+                    if(!S_locked && S_bg_rdy && (S_hit_cnt >= LOCK_FRAMES))
+                        S_locked <= 1'b1;
                 end
                 else begin
                     S_hit_cnt  <= 4'd0;
@@ -2940,6 +3004,7 @@ module recog_top #(
         assign S_trk_y = (S_pos_y < 13'sd0)    ? 10'd0
                                                : ((S_pos_y > 13'sd719)  ? 10'd719  : S_pos_y[9:0]);
         assign S_trk_locked = S_locked;
+        assign S_cap_locked = S_locked;
 
         // ---- 运行时视图叠加 ---------------------------------------------------
         // 视图号 S_view = 提交字 recog_algo[15:12]（**运行时**，串口 `W 08 000X` 切换，不用重编译）。
@@ -3045,6 +3110,7 @@ module recog_top #(
         assign S_trk_x      = 11'd640;
         assign S_trk_y      = 10'd360;
         assign S_trk_locked = 1'b0;
+        assign S_cap_locked = 1'b1;
         assign S_m2_dbg_p   = 16'd0;
         assign S_m2_dbg_q   = 14'd0;
         assign S_m2_dbg_on  = 1'b0;
