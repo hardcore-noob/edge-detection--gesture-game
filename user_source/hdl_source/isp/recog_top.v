@@ -1189,7 +1189,10 @@ module recog_top #(
     // 档 15 = **v2 架构**；档 14 = 旧"② 硬门 + 运动门"（A/B 对照）；档 13 = 观测档
     wire       S_v2      = (S_cfg == 4'd15);
     wire       S_cap_on  = (S_cfg == 4'd14);
-    wire       S_mot_on  = (S_cfg == 4'd2) || (S_cfg == 4'd14) || (S_cfg == 4'd15);
+        // 【2026-10-18】档 1（交付视图）也接入块级运动门：肤色 ∩ 块运动。
+        // 档 3 仍是"运动门关"的对照组，档 2/14/15 语义不变。
+        wire       S_mot_on  = (S_cfg == 4'd1) || (S_cfg == 4'd2) ||
+                               (S_cfg == 4'd14) || (S_cfg == 4'd15);
     wire       S_occ_act = 1'b0;               // ① 块级占比门已退休（v2 用运动候选区代替）
 
     // 最终使用的肤色掩码（编译期常量选择，没选中的判据会被综合裁掉）
@@ -1469,37 +1472,42 @@ module recog_top #(
         // 因此运动判决是"上一帧的块状态"，允许 1 帧延迟。
         wire [11:0] S_mot_addr;
         wire [7:0]  S_mot_q;
-        reg         S_mot_reg;
+        reg  [1:0]  S_mot_reg;
         reg         S_mot_pend_we;
-        reg         S_mot_pend_data;
+        reg  [1:0]  S_mot_pend_data;
         wire        S_mot_we = (S_phase == 2'd2) && S_mot_pend_we;
+        assign S_mot_addr = (S_phase == 2'd3) ? S_addr_next :
+                            (S_phase == 2'd2) ? S_addr_prev : S_addr_cur;
+        // 【2026-10-18】两帧确认用 **2 位饱和计数**，不能直接把"稳定标志"写回：
+        // 那样上一帧稳定=0 会把计数永久锁死。raw new=1 时 +1、new=0 清零，
+        // 计数 ≥2 才算稳定在动；单帧纹理闪烁/噪点最多到 1，不会显示。
+        wire [1:0] S_mot_cnt = (S_phase == 2'd0) ? S_mot_q[1:0] : S_mot_reg;
+        wire [1:0] S_mot_cnt_new = !S_mot_blk_new ? 2'd0 :
+                                   (S_mot_cnt == 2'd3) ? 2'd3 : (S_mot_cnt + 2'd1);
+        wire S_mot_px = (S_mot_cnt >= 2'd2);
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
-                S_mot_reg       <= 1'b0;
+                S_mot_reg       <= 2'd0;
                 S_mot_pend_we   <= 1'b0;
-                S_mot_pend_data <= 1'b0;
+                S_mot_pend_data <= 2'd0;
             end
             else if(I_raw_tvalid) begin
                 if(S_phase != 2'd3)
-                    S_mot_reg <= S_mot_q[0];
+                    S_mot_reg <= S_mot_q[1:0];
                 if(S_phase == 2'd3) begin
                     S_mot_pend_we   <= S_mot_blk_we;
-                    S_mot_pend_data <= S_mot_blk_new;
+                    S_mot_pend_data <= S_mot_cnt_new;
                 end
                 else if(S_phase == 2'd2) begin
                     S_mot_pend_we <= 1'b0;
                 end
             end
         end
-        assign S_mot_addr = (S_phase == 2'd3) ? S_addr_next :
-                            (S_phase == 2'd2) ? S_addr_prev : S_addr_cur;
-        wire S_mot_px = (S_phase == 2'd0) ? S_mot_q[0] : S_mot_reg;
-
         eram_spram #(.DATA_WIDTH(8), .ADDR_WIDTH(12)) u_mot_map (
             .I_clk  (I_clk),
             .I_we   (S_mot_we),
             .I_addr (S_mot_addr),
-            .I_wdata({7'b0, S_mot_pend_data}),
+            .I_wdata({6'b0, S_mot_pend_data}),
             .O_rdata(S_mot_q)
         );
 
@@ -1659,6 +1667,8 @@ module recog_top #(
         // 旧版在每一行的 phase 3 都写，自举时同一个块被写 16 次，最后一行胜出；
         // 背景存的是行均值、运动门比的是块均值，纹理背景上必然全屏判成在动。
         // v2 不看块标志（背景可以快速吸手），非 v2 在动的块冻结。
+        // 背景更新用**当前帧 raw 判决**冻结：手第一帧就能保护，不需要等两帧确认；
+        // 单帧噪点最多让背景冻结一帧，代价可以忽略。
         wire S_upd_ok   = S_v2 ? 1'b1 : !S_mot_blk_new;
         wire S_need_upd = S_mot_blk_we &&
                           (S_boot_eff || S_glb_shift ||
