@@ -34,7 +34,8 @@ module game_top #(
     // 以后要恢复就把这里改回 1——接口与模块端口一律不用动。
     parameter integer TRAIL_EN  = 0,   // 1 = 画刀光拖尾
     parameter integer PART_EN   = 0,   // 1 = 画粒子
-    parameter integer SLICE_EN  = 0,   // 1 = 开切中判定（不切 → 没分数/白闪/半片）
+    parameter integer FREEHAND_EN = 0, // 1 = 开旧自由挥切判定
+    parameter integer GEST_SLICE_EN = 1, // 1 = 开手势扫掠带判定
     parameter integer INF_LIVES = 1    // 1 = 不掉命、不进"结束"态（演示用）
 ) (
     input  wire        I_clk,
@@ -245,8 +246,9 @@ module game_top #(
     wire [7:0]   S_score;
 
     game_fruit #(
-        .SLICE_EN  (SLICE_EN ),
-        .INF_LIVES (INF_LIVES)
+        .FREEHAND_EN   (FREEHAND_EN   ),
+        .GEST_SLICE_EN (GEST_SLICE_EN ),
+        .INF_LIVES     (INF_LIVES     )
     ) u_game_fruit (
         .I_clk           (I_clk          ),
         .I_rst_n         (I_rst_n        ),
@@ -263,6 +265,11 @@ module game_top #(
         .I_blade_x       (S_blade_x      ),
         .I_blade_y       (S_blade_y      ),
         .I_blade_valid   (S_blade_valid  ),
+        .I_slash_valid   (S_slash_valid  ),
+        .I_slash_x0      (S_band_x0      ),
+        .I_slash_x1      (S_band_x1      ),
+        .I_slash_y0      (S_band_y0      ),
+        .I_slash_y1      (S_band_y1      ),
         .O_obj           (S_obj          ),
         .O_tip_x         (S_tip_x        ),
         .O_tip_y         (S_tip_y        ),

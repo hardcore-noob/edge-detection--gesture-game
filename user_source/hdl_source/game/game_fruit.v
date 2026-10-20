@@ -15,21 +15,22 @@
 //   * 重力每帧加 `I_grav >> 4`（默认 0x40 → 0.25 px/帧²）；
 //   * 初速：垂直 = -(I_v0[15:8] << 5)（默认 0x06 → 12 px/帧 向上），水平 ±(LFSR[2:0] << 4)。
 //
-// 判定（规划 §3 第 5 步 5）：
-//   * **复用刀光的 16 个采样点**做点-圆判定：dx²+dy² ≤ r_test²（r_test = 42 px）；
-//   * 先 AABB 粗筛（|dx| > 42 或 |dy| > 42 直接跳过，不占乘法器）；
-//   * **每帧在消隐期用 1 个 DSP 串行**：全模块只有一处 `*` 表达式 + 操作数 mux；
-//   * 判定只在 vsync 后的消隐期跑，**不进像素通路**（规划 §4.4 第 1 条）。
+// 判定：
+//   * 默认 `FREEHAND_EN=0`：旧"16 采样点点-圆判定"整段不综合（DSP 不增加）；
+//   * `GEST_SLICE_EN=1`：`I_slash_valid` 到来时锁存扫掠矩形，下一帧对 3 个活动槽做
+//     中心点包含判定（`F_in_band`），带内几颗就切几颗；
+//   * 旧自由挥切路径保留：`FREEHAND_EN=1` 时复用 16 个刀光采样点做 dx²+dy² ≤ 42²。
 //
-// 节拍：vsync 上升沿 → PHYS(1) → TRAIL(16) → JUDGE(≤144) → ACT(1) → END(1)，
-//   约 165 拍 ≈ 2.2 us，远小于消隐期的 49500 拍；所有状态在一个 vsync 内收敛。
+// 节拍：vsync 上升沿 → PHYS(1) → SLASH(1，有请求时) → TRAIL(16) → ACT(1) → END(1)；
+//   自由挥切打开时另加 JUDGE(≤144)。所有状态在一个 vsync 内收敛。
 //
 // 延迟：输出都是帧锁存值，供同域的像素通路组合使用；不跨域、不需要 SDC 约束。
 // 时钟域：像素域 75 MHz 单时钟。
-// 资源：约 800 FF、约 450 LUT6、**1 个 DSP**、0 ERAM。
+// 资源：默认配置约 800 FF、约 450 LUT6、0 DSP、0 ERAM；自由挥切打开时 +1 DSP。
 // ============================================================================
 module game_fruit #(
-    parameter integer SLICE_EN  = 1,   // 1 = 开切中判定（0 = 只做抛体，画面调试用）
+    parameter integer FREEHAND_EN = 0, // 1 = 开旧自由挥切判定（本轮默认关）
+    parameter integer GEST_SLICE_EN = 1, // 1 = 开手势扫掠带判定
     parameter integer INF_LIVES = 0    // 1 = 无限命：漏切不扣命、不进"结束"态
 ) (
     input  wire        I_clk,
@@ -51,6 +52,13 @@ module game_fruit #(
     input  wire [11:0] I_blade_x,
     input  wire [11:0] I_blade_y,
     input  wire        I_blade_valid,
+
+    // ---- 手势斩击请求（game_gesture 输出）--------------------------------
+    input  wire        I_slash_valid,
+    input  wire [11:0] I_slash_x0,
+    input  wire [11:0] I_slash_x1,
+    input  wire [11:0] I_slash_y0,
+    input  wire [11:0] I_slash_y1,
 
     // ---- 对象表（6 × 48）--------------------------------------------------
     output wire [287:0] O_obj,
@@ -83,7 +91,8 @@ module game_fruit #(
     localparam [27:0]  R_TEST2 = R_TEST * R_TEST;    // 1764：常量，不进乘法器
 
     localparam [2:0] PH_IDLE = 3'd0, PH_PHYS = 3'd1, PH_TRAIL = 3'd2,
-                     PH_JUDGE = 3'd3, PH_ACT = 3'd4, PH_END = 3'd5;
+                     PH_JUDGE = 3'd3, PH_ACT = 3'd4, PH_END = 3'd5,
+                     PH_SLASH = 3'd6;
 
     // ---- 对象槽 ------------------------------------------------------------
     reg [15:0] S_px [0:5];
@@ -129,6 +138,8 @@ module game_fruit #(
     reg [3:0]  S_j_s;
     reg [1:0]  S_j_f, S_j_sub;
     reg [2:0]  S_hit_f;
+    reg        S_slash_pending;
+    reg [11:0] S_slash_x0, S_slash_x1, S_slash_y0, S_slash_y1;
     reg        S_frame_pend, S_vs_d;
 
     // ---- 判定用的乘法器：全设计唯一的乘法表达式 ---------------------------
@@ -137,9 +148,9 @@ module game_fruit #(
     reg        [27:0] S_acc;
 
     always @(posedge I_clk) begin
-        // SLICE_EN = 0 时这条乘法被常量关掉 → TD 不会推 DSP（资源会还回来）
-        if(SLICE_EN != 0) S_mul_p <= S_mul_a * S_mul_b;
-        else              S_mul_p <= 28'sd0;
+        // FREEHAND_EN = 0 时这条乘法被常量关掉 → TD 不会推 DSP（资源会还回来）
+        if(FREEHAND_EN != 0) S_mul_p <= S_mul_a * S_mul_b;
+        else                 S_mul_p <= 28'sd0;
     end
 
     integer oi;
@@ -237,6 +248,7 @@ module game_fruit #(
                             (S_vy[2][15] == 1'b0);
     wire [1:0]  S_miss_num = {1'b0, S_miss_mask[0]} + {1'b0, S_miss_mask[1]} + {1'b0, S_miss_mask[2]};
     wire [1:0]  S_hit_num  = {1'b0, S_hit_f[0]} + {1'b0, S_hit_f[1]} + {1'b0, S_hit_f[2]};
+    wire        S_slash_take = I_slash_valid && (S_state == 8'd1) && !I_pause;
 
     // ---- 组合：完全离开屏幕才回收槽位（中心 > 751 = 整颗掉到 720 之下）-------
     wire [5:0] S_gone_mask;
@@ -263,6 +275,21 @@ module game_fruit #(
                 F_bcd_add = {I_s[7:4] + 4'd1, lo[3:0] - 4'd10};
             else
                 F_bcd_add = {I_s[7:4], lo[3:0]};
+        end
+    endfunction
+
+    // 手势扫掠带：水果中心（左上角 +32）是否落在矩形带内且在屏内
+    function F_in_band;
+        input [15:0] I_px;
+        input [15:0] I_py;
+        input [11:0] I_x0, I_x1, I_y0, I_y1;
+        reg [12:0] cx, cy;
+        begin
+            cx = {1'b0, I_px[15:4]} + 13'd32;
+            cy = {1'b0, I_py[15:4]} + 13'd32;
+            F_in_band = (cx <= 13'd1279) && (cy <= 13'd719) &&
+                        (cx >= {1'b0, I_x0}) && (cx <= {1'b0, I_x1}) &&
+                        (cy >= {1'b0, I_y0}) && (cy <= {1'b0, I_y1});
         end
     endfunction
 
@@ -317,6 +344,11 @@ module game_fruit #(
             S_j_f       <= 2'd0;
             S_j_sub     <= 2'd0;
             S_hit_f     <= 3'd0;
+            S_slash_pending <= 1'b0;
+            S_slash_x0  <= 12'd0;
+            S_slash_x1  <= 12'd0;
+            S_slash_y0  <= 12'd0;
+            S_slash_y1  <= 12'd0;
             for(oi = 0; oi < 6; oi = oi + 1) begin
                 S_px[oi]     <= 16'd0;
                 S_py[oi]     <= 16'd0;
@@ -377,6 +409,7 @@ module game_fruit #(
                 for(oi = 0; oi < 6; oi = oi + 1) S_missed[oi] <= 1'b0;
                 S_part_en   <= 8'd0;
                 S_trail_en  <= 16'd0;
+                S_slash_pending <= 1'b0;
             end
             else if(I_standby) begin
                 S_state     <= 8'd0;
@@ -384,6 +417,17 @@ module game_fruit #(
                 for(oi = 0; oi < 6; oi = oi + 1) S_missed[oi] <= 1'b0;
                 S_part_en   <= 8'd0;
                 S_trail_en  <= 16'd0;
+                S_slash_pending <= 1'b0;
+            end
+
+            // 手势斩击请求：单拍锁存到下一帧消隐期消费。若同一拍正在消费
+            // 旧请求，PH_SLASH 会看到 S_slash_take=1 而保留新请求。
+            if(S_slash_take) begin
+                S_slash_pending <= 1'b1;
+                S_slash_x0 <= I_slash_x0;
+                S_slash_x1 <= I_slash_x1;
+                S_slash_y0 <= I_slash_y0;
+                S_slash_y1 <= I_slash_y1;
             end
 
             case(S_ph)
@@ -391,6 +435,7 @@ module game_fruit #(
             PH_IDLE: if(S_frame_pend) begin
                 S_frame_pend <= 1'b0;
                 S_ph         <= PH_PHYS;
+                S_hit_f      <= 3'd0;      // 帧首清命中；PH_SLASH / PH_JUDGE 再写
 
                 // 伪随机
                 S_lfsr <= {S_lfsr[14:0], S_lfsr[15] ^ S_lfsr[13] ^ S_lfsr[12] ^ S_lfsr[10]};
@@ -495,9 +540,23 @@ module game_fruit #(
                 else
                     S_part_en <= 8'h00;
 
-                S_ph   <= PH_TRAIL;
+                if((GEST_SLICE_EN != 0) && S_slash_pending) S_ph <= PH_SLASH;
+                else                                         S_ph <= PH_TRAIL;
                 S_tr_i <= 5'd0;
                 S_tr_sub <= 1'b0;
+            end
+            // ----------------------------------------------------------------
+            PH_SLASH: begin
+                // 手势扫掠带：只判 3 个活动水果槽，带内几颗就置几颗。
+                // 水果中心在屏内才参与，避免"刚生成/已出屏"被误切。
+                for(oi = 0; oi < 3; oi = oi + 1) begin
+                    if((S_typ[oi] == 2'd2) &&
+                       F_in_band(S_px[oi], S_py[oi],
+                                 S_slash_x0, S_slash_x1, S_slash_y0, S_slash_y1))
+                        S_hit_f[oi] <= 1'b1;
+                end
+                if(!S_slash_take) S_slash_pending <= 1'b0;
+                S_ph <= PH_TRAIL;
             end
             // ----------------------------------------------------------------
             PH_TRAIL: begin
@@ -523,9 +582,8 @@ module game_fruit #(
                         S_j_s      <= 4'd0;
                         S_j_f      <= 2'd0;
                         S_j_sub    <= 2'd0;
-                        S_hit_f    <= 3'd0;                 // 命中标志清零
-                        if(SLICE_EN != 0) S_ph <= PH_JUDGE;  // 正常：进判定
-                        else              S_ph <= PH_ACT;    // 关判定：直接结算（hit 恒 0，什么都不做）
+                        if(FREEHAND_EN != 0) S_ph <= PH_JUDGE; // 旧自由挥切
+                        else                 S_ph <= PH_ACT;   // 手势命中已在 PH_SLASH 写入
                     end
                     else
                         S_tr_i <= S_tr_i + 5'd1;
