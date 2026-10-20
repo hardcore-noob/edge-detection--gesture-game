@@ -64,7 +64,9 @@ module isp_top #(
     // 游戏层要用（6c95b87 加的 3 个口，合并时保留）
     output [10:0]   O_track_x,
     output [9:0]    O_track_y,
-    output          O_track_locked
+    output          O_track_locked,
+    // 动态手势事件字（M2.1 → 游戏层；40 位，帧锁存，见 recog_top 头注释）
+    output [39:0]   O_gest_word
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -404,7 +406,8 @@ module isp_top #(
         .O_ovl_sel       (S_ovl_sel),
         .O_bg_px         (S_bg_px),
         .O_teach_flash   (S_teach_flash),
-        .O_gest_flash    (S_gest_flash)
+        .O_gest_flash    (S_gest_flash),
+        .O_gest_word     (O_gest_word)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

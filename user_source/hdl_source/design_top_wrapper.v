@@ -286,7 +286,7 @@ module design_top_wrapper (
 
     // VIDEO_TAP 观测（CSI 域 → 像素域）：用 recog_top 的"每帧 toggle"做**整包捕获**，
     // 而不是逐位两级同步——数据在 toggle 之前就已经锁存稳定，捕获时一次搬整包
-    //（tap 12 + 掩码 16 + 包围盒 14+12 + 追踪 11+10+1 = 76 位）；
+    //（tap 12 + 掩码 16 + 包围盒 14+12 + 追踪 11+10+1 + 手势字 40 = 116 位）；
     // 比逐位同步省几十个触发器，跨区走线也同比减少。
     wire [11:0] S_tap_px_shift;      // 每帧 tap 像素数 >>10（应为 900）
     wire [15:0] S_mask_cnt_shift;    // 掩码像素数 >>4
@@ -304,6 +304,8 @@ module design_top_wrapper (
     reg  [10:0] S_trk_x_hold;
     reg  [9:0]  S_trk_y_hold;
     reg         S_trk_locked_hold;
+    wire [39:0] S_gest_word;          // M2.1 动态手势事件字（CSI 域，帧锁存）
+    reg  [39:0] S_gest_word_hold;     // 像素域整包捕获值
 
     // CTRL_SYNC 插座：下行（像素域→CSI 域）与上行（CSI 域→像素域）
     wire [25:0] S_ctrl_down_rx_data;   // CSI 域
@@ -555,6 +557,7 @@ module design_top_wrapper (
             S_trk_x_hold    <= 11'd0;
             S_trk_y_hold    <= 10'd0;
             S_trk_locked_hold <= 1'b0;
+            S_gest_word_hold <= 40'd0;
         end
         else begin
             // 两级同步 + 边沿检测：toggle 稳定后再一次性把整包数据搬进 hold
@@ -567,6 +570,7 @@ module design_top_wrapper (
                 S_trk_x_hold    <= S_trk_x;
                 S_trk_y_hold    <= S_trk_y;
                 S_trk_locked_hold <= S_trk_locked;
+                S_gest_word_hold <= S_gest_word;
             end
         end
     end
@@ -1126,7 +1130,8 @@ isp_top u_isp_top (
 .O_status_toggle (S_obs_toggle),
 .O_track_x       (S_trk_x),
 .O_track_y       (S_trk_y),
-.O_track_locked  (S_trk_locked)
+.O_track_locked  (S_trk_locked),
+.O_gest_word     (S_gest_word)
   );
 
 
@@ -1301,7 +1306,8 @@ isp_top u_isp_top (
         .O_param_rd_data( S_param_b_rd_data ),
         .I_ctrl_x       ( S_trk_x_hold      ),
         .I_ctrl_y       ( {1'b0, S_trk_y_hold} ),
-        .I_ctrl_valid   ( S_trk_locked_hold )
+        .I_ctrl_valid   ( S_trk_locked_hold ),
+        .I_gest_word    ( S_gest_word_hold  )
     );
 
     hdmi_mixer #(

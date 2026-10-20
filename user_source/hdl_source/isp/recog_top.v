@@ -645,7 +645,15 @@ module recog_top #(
     output wire        O_teach_flash,
     // 【M2.1】挥手事件指示（≈0.4 s 高）：isp_top 把它并进叠加使能，于是"挥手 = 屏幕上立刻
     // 出现一条按方向着色的横条"，不用串口、不用按键。平时恒 0；GEST_VIS=0 时恒 0（被裁掉）。
-    output wire        O_gest_flash
+    output wire        O_gest_flash,
+    // 【手势游戏对接】40 位手势事件字（帧锁存，稳定到下一次真事件）：
+    //   [4:0]   seq（独立循环序号，每次真事件 +1）
+    //   [7:5]   dir（1=左 2=右 3=下）
+    //   [15:8]  start_x[10:3]
+    //   [23:16] start_y[9:2]
+    //   [31:24] 起点到峰值的 dx >> 3（有符号 8 位，饱和 ±127）
+    //   [39:32] 起点到峰值的 dy >> 2（有符号 8 位，饱和 ±127）
+    output wire [39:0] O_gest_word
 );
 
     // ---- 模式提交字锁存（同域，无需两级同步）--------------------------------
@@ -2208,6 +2216,8 @@ module recog_top #(
     wire [10:0] S_tip_x;
     wire [9:0]  S_tip_y;
     wire        S_tip_ok;
+    // 【手势游戏对接】事件字由 g_gest / g_gest_off 两分支之一驱动
+    wire [39:0] S_gest_word;
 
     generate
     if ((GEST_EN != 0) && (MASK_SRC != 0) && (USE_CENTROID != 0)) begin : g_gest
@@ -2257,6 +2267,18 @@ module recog_top #(
         reg [4:0]  S_gcnt_l, S_gcnt_r;
         reg [3:0]  S_gcnt_d;
 
+        // ---- 手势游戏对接：起点/峰值坐标与独立循环序号 ---------------------
+        // 起点和峰值都用**指尖坐标**（与 B 的刀尖同基准）；指尖无效时退回
+        // 质心/掩码最高行，保证事件字仍有可用的近似位置。
+        reg [10:0] S_gstart_x;
+        reg [9:0]  S_gstart_y;
+        reg [10:0] S_ghp_x;               // 横向峰值点
+        reg [9:0]  S_ghp_y;
+        reg [10:0] S_gvp_x;               // 向下峰值点
+        reg [9:0]  S_gvp_y;
+        reg [4:0]  S_geseq;               // 独立循环序号（不随 S_gcnt 饱和）
+        reg [39:0] S_gevt_word;
+
         wire S_gmove = S_gok && ((S_gax > GEST_START_TH) || (S_gay > GEST_START_TH));
         wire S_gstop = !S_gok || ((S_gax <= GEST_QUIET_TH) && (S_gay <= GEST_QUIET_TH));
         wire S_gend  = S_gact && ((S_gstop && (S_gqc >= GEST_QUIET_FRAMES)) ||
@@ -2286,6 +2308,24 @@ module recog_top #(
         // 右 = 横向峰值朝正（图像坐标）；GEST_FLIP_X=1 时对调
         wire S_gright = (GEST_FLIP_X != 0) ? ~S_gxpk[11] : S_gxpk[11];
 
+        // ---- 事件字组装 ---------------------------------------------------
+        // 结算时按最终方向选峰值点：横向事件用横向峰值，下劈用向下峰值。
+        wire [10:0] S_gpeak_x = S_ghx ? S_ghp_x : S_gvp_x;
+        wire [9:0]  S_gpeak_y = S_ghx ? S_ghp_y[9:0] : S_gvp_y[9:0];
+        wire [2:0]  S_gdir_new = S_ghx ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
+        wire signed [12:0] S_gdx_evt = $signed({2'b0, S_gpeak_x}) -
+                                       $signed({2'b0, S_gstart_x});
+        wire signed [12:0] S_gdy_evt = $signed({3'b0, S_gpeak_y}) -
+                                       $signed({3'b0, S_gstart_y});
+        wire signed [12:0] S_gdx_q = S_gdx_evt >>> 3;
+        wire signed [12:0] S_gdy_q = S_gdy_evt >>> 2;
+        wire signed [7:0]  S_gdx8 = (S_gdx_q > 13'sd127) ? 8'sd127 :
+                                    (S_gdx_q < -13'sd127) ? -8'sd127 : S_gdx_q[7:0];
+        wire signed [7:0]  S_gdy8 = (S_gdy_q > 13'sd127) ? 8'sd127 :
+                                    (S_gdy_q < -13'sd127) ? -8'sd127 : S_gdy_q[7:0];
+        wire [7:0] S_gsx8 = S_gstart_x[10:3];
+        wire [7:0] S_gsy8 = S_gstart_y[9:2];
+
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 S_gcx1 <= 11'd0; S_gcx2 <= 11'd0; S_gym1 <= 11'd0;
@@ -2294,7 +2334,11 @@ module recog_top #(
                 S_gqc  <= 4'd0;  S_glen <= 8'd0;
                 S_gxpk <= 12'sd0; S_gaxm <= 12'd0; S_gaym <= 12'd0; S_gdym <= 12'd0;
                 S_gdir <= 3'd0;  S_gcnt <= 11'd0; S_gflash <= 8'd0;
-        S_gcnt_l <= 5'd0; S_gcnt_r <= 5'd0; S_gcnt_d <= 4'd0;
+                S_gcnt_l <= 5'd0; S_gcnt_r <= 5'd0; S_gcnt_d <= 4'd0;
+                S_gstart_x <= 11'd0; S_gstart_y <= 10'd0;
+                S_ghp_x <= 11'd0; S_ghp_y <= 10'd0;
+                S_gvp_x <= 11'd0; S_gvp_y <= 10'd0;
+                S_geseq <= 5'd0; S_gevt_word <= 40'd0;
             end
             else if(I_raw_tuser) begin
                 if(S_gflash != 8'd0) S_gflash <= S_gflash - 8'd1;
@@ -2303,15 +2347,28 @@ module recog_top #(
                 if(S_gact) begin
                     if(S_gaex > S_gaxm) begin S_gaxm <= S_gaex; S_gxpk <= S_gex; end
                     if(S_gaey > S_gaym) S_gaym <= S_gaey;
-                    if((S_gey[11] == 1'b0) && (S_gey > {1'b0, S_gdym})) S_gdym <= S_gey[11:0];
+                    if(S_gaex > S_gaxm) begin
+                        S_ghp_x <= S_tip_ok ? S_tip_x : S_cent_x;
+                        S_ghp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                    end
+                    if((S_gey[11] == 1'b0) && (S_gey > {1'b0, S_gdym})) begin
+                        S_gdym <= S_gey[11:0];
+                        S_gvp_x <= S_tip_ok ? S_tip_x : S_cent_x;
+                        S_gvp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                    end
                 end
 
                 if(S_gend) begin
                     // 动作结束：一次性定性 + 出提示条（一个动作只出一次）
                     if(S_ghevt) begin
-                        S_gdir   <= S_ghx ? (S_gright ? 3'd2 : 3'd1) : 3'd3;
+                        S_gdir   <= S_gdir_new;
                         S_gcnt   <= (S_gcnt == 11'h7FF) ? 11'h7FF : (S_gcnt + 11'd1);
                         S_gflash <= GEST_FLASH_FRAMES;
+                        // 事件字用**加一后的序号**锁存，保证 B 的基线（重置后 0）
+                        // 能看见第一次事件；未知方向不进入这里。
+                        S_gevt_word <= {S_gdy8, S_gdx8, S_gsy8, S_gsx8,
+                                        S_gdir_new, (S_geseq + 5'd1)};
+                        S_geseq <= S_geseq + 5'd1;
                         // 分方向计数（只在 M2.1 档口才累加，见 S_m21_on 的注释）
                         if(S_m21_on) begin
                             if(S_ghx &&  S_gright) S_gcnt_r <= (S_gcnt_r == 5'h1F) ? 5'h1F : (S_gcnt_r + 5'd1);
@@ -2331,6 +2388,12 @@ module recog_top #(
                         // 起点 = 检测到动作那一步的**后**一个采样 → "掩码突变一格"不算整段位移
                         S_gx0  <= S_gcx1;
                         S_gy0  <= S_ymin;
+                        S_gstart_x <= S_tip_ok ? S_tip_x : S_cent_x;
+                        S_gstart_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_ghp_x <= S_tip_ok ? S_tip_x : S_cent_x;
+                        S_ghp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_gvp_x <= S_tip_ok ? S_tip_x : S_cent_x;
+                        S_gvp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
                         S_gqc  <= 4'd0;
                         S_glen <= 8'd0;
                         S_gxpk <= 12'sd0;   // 峰值从起点重新开始
@@ -2370,6 +2433,7 @@ module recog_top #(
         assign S_gest_sy    = S_gdym;
         assign S_gest_dx    = S_gfx;                     // DBG R：每帧 dx / dy（手顶）
         assign S_gest_dy    = S_gfy;
+        assign S_gest_word  = S_gevt_word;
         // 挥手提示：方向 → 颜色（左红 3 / 右绿 4 / 下蓝 6 / 不明确青 7）；GEST_VIS=0 时恒 0
         // 【2026-10-16】提示条也只在 10/11 档出（交付档 0/1 画面保持干净）
         assign S_gest_vis = ((GEST_VIS == 0) || (S_gflash == 8'd0) || !S_m21_on) ? 3'd0 :
@@ -2395,10 +2459,12 @@ module recog_top #(
         assign S_gest_cl    = 5'd0;
         assign S_gest_cr    = 5'd0;
         assign S_gest_cd    = 4'd0;
+        assign S_gest_word  = 40'd0;
     end
     endgenerate
 
     assign O_gest_flash = S_gest_flash;
+    assign O_gest_word  = S_gest_word;
 
     // ---- 诊断：帧内 (d1,d2) 极值（DIAG_CHROMA=1 时 Q/R 上报它，不再报包围盒）----
     // 帧内全部像素一起取极值（不做门控），用来量出手的真实色度范围：

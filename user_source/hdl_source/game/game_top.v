@@ -60,6 +60,7 @@ module game_top #(
     input  wire [10:0] I_ctrl_x,
     input  wire [10:0] I_ctrl_y,
     input  wire        I_ctrl_valid,
+    input  wire [39:0] I_gest_word,
 
     // ---- CTRL_SYNC 下行（M4c 起由 C 驱动；本轮为空 → 发自检字，见需求单 3）--
     input  wire [25:0] I_ctrl_down_data,
@@ -119,8 +120,15 @@ module game_top #(
     wire [11:0] S_field_y0, S_field_y1;
     wire [11:0] S_dbg_blade_x, S_dbg_blade_y;
     wire        S_dbg_blade_en, S_dbg_marker_en;
+    wire [7:0]  S_slash_half_w, S_slash_frames;
+    wire        S_slash_valid;
+    wire [1:0]  S_slash_dir;
+    wire [11:0] S_band_x0, S_band_x1, S_band_y0, S_band_y1;
+    wire        S_band_vis;
+    wire [23:0] S_band_color;
     wire        S_cmd_restart, S_cmd_standby, S_cmd_pause;
     wire [15:0] S_state_word, S_blade_pos, S_hit_cnt, S_miss_cnt;
+    wire [3:0]  S_lives, S_state;
     wire [11:0] S_fruit1_x, S_fruit1_y;
     wire [15:0] S_fruit_pos = {S_fruit1_x[10:3], S_fruit1_y[10:3]};   // {x>>3, y>>3}
 
@@ -164,7 +172,9 @@ module game_top #(
         .O_dbg_blade_x  (S_dbg_blade_x    ),
         .O_dbg_blade_y  (S_dbg_blade_y    ),
         .O_dbg_blade_en (S_dbg_blade_en   ),
-        .O_dbg_marker_en(S_dbg_marker_en  )
+        .O_dbg_marker_en(S_dbg_marker_en  ),
+        .O_slash_half_w (S_slash_half_w   ),
+        .O_slash_frames (S_slash_frames   )
     );
 
     // ------------------------------------------------------------------------
@@ -198,6 +208,31 @@ module game_top #(
     );
 
     // ------------------------------------------------------------------------
+    // 动态手势事件 → 斩击请求 + 扫掠带
+    // ------------------------------------------------------------------------
+    game_gesture u_game_gesture (
+        .I_clk          (I_clk          ),
+        .I_rst_n        (I_rst_n        ),
+        .I_vsync        (I_vsync        ),
+        .I_bypass       (I_bypass       ),
+        .I_game_mode    (I_game_mode    ),
+        .I_track_locked (I_ctrl_valid   ),
+        .I_game_running (S_state == 4'd1),
+        .I_ctx          (2'd0           ),
+        .I_gest_word    (I_gest_word    ),
+        .I_half_w       (S_slash_half_w ),
+        .I_flash_frames (S_slash_frames ),
+        .O_slash_valid  (S_slash_valid  ),
+        .O_slash_dir    (S_slash_dir    ),
+        .O_band_x0      (S_band_x0      ),
+        .O_band_x1      (S_band_x1      ),
+        .O_band_y0      (S_band_y0      ),
+        .O_band_y1      (S_band_y1      ),
+        .O_band_vis     (S_band_vis     ),
+        .O_band_color   (S_band_color   )
+    );
+
+    // ------------------------------------------------------------------------
     // 切水果本体
     // ------------------------------------------------------------------------
     wire [287:0] S_obj;
@@ -208,7 +243,6 @@ module game_top #(
     wire [143:0] S_part_off;
     wire [7:0]   S_part_en;
     wire [7:0]   S_score;
-    wire [3:0]   S_lives, S_state;
 
     game_fruit #(
         .SLICE_EN  (SLICE_EN ),
@@ -262,6 +296,7 @@ module game_top #(
     );
 
     wire        S_render_hit;
+    wire        S_render_blend;
     wire [23:0] S_render_col;
 
     game_render u_game_render (
@@ -284,14 +319,28 @@ module game_top #(
         .I_lives       (S_lives        ),
         .I_state       (S_state        ),
         .I_marker_en   (S_dbg_marker_en),
+        .I_band_x0     (S_band_x0      ),
+        .I_band_x1     (S_band_x1      ),
+        .I_band_y0     (S_band_y0      ),
+        .I_band_y1     (S_band_y1      ),
+        .I_band_en     (S_band_vis     ),
+        .I_band_color  (S_band_color   ),
         .O_spr_addr    (S_spr_addr     ),
         .I_spr_px      (S_spr_px       ),
         .O_hit         (S_render_hit   ),
-        .O_color       (S_render_col   )
+        .O_color       (S_render_col   ),
+        .O_blend       (S_render_blend )
     );
 
     // 0 拍叠加：非 de 或旁路时逐位透传（L4 旁路回归靠这条）
-    assign O_pixel_out = (I_de & ~I_bypass & S_render_hit) ? S_render_col : I_pixel_in;
+    wire [8:0] S_blend_r = {1'b0, I_pixel_in[23:16]} + {1'b0, S_render_col[23:16]};
+    wire [8:0] S_blend_g = {1'b0, I_pixel_in[15:8]}  + {1'b0, S_render_col[15:8]};
+    wire [8:0] S_blend_b = {1'b0, I_pixel_in[7:0]}   + {1'b0, S_render_col[7:0]};
+    wire [23:0] S_blend_px = {S_blend_r[8:1], S_blend_g[8:1], S_blend_b[8:1]};
+
+    assign O_pixel_out = (I_de & ~I_bypass & S_render_hit)
+                       ? (S_render_blend ? S_blend_px : S_render_col)
+                       : I_pixel_in;
 
     // ------------------------------------------------------------------------
     // CTRL_SYNC 下行：M0 起每帧第一个 de 发一个往返自检字；
