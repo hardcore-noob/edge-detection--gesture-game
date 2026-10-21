@@ -1899,6 +1899,15 @@ module recog_top #(
     // 先锁住；一旦锁定就切回纯肤色，手形完整、不再受 16×16 块量化影响。
     // v2（档 15）本来就是颜色统计，不受这一行影响。
     wire       S_cap_locked;   // 跟踪器已锁定（由 g_track / g_notrack 驱动）
+    // ---- 行带（2026-10-21）：手部唯一权威 bbox ------------------------------
+    // 由 g_track 里的 hand_band 驱动；ROI、M2 顶带、手势 y_min、DBG Q/R、视图 6
+    // 都以它为基准，避免"掩码看对了、准星却按另一个框算"。
+    wire        S_band_valid;
+    wire [10:0] S_band_xmin, S_band_xmax;
+    wire [9:0]  S_band_ymin, S_band_ymax;
+    wire [19:0] S_band_area;
+    wire [10:0] S_band_cx;
+    wire [9:0]  S_band_cy;
     wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ?
                                 (S_v2 ? S_skin_use :
                                  (S_cap_locked ? S_skin_use : S_fusion_mask)) :
@@ -2028,14 +2037,29 @@ module recog_top #(
         wire [10:0] S_wc1 = S_wc0 + 11'd1;
         wire [10:0] S_wc2 = S_wc0 + 11'd2;
         wire [10:0] S_wc3 = S_wc0 + 11'd3;
-        // **只在 ROI 窗口内投票**：否则画面里别处的"肤色+运动"（手臂/脸）会把质心拽到
-        // 中间，表现就是"掩码看着干净、准星却跟不上手"。
+        // 【2026-10-21】权重窗口 = 行带 ±16 px：只吸收帧间小位移，不把手臂/脸拉进来；
+        // 行带暂无效时退回当前 ROI（搜索态是全帧，锁定态是上一帧 ROI）。
+        wire [11:0] S_w_x1_12 = {1'b0, S_band_xmax} + 12'd16;
+        wire [10:0] S_w_x0 = S_band_valid
+                             ? ((S_band_xmin > 11'd16) ? (S_band_xmin - 11'd16) : 11'd0)
+                             : S_roi_x0_w;
+        wire [10:0] S_w_x1 = S_band_valid
+                             ? ((S_w_x1_12 > 12'd1279) ? 11'd1279 : S_w_x1_12[10:0])
+                             : S_roi_x1_w;
+        wire [10:0] S_w_y1_11 = {1'b0, S_band_ymax} + 11'd16;
+        wire [9:0]  S_w_y0 = S_band_valid
+                             ? ((S_band_ymin > 10'd16) ? (S_band_ymin - 10'd16) : 10'd0)
+                             : S_roi_y0_w;
+        wire [9:0]  S_w_y1 = S_band_valid
+                             ? ((S_w_y1_11 > 11'd719) ? 10'd719 : S_w_y1_11[9:0])
+                             : S_roi_y1_w;
+        // 只在权重窗口内投票：否则画面别处的肤色/运动会把质心拽走。
         function F_w_inroi;
             input [10:0] I_x;
             input [9:0]  I_y;
             begin
-                F_w_inroi = (I_x >= S_roi_x0_w) && (I_x <= S_roi_x1_w) &&
-                            (I_y >= S_roi_y0_w) && (I_y <= S_roi_y1_w);
+                F_w_inroi = (I_x >= S_w_x0) && (I_x <= S_w_x1) &&
+                            (I_y >= S_w_y0) && (I_y <= S_w_y1);
             end
         endfunction
 
@@ -2242,16 +2266,16 @@ module recog_top #(
         reg [10:0] S_gcx1, S_gcx2;   // 质心列（前 1 / 前 2 拍采样）
         reg [10:0] S_gym1;           // y_min（前 1 拍采样）
         reg        S_gv1, S_gv2;     // 前 1 / 前 2 拍采样时"掩码可信"（= 上一帧有手）
-        wire S_gok = S_cent_valid && S_gv1 && S_gv2;
+        wire S_gok = S_band_valid && S_cent_valid && S_gv1 && S_gv2;
 
         wire signed [11:0] S_gfx = S_gok ? ({1'b0, S_gcx1} - {1'b0, S_gcx2}) : 12'sd0;
-        wire signed [11:0] S_gfy = S_gok ? ({1'b0, S_ymin} - {1'b0, S_gym1}) : 12'sd0;
+        wire signed [11:0] S_gfy = S_gok ? ({1'b0, S_band_ymin} - {1'b0, S_gym1}) : 12'sd0;
         wire [11:0] S_gax = S_gfx[11] ? (~S_gfx + 12'd1) : S_gfx;   // |每帧 dx|
         wire [11:0] S_gay = S_gfy[11] ? (~S_gfy + 12'd1) : S_gfy;   // |每帧 dy(手顶)|
 
         // ---- 相对动作起点的位移（整段峰值口径，见下面"为什么不用终点"）------------
         wire signed [11:0] S_gex  = {1'b0, S_gcx1} - {1'b0, S_gx0};   // 横向偏离起点（带符号）
-        wire signed [11:0] S_gey  = {1'b0, S_ymin} - {1'b0, S_gy0};   // 纵向偏离起点（+ = 向下）
+        wire signed [11:0] S_gey  = {1'b0, S_band_ymin} - {1'b0, S_gy0};   // 纵向偏离起点（+ = 向下）
         wire [11:0] S_gaex = S_gex[11] ? (~S_gex + 12'd1) : S_gex;    // |横向偏离|
         wire [11:0] S_gaey = S_gey[11] ? (~S_gey + 12'd1) : S_gey;    // |纵向偏离|
 
@@ -2357,12 +2381,12 @@ module recog_top #(
                     if(S_gaey > S_gaym) S_gaym <= S_gaey;
                     if(S_gaex > S_gaxm) begin
                         S_ghp_x <= S_tip_ok ? S_tip_x : S_cent_x;
-                        S_ghp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_ghp_y <= S_tip_ok ? S_tip_y : S_band_ymin;
                     end
                     if((S_gey[11] == 1'b0) && (S_gey > {1'b0, S_gdym})) begin
                         S_gdym <= S_gey[11:0];
                         S_gvp_x <= S_tip_ok ? S_tip_x : S_cent_x;
-                        S_gvp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_gvp_y <= S_tip_ok ? S_tip_y : S_band_ymin;
                     end
                 end
 
@@ -2395,13 +2419,13 @@ module recog_top #(
                         S_gact <= 1'b1;
                         // 起点 = 检测到动作那一步的**后**一个采样 → "掩码突变一格"不算整段位移
                         S_gx0  <= S_gcx1;
-                        S_gy0  <= S_ymin;
+                        S_gy0  <= S_band_ymin;
                         S_gstart_x <= S_tip_ok ? S_tip_x : S_cent_x;
-                        S_gstart_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_gstart_y <= S_tip_ok ? S_tip_y : S_band_ymin;
                         S_ghp_x <= S_tip_ok ? S_tip_x : S_cent_x;
-                        S_ghp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_ghp_y <= S_tip_ok ? S_tip_y : S_band_ymin;
                         S_gvp_x <= S_tip_ok ? S_tip_x : S_cent_x;
-                        S_gvp_y <= S_tip_ok ? S_tip_y : S_ymin[9:0];
+                        S_gvp_y <= S_tip_ok ? S_tip_y : S_band_ymin;
                         S_gqc  <= 4'd0;
                         S_glen <= 8'd0;
                         S_gxpk <= 12'sd0;   // 峰值从起点重新开始
@@ -2419,7 +2443,7 @@ module recog_top #(
                 // 采样推进（放最后：上面用到的都是"上一拍采样值"）
                 S_gcx2 <= S_gcx1;
                 S_gcx1 <= S_cent_x;
-                S_gym1 <= S_ymin;
+                S_gym1 <= S_band_ymin;
                 S_gv2  <= S_gv1;
                 S_gv1  <= S_cent_valid;
             end
@@ -2593,8 +2617,9 @@ module recog_top #(
 
         // 【2026-10-16】M2.2 专用 x 窗：锚在**上一帧手包围盒** ± `M2_MARGIN`，与跟踪器的
         //   ROI 完全独立（见 M2_MARGIN 参数的注释）。y 由"顶带"限住，这里只判 x。
-        wire [10:0] S_m2_xl = (S_xmin > M2_MARGIN) ? (S_xmin - M2_MARGIN) : 11'd0;
-        wire [11:0] S_m2_xh = {1'b0, S_xmax} + {1'b0, M2_MARGIN};
+        // M2.2 跟随行带 bbox（不再用 ROI 裁剪后的 mask_stats 包围盒）
+        wire [10:0] S_m2_xl = (S_band_xmin > M2_MARGIN) ? (S_band_xmin - M2_MARGIN) : 11'd0;
+        wire [11:0] S_m2_xh = {1'b0, S_band_xmax} + {1'b0, M2_MARGIN};
         function F_in_m2;
             input [10:0] I_x;
             begin
@@ -2797,22 +2822,11 @@ module recog_top #(
         wire signed [12:0] S_pos_hx = S_pos_x + S_vel_x;   // 丢失时按速度外推
         wire signed [12:0] S_pos_hy = S_pos_y + S_vel_y;
 
-        // 【2026-10-18】ROI 以**预测位置**为中心，而不是从“被 ROI 裁剪后的包围盒”反推：
-        // 旧写法形成正反馈 —— 手移出旧 ROI → 掩码被裁 → 包围盒跟着被裁 → ROI 只能
-        // 按 160 px/帧慢慢追，看起来就是“掩码停在原地几帧”。中心取 S_pos_nx/ny
-        // （α-β 已含速度预测），半宽 = 包围盒半宽 + ROI 余量（总尺寸不变）。
-        wire [10:0] S_roi_bw = S_xmax - S_xmin;
-        wire [10:0] S_roi_bh = S_ymax - S_ymin;
-        wire [11:0] S_roi_half_x12 = {1'b0, (S_roi_bw >> 1)} + {1'b0, S_roi_m};
-        wire [11:0] S_roi_half_y12 = {1'b0, (S_roi_bh >> 1)} + {1'b0, S_roi_m[9:0]};
-        wire [10:0] S_roi_half_x = (S_roi_half_x12 > 12'd1279) ? 11'd1279
-                                                               : S_roi_half_x12[10:0];
-        wire [9:0]  S_roi_half_y = (S_roi_half_y12 > 12'd719) ? 10'd719
-                                                              : S_roi_half_y12[9:0];
-        wire signed [13:0] S_roi_px_l = $signed({1'b0, S_pos_nx}) - $signed({3'b0, S_roi_half_x});
-        wire signed [13:0] S_roi_px_h = $signed({1'b0, S_pos_nx}) + $signed({3'b0, S_roi_half_x});
-        wire signed [13:0] S_roi_py_l = $signed({1'b0, S_pos_ny}) - $signed({4'b0, S_roi_half_y});
-        wire signed [13:0] S_roi_py_h = $signed({1'b0, S_pos_ny}) + $signed({4'b0, S_roi_half_y});
+        // 【2026-10-21】ROI 以**行带 bbox** 为唯一基准，外扩 64 px。
+        // 不再从"被 ROI 裁剪后的包围盒"或 α-β 位置反推，断掉"手出窗 → 掩码被裁 →
+        // 框更小 → 更追不上"的正反馈。行带暂无效时：未锁定回全帧，已锁定保持上一 ROI。
+        wire [11:0] S_band_roi_x1 = {1'b0, S_band_xmax} + 12'd64;
+        wire [11:0] S_band_roi_y1 = {1'b0, S_band_ymax} + 12'd64;
 
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
@@ -2851,16 +2865,12 @@ module recog_top #(
                     S_vel_y <= 13'sd0;
                 end
 
-                // (3) ROI 窗口：命中→以预测位置为中心；丢失且未锁定→回全帧重搜
-                if(S_hit) begin
-                    S_roi_x0 <= S_roi_px_l[13] ? 11'd0 :
-                                ((S_roi_px_l > 14'sd1279) ? 11'd1279 : S_roi_px_l[10:0]);
-                    S_roi_x1 <= S_roi_px_h[13] ? 11'd0 :
-                                ((S_roi_px_h > 14'sd1279) ? 11'd1279 : S_roi_px_h[10:0]);
-                    S_roi_y0 <= S_roi_py_l[13] ? 10'd0 :
-                                ((S_roi_py_l > 14'sd719) ? 10'd719 : S_roi_py_l[9:0]);
-                    S_roi_y1 <= S_roi_py_h[13] ? 10'd0 :
-                                ((S_roi_py_h > 14'sd719) ? 10'd719 : S_roi_py_h[9:0]);
+                // (3) ROI 窗口：行带 ±64；band 无效时未锁定回全帧、已锁定保持上一 ROI
+                if(S_band_valid) begin
+                    S_roi_x0 <= (S_band_xmin > 11'd64) ? (S_band_xmin - 11'd64) : 11'd0;
+                    S_roi_x1 <= (S_band_roi_x1 > 12'd1279) ? 11'd1279 : S_band_roi_x1[10:0];
+                    S_roi_y0 <= (S_band_ymin > 10'd64) ? (S_band_ymin - 10'd64) : 10'd0;
+                    S_roi_y1 <= (S_band_roi_y1 > 12'd719) ? 10'd719 : S_band_roi_y1[9:0];
                 end
                 else if(!S_locked) begin
                     S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
@@ -2937,6 +2947,31 @@ module recog_top #(
         wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && S_cfg_vote_on && (S_mv_cnt < VOTE_MIN))
                                 ? 4'd0 : S_m_pick;
 
+        // ---- 行带：手部唯一权威 bbox ----------------------------------------
+        // 输入是"开运算 + 多数投票后、ROI 门控前"的掩码：既不会被上一帧 ROI 裁掉，
+        // 又和显示/权重同源。选带用运动质心播种，锁定后跟最近带。
+        hand_band u_hand_band (
+            .I_clk        ( I_clk          ),
+            .I_rst_n      ( I_rst_n        ),
+            .I_mask       ( S_m_pick_v     ),
+            .I_x_grp      ( S_x_grp         ),
+            .I_y_pos      ( S_y_pos         ),
+            .I_tvalid     ( I_raw_tvalid    ),
+            .I_tuser      ( I_raw_tuser     ),
+            .I_locked     ( S_locked        ),
+            .I_seed_valid ( S_cent_valid    ),
+            .I_seed_x     ( S_cent_x        ),
+            .I_seed_y     ( S_cent_y        ),
+            .O_valid      ( S_band_valid    ),
+            .O_x_min      ( S_band_xmin     ),
+            .O_x_max      ( S_band_xmax     ),
+            .O_y_min      ( S_band_ymin     ),
+            .O_y_max      ( S_band_ymax     ),
+            .O_area       ( S_band_area     ),
+            .O_cx         ( S_band_cx       ),
+            .O_cy         ( S_band_cy       )
+        );
+
         // ---- 【v2，档 15】**显示/指尖 vs 统计/跟踪 分流** -------------------------
         //   统计（mask_stats → 包围盒/质心 → 跟踪）用**颜色**（S_mask_sel 在 v2 里就是颜色），
         //     这样手停住、背景把它吸掉之后，跟踪器仍然有得算（用户 ②）。
@@ -2947,12 +2982,18 @@ module recog_top #(
         assign S_mask_gated = S_m_pick_v &
                               { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
                                 F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
-        // 叠加/指尖用的掩码（v2 额外 ∩ 运动；其余档与 S_mask_gated 完全相同）
-        // 【2026-10-18】未锁定时不画掩码：跟踪器丢失后 ROI 会退回全帧，若不锁显示，
-        // 手一离开画面就会把全屏杂码暴露出来。统计/捕获仍用 S_mask_gated，不受影响。
-        assign S_mask_disp  = S_m_pick_d & {4{S_locked}} &
-                              { F_in_roi(S_col3, S_y_pos), F_in_roi(S_col2, S_y_pos),
-                                F_in_roi(S_col1, S_y_pos), F_in_roi(S_col0, S_y_pos) };
+        // 显示掩码用行带 bbox **精确**门控：ROI 的 ±64 只用于搜索/保持，
+        // 不能把紧挨着手臂/桌面的肤色也涂红。未锁定或不显示。
+        function F_in_band;
+            input [10:0] I_x;
+            begin
+                F_in_band = (S_y_pos >= S_band_ymin) && (S_y_pos <= S_band_ymax) &&
+                            (I_x >= S_band_xmin) && (I_x <= S_band_xmax);
+            end
+        endfunction
+        assign S_mask_disp  = S_m_pick_d & {4{S_locked & S_band_valid}} &
+                              { F_in_band(S_col3), F_in_band(S_col2),
+                                F_in_band(S_col1), F_in_band(S_col0) };
 
         // ====================================================================
         // M2.2（2026-10-11）：指尖 + 手型（张开 / 握拳 / 未知）
@@ -2967,10 +3008,12 @@ module recog_top #(
         //          多算一段（见 S_m2_prev_eff）。
         // 资源：≈100~120 LUT6 + ≈60 FF，0 ERAM / 0 DSP。
         // ====================================================================
-        wire [10:0] S_m2_ylo = (S_ymin > {1'b0, M2_TOP_UP}) ? (S_ymin - {1'b0, M2_TOP_UP})
+        wire [10:0] S_m2_ylo = (S_band_ymin > {1'b0, M2_TOP_UP}) ? (S_band_ymin - {1'b0, M2_TOP_UP})
                                                              : 11'd0;
-        wire [10:0] S_m2_yhi = S_ymin + {1'b0, M2_TOP_DN};
-        wire       S_m2_band = ({1'b0, S_y_pos} >= S_m2_ylo) && ({1'b0, S_y_pos} <= S_m2_yhi);
+        wire [10:0] S_m2_yhi = S_band_ymin + {1'b0, M2_TOP_DN};
+        wire       S_m2_band = S_band_valid &&
+                               ({1'b0, S_y_pos} >= S_m2_ylo) &&
+                               ({1'b0, S_y_pos} <= S_m2_yhi);
         // ★ 2026-10-16 解耦：**不再用 S_mask_gated（ROI 门控后）**，改用未门控的 `S_m_pick_v`
         //   （选中的掩码 = 开运算 + 多数投票）+ **M2.2 自己的 x 窗**。这样跟踪器收紧 ROI
         //   不会裁掉指尖/手型；而"只在手附近找"这个约束由 M2 窗自己保证（见 M2_MARGIN）。
@@ -3107,6 +3150,7 @@ module recog_top #(
             input [1:0]  I_mlv;       // 运动门归因（视图 4 用，见 F_mot_lv）
             input [2:0]  I_gest;      // M2.1 挥手提示色码（0 = 不闪）
             reg S_x_on, S_y_on, S_x_th, S_y_th, S_bx, S_by, S_border;
+            reg S_bbx, S_bby, S_band_border;
             begin
                 // 臂长 ±CROSS_LEN、线宽 ±CROSS_TH（十字两个方向各一条粗线）
                 // 【2026-10-18】准星走独立的质心通道，不再跟 S_trk_x/y（指尖）。
@@ -3121,6 +3165,14 @@ module recog_top #(
                        ((I_y + 2 >= S_roi_y1) && (I_y <= S_roi_y1 + 1));
                 S_border = (S_bx && (I_y >= S_roi_y0) && (I_y <= S_roi_y1)) ||
                            (S_by && (I_x >= S_roi_x0) && (I_x <= S_roi_x1));
+                // 行带边框（视图 6 专用）：2 像素粗，颜色仍用蓝
+                S_bbx = ((I_x + 2 >= S_band_xmin) && (I_x <= S_band_xmin + 11'd1)) ||
+                        ((I_x + 2 >= S_band_xmax) && (I_x <= S_band_xmax + 11'd1));
+                S_bby = ((I_y + 2 >= S_band_ymin) && (I_y <= S_band_ymin + 10'd1)) ||
+                        ((I_y + 2 >= S_band_ymax) && (I_y <= S_band_ymax + 10'd1));
+                S_band_border = S_band_valid &&
+                                ((S_bbx && (I_y >= S_band_ymin) && (I_y <= S_band_ymax)) ||
+                                 (S_bby && (I_x >= S_band_xmin) && (I_x <= S_band_xmax)));
                 // M2.1 挥手提示：**画在对应屏幕边缘**（位置 + 颜色双重编码）
                 if(((I_gest == 3'd3) && (I_x < GEST_VIS_W)) ||                            // 左挥：左边缘
                    ((I_gest == 3'd4) && (I_x > (11'd1279 - GEST_VIS_W))) ||               // 右挥：右边缘
@@ -3160,7 +3212,7 @@ module recog_top #(
                     else                   F_ovl_view = S_border ? 3'd6 : 3'd0;
                 end
                 else if(S_view == 4'd6)
-                    F_ovl_view = S_border ? 3'd6 : (I_fuse ? 3'd1 : 3'd0);
+                    F_ovl_view = S_band_border ? 3'd6 : (I_fuse ? 3'd1 : 3'd0);
                 else
                     // 0/1/2/3：正常融合视图。**形状门不过时不涂红**（否则门只挡跟踪、屏幕上桌面
                     // 仍然是红的 —— 用户看到的就是"桌面高亮"）。宁可画面干净，也不误导。
@@ -3185,6 +3237,14 @@ module recog_top #(
         assign S_trk_y      = 10'd360;
         assign S_trk_locked = 1'b0;
         assign S_cap_locked = 1'b1;
+        assign S_band_valid = 1'b0;
+        assign S_band_xmin  = 11'd0;
+        assign S_band_xmax  = 11'd0;
+        assign S_band_ymin  = 10'd0;
+        assign S_band_ymax  = 10'd0;
+        assign S_band_area  = 20'd0;
+        assign S_band_cx    = 11'd0;
+        assign S_band_cy    = 10'd0;
         assign S_m2_dbg_p   = 16'd0;
         assign S_m2_dbg_q   = 14'd0;
         assign S_m2_dbg_on  = 1'b0;
@@ -3240,7 +3300,7 @@ module recog_top #(
     // 【2026-10-16 复活】M2.1 档（10/11）借 P/Q 报事件：
     //   P(16) = {2'b0, 方向[2:0], 事件总数[10:0]}   —— 方向 1=左 2=右 3=下 4=不明确
     //   Q(14) = {左计数[4:0], 右计数[4:0], 下计数[3:0]} —— 上板"20 次/方向"直接对这三个数
-    //   （R 保持 M1 的包围盒 y，用来同时盯掩码健康）
+    //   （R 保持行带 bbox 的 y，用来同时盯手框健康；交付档 Q/R = 行带 bbox）
     wire S_m21_dbg_on = (S_cfg == 4'd10) || (S_cfg == 4'd11);
     // 【2026-10-16 ⑤】观测档（13/14）借 P/Q 报"肤色掩码内 Y/sat 的帧内极值"：
     //   P(16) = { 掩码内 minY, maxY }     ← 定 SKIN_Y_MIN / SKIN_Y_CAP
@@ -3253,10 +3313,10 @@ module recog_top #(
     assign O_bbox_x         = S_m21_dbg_on ? {S_gest_cl, S_gest_cr, S_gest_cd}
                             : S_obs_on     ? {h_obs_smin[6:0], h_obs_smax[6:0]}
                             : S_m2_dbg_on  ? S_m2_dbg_q
-                                           : ((DIAG_CHROMA != 0) ? S_ch_word_x
-                                                                 : {S_xmin[10:4], S_xmax[10:4]});
+                                            : ((DIAG_CHROMA != 0) ? S_ch_word_x
+                                                                  : {S_band_xmin[10:4], S_band_xmax[10:4]});
     assign O_bbox_y         = (DIAG_CHROMA != 0) ? S_ch_word_y
-                                                 : {S_ymin[9:4],  S_ymax[9:4]};
+                                                 : {S_band_ymin[9:4], S_band_ymax[9:4]};
 
 
     // 用边沿流（比 raw 流晚 2 拍）的帧首翻 toggle：此刻 tap 计数与掩码统计都已锁存

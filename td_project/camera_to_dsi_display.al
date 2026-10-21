@@ -339,6 +339,14 @@
                     <Attr Name="CompileOrder" Val="58"/>
                 </FileInfo>
             </File>
+            <File Path="../user_source/hdl_source/isp/hand_band.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="72"/>
+                </FileInfo>
+            </File>
             <File Path="../user_source/hdl_source/isp/ctrl_sync.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
