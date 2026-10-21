@@ -1999,7 +1999,11 @@ module recog_top #(
                 // `S_motion_mask` 完全相同的逐像素判据（同一块背景 `S_bg_cur`、同一对
                 // 门限 MOTION_TH / 2×MOTION_TH、同一个相对门）。历史上踩过
                 // "掩码走新判据、权重还喂老判据"的坑：桌面不涂红、却照样把准星拽过去。
-                if(!S_mot_use || S_v2) begin
+                // 【2026-10-21】锁定后必须与掩码同源：掩码在锁定态已切到纯肤色
+                // （见 S_mask_sel_raw），权重却仍乘运动分 → 手一停 Σw 归零，
+                // 质心失效、命中失效，5 帧后丢锁，形成"掩码 1 秒出现/消失"的循环。
+                // 锁定后 S_mo 恒为 2，权重 = 肤色分；运动分只负责"首次捕获"。
+                if(!S_mot_use || S_v2 || S_cap_locked) begin
                     // 运动门关（非 2 档 / 背景未就绪）→ 权重只看肤色，= M1 交付行为。
                     // 【v2，档 15】**颜色单独成"分"**：运动只负责给出候选区（掩码/显示），
                     //   权重不再乘运动分 —— 否则静止的手权重归零、质心就没得算了（用户 ②）。
@@ -2090,7 +2094,11 @@ module recog_top #(
         wire [26:0] S_dxa = (SOFT_TRACK != 0) ? h_wx[31:5] : S_sumx[30:4];
         wire [25:0] S_dya = (SOFT_TRACK != 0) ? h_wy[30:5] : S_sumy[29:4];
         wire [15:0] S_db  = (SOFT_TRACK != 0) ? h_ws[20:5] : S_mcnt[19:4];
-        wire        S_dok = (SOFT_TRACK != 0) ? ((h_ws >= MIN_WSUM) && (h_ws[20:5] != 16'd0))
+        // 锁定后的质心有效门限和 S_hit 使用同一组 2000/1200 滞回：
+        // 否则会出现"锁还在、质心却判无效"的中间态，手势段仍会被打断。
+        wire        S_dok = (SOFT_TRACK != 0) ? (((h_ws >= MIN_WSUM) ||
+                                                  (S_cap_locked && (h_ws >= MIN_WSUM_HOLD))) &&
+                                                  (h_ws[20:5] != 16'd0))
                                               : ((S_mcnt >= MIN_CNT) && (S_mcnt[19:4] != 16'd0));
         wire [11:0] S_cor = (SOFT_TRACK != 0) ? 12'd0 : 12'd1;   // 几何修正只给"硬门"那条
 
