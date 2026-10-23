@@ -30,7 +30,9 @@ module hand_band #(
     parameter [9:0]   MIN_H        = 10'd60,
     parameter [10:0]  SEARCH_R     = 11'd256,
     parameter [10:0]  SNAP_DELTA   = 11'd48,
-    parameter [3:0]   HOLD_FRAMES  = 4'd2
+    parameter [3:0]   HOLD_FRAMES  = 4'd2,
+    // 连续 N 行窄于本带最大跨度的 40% → 认为遇到脖子/手腕，结束当前带。
+    parameter [3:0]   NARROW_ROWS  = 4'd2
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -91,7 +93,6 @@ module hand_band #(
                        (q_cnt >= ROW_MIN_SKIN) &&
                        (Q_span >= ROW_MIN_SPAN) &&
                        ({q_cnt, 2'b00} >= {2'b00, Q_span});
-
     wire [10:0] W_cnt_f  = r_cnt + {8'b0, W_n};
     wire [10:0] W_xmin_f = !W_have ? r_xmin :
                            (!r_any ? W_xfirst[10:0] :
@@ -114,6 +115,14 @@ module hand_band #(
     reg [10:0] b_xmin, b_xmax;
     reg [9:0]  b_ymin, b_ymax;
     reg [3:0]  b_gap;
+    reg [10:0] b_max_span;
+    reg [3:0]  b_narrow_cnt;
+
+    // 窄行判据：5×span < 2×b_max_span，即 span < 40% 本带最大跨度。
+    // 用移位加法，避免乘法器；14 位足够覆盖 5×1279。
+    wire [13:0] Q_span5 = ({3'b0, Q_span} << 2) + {3'b0, Q_span};
+    wire [13:0] B_max2  = {2'b0, b_max_span, 1'b0};
+    wire        Q_narrow = b_active && (Q_span5 < B_max2);
 
     wire [10:0] B_w = (b_xmax >= b_xmin) ? (b_xmax - b_xmin + 11'd1) : 11'd0;
     wire [9:0]  B_h = (b_ymax >= b_ymin) ? (b_ymax - b_ymin + 10'd1) : 10'd0;
@@ -199,6 +208,7 @@ module hand_band #(
             b_active <= 1'b0; b_area <= 20'd0;
             b_xmin <= 11'd0; b_xmax <= 11'd0;
             b_ymin <= 10'd0; b_ymax <= 10'd0; b_gap <= 4'd0;
+            b_max_span <= 11'd0; b_narrow_cnt <= 4'd0;
             best_valid <= 1'b0; best_area <= 20'd0;
             best_xmin <= 11'd0; best_xmax <= 11'd0;
             best_ymin <= 10'd0; best_ymax <= 10'd0;
@@ -221,8 +231,39 @@ module hand_band #(
                         b_ymin   <= q_y;
                         b_ymax   <= q_y;
                         b_gap    <= 4'd0;
+                        b_max_span <= Q_span;
+                        b_narrow_cnt <= 4'd0;
+                    end
+                    else if(Q_narrow) begin
+                        // 连续窄行：脖子/手腕。达到门限就把当前带作为候选关闭，
+                        // 当前行丢弃，下一有效行重新起带（避免把触发窄行并进新手带）。
+                        if(b_narrow_cnt >= (NARROW_ROWS - 4'd1)) begin
+                            b_active <= 1'b0;
+                            if(B_shape_ok && S_in_range &&
+                               (!best_valid || (B_dist < best_dist))) begin
+                                best_valid <= 1'b1;
+                                best_area  <= b_area;
+                                best_xmin  <= b_xmin;
+                                best_xmax  <= b_xmax;
+                                best_ymin  <= b_ymin;
+                                best_ymax  <= b_ymax;
+                                best_dist  <= B_dist;
+                            end
+                            b_max_span <= 11'd0;
+                            b_narrow_cnt <= 4'd0;
+                        end
+                        else begin
+                            b_narrow_cnt <= b_narrow_cnt + 4'd1;
+                            b_area <= b_area + {9'b0, q_cnt};
+                            b_xmin <= (q_xmin < b_xmin) ? q_xmin : b_xmin;
+                            b_xmax <= (q_xmax > b_xmax) ? q_xmax : b_xmax;
+                            b_ymax <= q_y;
+                            b_gap  <= 4'd0;
+                        end
                     end
                     else begin
+                        b_narrow_cnt <= 4'd0;
+                        if(Q_span > b_max_span) b_max_span <= Q_span;
                         b_area <= b_area + {9'b0, q_cnt};
                         b_xmin <= (q_xmin < b_xmin) ? q_xmin : b_xmin;
                         b_xmax <= (q_xmax > b_xmax) ? q_xmax : b_xmax;
@@ -231,6 +272,7 @@ module hand_band #(
                     end
                 end
                 else if(b_active) begin
+                    b_narrow_cnt <= 4'd0;
                     if(b_gap >= ROW_GAP_TOL) begin
                         b_active <= 1'b0;
                         if(B_shape_ok && S_in_range &&
@@ -243,6 +285,8 @@ module hand_band #(
                             best_ymax  <= b_ymax;
                             best_dist  <= B_dist;
                         end
+                        b_max_span <= 11'd0;
+                        b_narrow_cnt <= 4'd0;
                     end
                     else begin
                         b_gap <= b_gap + 4'd1;
@@ -282,6 +326,7 @@ module hand_band #(
             b_active <= 1'b0; b_area <= 20'd0;
             b_xmin <= 11'd0; b_xmax <= 11'd0;
             b_ymin <= 10'd0; b_ymax <= 10'd0; b_gap <= 4'd0;
+            b_max_span <= 11'd0; b_narrow_cnt <= 4'd0;
             best_valid <= 1'b0; best_area <= 20'd0;
             best_xmin <= 11'd0; best_xmax <= 11'd0;
             best_ymin <= 10'd0; best_ymax <= 10'd0;
