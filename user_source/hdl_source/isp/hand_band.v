@@ -29,6 +29,7 @@ module hand_band #(
     parameter [10:0]  MIN_W        = 11'd60,
     parameter [9:0]   MIN_H        = 10'd60,
     parameter [10:0]  SEARCH_R     = 11'd256,
+    parameter [10:0]  H_WIN        = 11'd200,   // 水平窗半宽：只保留种子左右 ±H_WIN
     parameter [10:0]  SNAP_DELTA   = 11'd48,
     parameter [3:0]   HOLD_FRAMES  = 4'd2,
     // 连续 N 行窄于本带最大跨度的 40% → 认为遇到脖子/手腕，结束当前带。
@@ -63,14 +64,46 @@ module hand_band #(
 
     localparam [10:0] X_LAST = (IMG_W >> 2) - 1;
 
+    // ---- 上一帧手框 / 选带种子（提前声明，供水平窗使用） --------------------
+    reg        h_valid;
+    reg [10:0] h_xmin, h_xmax;
+    reg [9:0]  h_ymin, h_ymax;
+    reg [19:0] h_area;
+    reg [3:0]  hold_cnt;
+
+    wire [11:0] H_cx_sum = {1'b0, h_xmin} + {1'b0, h_xmax};
+    wire [10:0] H_cx     = H_cx_sum[11:1];
+    wire [10:0] H_cy_sum = {1'b0, h_ymin} + {1'b0, h_ymax};
+    wire [9:0]  H_cy     = H_cy_sum[10:1];
+
+    wire        S_seed_ok = I_locked ? h_valid : I_seed_valid;
+    wire [10:0] S_seed_x  = I_locked ? H_cx   : I_seed_x;
+    wire [9:0]  S_seed_y  = I_locked ? H_cy   : I_seed_y;
+
+    // ---- 种子中心水平窗 ----------------------------------------------------
+    // 只保留种子左右 ±H_WIN 的掩码。脸/木板在同一行但离手较远时被排除。
+    wire [10:0] S_win_lo = (S_seed_x > H_WIN) ? (S_seed_x - H_WIN) : 11'd0;
+    wire [11:0] S_win_hi12 = {1'b0, S_seed_x} + {1'b0, H_WIN};
+    wire [10:0] S_win_hi = (S_win_hi12 > 12'd1279) ? 11'd1279 : S_win_hi12[10:0];
+    wire [10:0] S_col0w = {I_x_grp, 2'b00};
+    wire [10:0] S_col1w = S_col0w + 11'd1;
+    wire [10:0] S_col2w = S_col0w + 11'd2;
+    wire [10:0] S_col3w = S_col0w + 11'd3;
+    wire [3:0] S_mask_win = {
+        I_mask[3] && (S_col3w >= S_win_lo) && (S_col3w <= S_win_hi),
+        I_mask[2] && (S_col2w >= S_win_lo) && (S_col2w <= S_win_hi),
+        I_mask[1] && (S_col1w >= S_win_lo) && (S_col1w <= S_win_hi),
+        I_mask[0] && (S_col0w >= S_win_lo) && (S_col0w <= S_win_hi)
+    };
+
     // ---- 当前拍的像素统计 --------------------------------------------------
-    wire [2:0]  W_n    = {2'b0, I_mask[0]} + {2'b0, I_mask[1]} +
-                         {2'b0, I_mask[2]} + {2'b0, I_mask[3]};
-    wire [1:0]  W_jmin = I_mask[0] ? 2'd0 : I_mask[1] ? 2'd1 :
-                         I_mask[2] ? 2'd2 : 2'd3;
-    wire [1:0]  W_jmax = I_mask[3] ? 2'd3 : I_mask[2] ? 2'd2 :
-                         I_mask[1] ? 2'd1 : 2'd0;
-    wire        W_have = |I_mask;
+    wire [2:0]  W_n    = {2'b0, S_mask_win[0]} + {2'b0, S_mask_win[1]} +
+                         {2'b0, S_mask_win[2]} + {2'b0, S_mask_win[3]};
+    wire [1:0]  W_jmin = S_mask_win[0] ? 2'd0 : S_mask_win[1] ? 2'd1 :
+                         S_mask_win[2] ? 2'd2 : 2'd3;
+    wire [1:0]  W_jmax = S_mask_win[3] ? 2'd3 : S_mask_win[2] ? 2'd2 :
+                         S_mask_win[1] ? 2'd1 : 2'd0;
+    wire        W_have = |S_mask_win;
     wire [12:0] W_xbase = {I_x_grp, 2'b00};
     wire [12:0] W_xfirst = W_xbase + {11'b0, W_jmin};
     wire [12:0] W_xlast  = W_xbase + {11'b0, W_jmax};
@@ -141,23 +174,6 @@ module hand_band #(
     wire [10:0] B_cx     = B_cx_sum[11:1];
     wire [10:0] B_cy_sum = {1'b0, b_ymin} + {1'b0, b_ymax};
     wire [9:0]  B_cy     = B_cy_sum[10:1];
-
-    // ---- 上一帧手框 --------------------------------------------------------
-    reg        h_valid;
-    reg [10:0] h_xmin, h_xmax;
-    reg [9:0]  h_ymin, h_ymax;
-    reg [19:0] h_area;
-    reg [3:0]  hold_cnt;
-
-    wire [11:0] H_cx_sum = {1'b0, h_xmin} + {1'b0, h_xmax};
-    wire [10:0] H_cx     = H_cx_sum[11:1];
-    wire [10:0] H_cy_sum = {1'b0, h_ymin} + {1'b0, h_ymax};
-    wire [9:0]  H_cy     = H_cy_sum[10:1];
-
-    // ---- 最近邻选择 --------------------------------------------------------
-    wire        S_seed_ok = I_locked ? h_valid : I_seed_valid;
-    wire [10:0] S_seed_x  = I_locked ? H_cx : I_seed_x;
-    wire [9:0]  S_seed_y  = I_locked ? H_cy : I_seed_y;
 
     function [11:0] F_abs11;
         input [10:0] I_a, I_b;
