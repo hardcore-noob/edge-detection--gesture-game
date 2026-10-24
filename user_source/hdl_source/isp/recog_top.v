@@ -2810,6 +2810,40 @@ module recog_top #(
                                (S_locked && (S_wsum_h >= MIN_WSUM_HOLD)))
                                                 : (S_mcnt >= MIN_CNT)) && !S_gate_bad;
 
+        // ====================================================================
+        // P0-04b：低置信度重播种
+        //   * 窗口运动 P < 0x0800（实际 32768 px）且全帧运动 Q >= 0x0200
+        //     （实际 32768 px）连续 N 帧 → 视为“窗口没覆盖主要运动源”；
+        //   * 当前手带仍有效且形状/面积像手时，N 放宽到 60 帧；
+        //     否则 20 帧，避免错误锁定长期不释放；
+        //   * 超时后只做“解锁 + ROI 回全帧”，不直接把 bbox 跳到运动区；
+        //     下一帧走现有 skin∩motion 捕获路径重新播种。
+        // ====================================================================
+        wire S_band_handlike = S_band_valid &&
+                               (S_band_area >= 20'd2000) &&
+                               (S_band_area <= 20'd120000) &&
+                               ((S_band_xmax - S_band_xmin) <= 11'd720) &&
+                               ((S_band_ymax - S_band_ymin) <= 10'd720);
+        wire S_low_conf = S_locked && S_hit &&
+                          (S_band_mot_win < 20'd32768) &&
+                          (S_band_mot_all >= 20'd32768);
+        reg [5:0] S_low_cnt;
+        wire [5:0] S_low_th = S_band_handlike ? 6'd60 : 6'd20;
+        wire S_force_unlock = S_low_conf && (S_low_cnt >= (S_low_th - 6'd1));
+
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)
+                S_low_cnt <= 6'd0;
+            else if(I_raw_tuser) begin
+                if(!S_locked)
+                    S_low_cnt <= 6'd0;
+                else if(S_low_conf)
+                    S_low_cnt <= (S_low_cnt == 6'h3F) ? 6'h3F : (S_low_cnt + 6'd1);
+                else
+                    S_low_cnt <= 6'd0;
+            end
+        end
+
         // 观测误差 + 死区：|err| ≤ DEADBAND 时按 0 处理（噪声抖动不再推动准星）
         wire signed [12:0] S_err_raw_x = {2'b0, S_obs_x} - S_pos_x;
         wire signed [12:0] S_err_raw_y = {2'b0, S_obs_y} - S_pos_y;
@@ -2839,6 +2873,20 @@ module recog_top #(
                 S_vel_x  <= 13'sd0;   S_vel_y  <= 13'sd0;
             end
             else if(I_raw_tuser) begin
+                if(S_force_unlock) begin
+                    // 低置信度：只释放锁定并回全帧搜索，不直接把 bbox 跳到运动区。
+                    // 下一帧由未锁定路径的 skin∩motion 重新播种。
+                    S_locked    <= 1'b0;
+                    S_hit_cnt   <= 4'd0;
+                    S_miss_cnt  <= 6'd0;
+                    S_vel_x     <= 13'sd0;
+                    S_vel_y     <= 13'sd0;
+                    S_roi_x0    <= 11'd0;
+                    S_roi_x1    <= 11'd1279;
+                    S_roi_y0    <= 10'd0;
+                    S_roi_y1    <= 10'd719;
+                end
+                else begin
                 // (1) 命中/丢失计数与锁定状态
                 if(S_hit) begin
                     S_miss_cnt <= 6'd0;
@@ -2877,6 +2925,7 @@ module recog_top #(
                 else if(!S_locked) begin
                     S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
                     S_roi_y0 <= 10'd0;    S_roi_y1 <= 10'd719;
+                end
                 end
             end
         end
