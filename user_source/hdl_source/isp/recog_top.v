@@ -1908,6 +1908,8 @@ module recog_top #(
     wire [19:0] S_band_area;
     wire [10:0] S_band_cx;
     wire [9:0]  S_band_cy;
+    // P0-04a：运动证据（窗口内 / 全帧），帧锁存后给 DBG
+    wire [19:0] S_band_mot_win, S_band_mot_all;
     wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ?
                                 (S_v2 ? S_skin_use :
                                  (S_cap_locked ? S_skin_use : S_fusion_mask)) :
@@ -2954,6 +2956,7 @@ module recog_top #(
             .I_clk        ( I_clk          ),
             .I_rst_n      ( I_rst_n        ),
             .I_mask       ( S_m_pick_v     ),
+            .I_motion     ( S_motion_mask  ),
             .I_x_grp      ( S_x_grp         ),
             .I_y_pos      ( S_y_pos         ),
             .I_tvalid     ( I_raw_tvalid    ),
@@ -2969,7 +2972,9 @@ module recog_top #(
             .O_y_max      ( S_band_ymax     ),
             .O_area       ( S_band_area     ),
             .O_cx         ( S_band_cx       ),
-            .O_cy         ( S_band_cy       )
+            .O_cy         ( S_band_cy       ),
+            .O_mot_win    ( S_band_mot_win  ),
+            .O_mot_all    ( S_band_mot_all  )
         );
 
         // ---- 【v2，档 15】**显示/指尖 vs 统计/跟踪 分流** -------------------------
@@ -3245,6 +3250,8 @@ module recog_top #(
         assign S_band_area  = 20'd0;
         assign S_band_cx    = 11'd0;
         assign S_band_cy    = 10'd0;
+        assign S_band_mot_win = 20'd0;
+        assign S_band_mot_all = 20'd0;
         assign S_m2_dbg_p   = 16'd0;
         assign S_m2_dbg_q   = 14'd0;
         assign S_m2_dbg_on  = 1'b0;
@@ -3302,16 +3309,22 @@ module recog_top #(
     //   Q(14) = {左计数[4:0], 右计数[4:0], 下计数[3:0]} —— 上板"20 次/方向"直接对这三个数
     //   （R 保持行带 bbox 的 y，用来同时盯手框健康；交付档 Q/R = 行带 bbox）
     wire S_m21_dbg_on = (S_cfg == 4'd10) || (S_cfg == 4'd11);
+    // P0-04a：档 2 的运动门是开的；借 P/Q 报运动证据用于上板验证：
+    //   P(16) = 窗口内运动像素数 >>4
+    //   Q(14) = 全帧运动像素数 >>6
+    wire S_mot_dbg_on = (S_cfg == 4'd2);
     // 【2026-10-16 ⑤】观测档（13/14）借 P/Q 报"肤色掩码内 Y/sat 的帧内极值"：
     //   P(16) = { 掩码内 minY, maxY }     ← 定 SKIN_Y_MIN / SKIN_Y_CAP
     //   Q(14) = { 掩码内 minSat[6:0], maxSat[6:0] }   ← 定比例饱和 SKIN_SAT_SH（配 P 的 Y）
     assign O_mask_cnt_shift = S_m21_dbg_on ? {2'b0, S_gest_dir, S_gest_cnt}
                             : S_obs_on     ? {h_obs_ymin, h_obs_ymax}
+                            : S_mot_dbg_on ? S_band_mot_win[19:4]
                             : S_m2_dbg_on  ? S_m2_dbg_p
                                            : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
     assign O_bbox_x         = S_m21_dbg_on ? {S_gest_cl, S_gest_cr, S_gest_cd}
                             : S_obs_on     ? {h_obs_smin[6:0], h_obs_smax[6:0]}
+                            : S_mot_dbg_on ? S_band_mot_all[19:6]
                             : S_m2_dbg_on  ? S_m2_dbg_q
                                             : ((DIAG_CHROMA != 0) ? S_ch_word_x
                                                                   : {S_band_xmin[10:4], S_band_xmax[10:4]});
