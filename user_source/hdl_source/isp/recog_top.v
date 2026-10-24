@@ -1984,18 +1984,19 @@ module recog_top #(
         wire [10:0] S_qx_now = {S_div_qx[9:0], S_rx_ge};
         wire [9:0]  S_qy_now = {S_div_qy[8:0], S_ry_ge};
 
-        // ---- 软权重：每像素 w = min(皮肤分 0..2, 运动分 0..2) -------------------
-        // 皮肤分：暖色占优(R>G 且 R>B) 1 分 + 饱和度(max−min ≥ SAT_MIN) 1 分
-        // 运动分：|本帧灰度 − 上一帧灰度| > MOTION_TH 1 分、> 2× 2 分；权重取两者的小者
-        wire signed [8:0] S_th  = MOTION_TH;
-        wire signed [8:0] S_th2 = MOTION_TH + MOTION_TH;
+        // ---- 软权重：每像素 w = min(皮肤分 0..2, 运动资格 0/2) ------------------
+        // 皮肤分：暖色占优(R>G 且 R>B) 1 分 + 饱和度(max−min ≥ SAT_MIN) 1 分。
+        // 【阶段一】捕获态运动权重与 `S_motion_mask` 同源：16×16 块已连续 2 帧
+        // 通过块级运动门时，块内肤色像素直接获得运动资格；否则为 0。
+        // 旧实现里掩码走块级判决、权重却重新逐像素比较灰度差，远手容易“块已
+        // 判动、但 Σw 仍不足 2000”。锁定后仍只看肤色，行为不变。
 
         function [1:0] F_w_rgb;
-            input [7:0] I_r, I_g, I_b, I_gray;
+            input [7:0] I_r, I_g, I_b;
             input       I_in_rect;        // 该像素在肤色矩形内（与掩码同一判据，调用侧传 S_skin_mask[i]）
+            input       I_block_motion;   // 该像素所在 16×16 块的已确认运动资格
             reg [7:0] S_hi, S_lo;
             reg [1:0] S_sk, S_mo;
-            reg signed [8:0] S_d, S_da;
             begin
                 S_hi = (I_r > I_g) ? ((I_r > I_b) ? I_r : I_b) : ((I_g > I_b) ? I_g : I_b);
                 S_lo = (I_r < I_g) ? ((I_r < I_b) ? I_r : I_b) : ((I_g < I_b) ? I_g : I_b);
@@ -2006,10 +2007,6 @@ module recog_top #(
                 // 不再被桌面拽"，而不只是"掩码亮不亮"。
                 S_sk = I_in_rect ? ({1'b0, ((I_r > I_g) && (I_r > I_b))} +
                                     {1'b0, ((S_hi - S_lo) >= SAT_MIN)}) : 2'd0;
-                // **2026-10-16 Step D：掩码与软权重必须同源** —— 运动分就用与
-                // `S_motion_mask` 完全相同的逐像素判据（同一块背景 `S_bg_cur`、同一对
-                // 门限 MOTION_TH / 2×MOTION_TH、同一个相对门）。历史上踩过
-                // "掩码走新判据、权重还喂老判据"的坑：桌面不涂红、却照样把准星拽过去。
                 // 【2026-10-21】锁定后必须与掩码同源：掩码在锁定态已切到纯肤色
                 // （见 S_mask_sel_raw），权重却仍乘运动分 → 手一停 Σw 归零，
                 // 质心失效、命中失效，5 帧后丢锁，形成"掩码 1 秒出现/消失"的循环。
@@ -2021,15 +2018,9 @@ module recog_top #(
                     S_mo = 2'd2;
                 end
                 else begin
-                    // 运动分：> 2×MOTION_TH 给 2 分、> MOTION_TH 给 1 分，否则 0 分
-                    S_d  = {1'b0, I_gray} - {1'b0, S_bg_cur};
-                    S_da = S_d[8] ? (~S_d + 9'd1) : S_d;
-                    if((S_da > S_th2) && ((MOTION_REL == 0) || ({S_da, 2'b0} > {1'b0, S_bg_cur})))
-                        S_mo = 2'd2;
-                    else if((S_da > S_th) && ((MOTION_REL == 0) || ({S_da, 3'b0} > {1'b0, S_bg_cur})))
-                        S_mo = 2'd1;
-                    else
-                        S_mo = 2'd0;
+                    // 阶段一：不再要求块内每个肤色像素自身都达到逐像素运动门。
+                    // 块级运动资格已经把静止背景挡掉，块内完整肤色由皮肤分决定权重。
+                    S_mo = I_block_motion ? 2'd2 : 2'd0;
                 end
                 F_w_rgb = (S_sk < S_mo) ? S_sk : S_mo;
             end
@@ -2071,13 +2062,17 @@ module recog_top #(
         // ⚠ 2026-10-16 ① 块级占比门**同样作用在软权重上**：掩码与权重必须同源
         //   （历史教训：掩码被门挡下、权重还照投 → 掩码看不见了、准星却被那片东西拽走）。
         wire [1:0]  S_w0 = (F_w_inroi(S_wc0, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_skin_use[0]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0],
+                                     S_skin_use[0], S_motion_mask[0]) : 2'd0;
         wire [1:0]  S_w1 = (F_w_inroi(S_wc1, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_skin_use[1]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0],
+                                     S_skin_use[1], S_motion_mask[1]) : 2'd0;
         wire [1:0]  S_w2 = (F_w_inroi(S_wc2, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_skin_use[2]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0],
+                                     S_skin_use[2], S_motion_mask[2]) : 2'd0;
         wire [1:0]  S_w3 = (F_w_inroi(S_wc3, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_skin_use[3]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0],
+                                     S_skin_use[3], S_motion_mask[3]) : 2'd0;
 
         // w∈0..2：w·x = (w[0] ? x : 0) + (w[1] ? x<<1 : 0) —— 移位加法，不碰 DSP
         wire [11:0] S_wx0 = (S_w0[0] ? {1'b0,S_wc0} : 12'd0) + (S_w0[1] ? {S_wc0,1'b0} : 12'd0);
