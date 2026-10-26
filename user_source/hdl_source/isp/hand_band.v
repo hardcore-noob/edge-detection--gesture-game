@@ -40,6 +40,7 @@ module hand_band #(
 
     // 与像素流同拍的掩码（bit0 = 列 4k）
     input  wire [3:0]  I_mask,
+    input  wire [3:0]  I_motion,     // 同拍运动掩码（用于 P0-04a 运动证据）
     input  wire [10:0] I_x_grp,      // 0..IMG_W/4-1
     input  wire [9:0]  I_y_pos,      // 0..IMG_H-1
     input  wire        I_tvalid,
@@ -59,7 +60,9 @@ module hand_band #(
     output wire [9:0]  O_y_max,
     output wire [19:0] O_area,
     output wire [10:0] O_cx,
-    output wire [9:0]  O_cy
+    output wire [9:0]  O_cy,
+    output wire [19:0] O_mot_win,
+    output wire [19:0] O_mot_all
 );
 
     localparam [10:0] X_LAST = (IMG_W >> 2) - 1;
@@ -95,6 +98,37 @@ module hand_band #(
         I_mask[1] && (S_col1w >= S_win_lo) && (S_col1w <= S_win_hi),
         I_mask[0] && (S_col0w >= S_win_lo) && (S_col0w <= S_win_hi)
     };
+    wire [3:0] S_motion_win = {
+        I_motion[3] && (S_col3w >= S_win_lo) && (S_col3w <= S_win_hi),
+        I_motion[2] && (S_col2w >= S_win_lo) && (S_col2w <= S_win_hi),
+        I_motion[1] && (S_col1w >= S_win_lo) && (S_col1w <= S_win_hi),
+        I_motion[0] && (S_col0w >= S_win_lo) && (S_col0w <= S_win_hi)
+    };
+    wire [2:0] W_mot_win = {2'b0, S_motion_win[0]} + {2'b0, S_motion_win[1]} +
+                           {2'b0, S_motion_win[2]} + {2'b0, S_motion_win[3]};
+    wire [2:0] W_mot_all = {2'b0, I_motion[0]} + {2'b0, I_motion[1]} +
+                           {2'b0, I_motion[2]} + {2'b0, I_motion[3]};
+
+    reg [19:0] a_mot_win, a_mot_all;
+    reg [19:0] h_mot_win, h_mot_all;
+    always @(posedge I_clk or negedge I_rst_n) begin
+        if(!I_rst_n) begin
+            a_mot_win <= 20'd0; a_mot_all <= 20'd0;
+            h_mot_win <= 20'd0; h_mot_all <= 20'd0;
+        end
+        else if(I_tuser) begin
+            h_mot_win <= a_mot_win;
+            h_mot_all <= a_mot_all;
+            a_mot_win <= 20'd0;
+            a_mot_all <= 20'd0;
+        end
+        else if(I_tvalid) begin
+            a_mot_win <= a_mot_win + {17'b0, W_mot_win};
+            a_mot_all <= a_mot_all + {17'b0, W_mot_all};
+        end
+    end
+    assign O_mot_win = h_mot_win;
+    assign O_mot_all = h_mot_all;
 
     // ---- 当前拍的像素统计 --------------------------------------------------
     wire [2:0]  W_n    = {2'b0, S_mask_win[0]} + {2'b0, S_mask_win[1]} +

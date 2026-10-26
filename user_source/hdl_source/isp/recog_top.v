@@ -457,6 +457,15 @@ module recog_top #(
     // 顶带：以"上一帧掩码最高行 S_ymin"为中心，向上 M2_TOP_UP、向下 M2_TOP_DN 像素
     parameter [9:0]    M2_TOP_UP = 10'd16,
     parameter [9:0]    M2_TOP_DN = 10'd48,
+    // P0-02 粘指：在第一个非空行之后再看几行，并在这些顶部像素中选择离上帧
+    // 指尖 x 最近的点。只覆盖指尖帽，不把更下方的手掌拉进候选。
+    parameter [9:0]    M2_TIP_EXTRA_ROWS = 10'd3,
+    // 小于该 x 距离视为同一根手指，立即跟随；更大变化先保持一帧再确认。
+    parameter [10:0]   M2_TIP_STICK_X = 11'd32,
+    // pending 候选的跨帧允许位移；快速水平挥动可在下一帧确认，避免持续追不上。
+    parameter [10:0]   M2_TIP_CONFIRM_X = 11'd64,
+    // 当前顶带整帧没有候选时，指尖状态保持帧数。
+    parameter [2:0]    M2_TIP_HOLD_FRAMES = 3'd1,
     // 峰数 ≥ 它 = 张开（=1 段 = 并指/握拳）
     parameter integer  M2_OPEN_MIN = 2,
     // 手型滞回：连续这么多帧同类才改状态
@@ -1908,6 +1917,8 @@ module recog_top #(
     wire [19:0] S_band_area;
     wire [10:0] S_band_cx;
     wire [9:0]  S_band_cy;
+    // P0-04a：运动证据（窗口内 / 全帧），帧锁存后给 DBG
+    wire [19:0] S_band_mot_win, S_band_mot_all;
     wire [3:0] S_mask_sel_raw = (MASK_SRC == 2) ?
                                 (S_v2 ? S_skin_use :
                                  (S_cap_locked ? S_skin_use : S_fusion_mask)) :
@@ -1982,18 +1993,19 @@ module recog_top #(
         wire [10:0] S_qx_now = {S_div_qx[9:0], S_rx_ge};
         wire [9:0]  S_qy_now = {S_div_qy[8:0], S_ry_ge};
 
-        // ---- 软权重：每像素 w = min(皮肤分 0..2, 运动分 0..2) -------------------
-        // 皮肤分：暖色占优(R>G 且 R>B) 1 分 + 饱和度(max−min ≥ SAT_MIN) 1 分
-        // 运动分：|本帧灰度 − 上一帧灰度| > MOTION_TH 1 分、> 2× 2 分；权重取两者的小者
-        wire signed [8:0] S_th  = MOTION_TH;
-        wire signed [8:0] S_th2 = MOTION_TH + MOTION_TH;
+        // ---- 软权重：每像素 w = min(皮肤分 0..2, 运动资格 0/2) ------------------
+        // 皮肤分：暖色占优(R>G 且 R>B) 1 分 + 饱和度(max−min ≥ SAT_MIN) 1 分。
+        // 【阶段一】捕获态运动权重与 `S_motion_mask` 同源：16×16 块已连续 2 帧
+        // 通过块级运动门时，块内肤色像素直接获得运动资格；否则为 0。
+        // 旧实现里掩码走块级判决、权重却重新逐像素比较灰度差，远手容易“块已
+        // 判动、但 Σw 仍不足 2000”。锁定后仍只看肤色，行为不变。
 
         function [1:0] F_w_rgb;
-            input [7:0] I_r, I_g, I_b, I_gray;
+            input [7:0] I_r, I_g, I_b;
             input       I_in_rect;        // 该像素在肤色矩形内（与掩码同一判据，调用侧传 S_skin_mask[i]）
+            input       I_block_motion;   // 该像素所在 16×16 块的已确认运动资格
             reg [7:0] S_hi, S_lo;
             reg [1:0] S_sk, S_mo;
-            reg signed [8:0] S_d, S_da;
             begin
                 S_hi = (I_r > I_g) ? ((I_r > I_b) ? I_r : I_b) : ((I_g > I_b) ? I_g : I_b);
                 S_lo = (I_r < I_g) ? ((I_r < I_b) ? I_r : I_b) : ((I_g < I_b) ? I_g : I_b);
@@ -2004,10 +2016,6 @@ module recog_top #(
                 // 不再被桌面拽"，而不只是"掩码亮不亮"。
                 S_sk = I_in_rect ? ({1'b0, ((I_r > I_g) && (I_r > I_b))} +
                                     {1'b0, ((S_hi - S_lo) >= SAT_MIN)}) : 2'd0;
-                // **2026-10-16 Step D：掩码与软权重必须同源** —— 运动分就用与
-                // `S_motion_mask` 完全相同的逐像素判据（同一块背景 `S_bg_cur`、同一对
-                // 门限 MOTION_TH / 2×MOTION_TH、同一个相对门）。历史上踩过
-                // "掩码走新判据、权重还喂老判据"的坑：桌面不涂红、却照样把准星拽过去。
                 // 【2026-10-21】锁定后必须与掩码同源：掩码在锁定态已切到纯肤色
                 // （见 S_mask_sel_raw），权重却仍乘运动分 → 手一停 Σw 归零，
                 // 质心失效、命中失效，5 帧后丢锁，形成"掩码 1 秒出现/消失"的循环。
@@ -2019,15 +2027,9 @@ module recog_top #(
                     S_mo = 2'd2;
                 end
                 else begin
-                    // 运动分：> 2×MOTION_TH 给 2 分、> MOTION_TH 给 1 分，否则 0 分
-                    S_d  = {1'b0, I_gray} - {1'b0, S_bg_cur};
-                    S_da = S_d[8] ? (~S_d + 9'd1) : S_d;
-                    if((S_da > S_th2) && ((MOTION_REL == 0) || ({S_da, 2'b0} > {1'b0, S_bg_cur})))
-                        S_mo = 2'd2;
-                    else if((S_da > S_th) && ((MOTION_REL == 0) || ({S_da, 3'b0} > {1'b0, S_bg_cur})))
-                        S_mo = 2'd1;
-                    else
-                        S_mo = 2'd0;
+                    // 阶段一：不再要求块内每个肤色像素自身都达到逐像素运动门。
+                    // 块级运动资格已经把静止背景挡掉，块内完整肤色由皮肤分决定权重。
+                    S_mo = I_block_motion ? 2'd2 : 2'd0;
                 end
                 F_w_rgb = (S_sk < S_mo) ? S_sk : S_mo;
             end
@@ -2069,13 +2071,17 @@ module recog_top #(
         // ⚠ 2026-10-16 ① 块级占比门**同样作用在软权重上**：掩码与权重必须同源
         //   （历史教训：掩码被门挡下、权重还照投 → 掩码看不见了、准星却被那片东西拽走）。
         wire [1:0]  S_w0 = (F_w_inroi(S_wc0, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0], S_gray0, S_skin_use[0]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix0[23:16], S_raw_pix0[15:8], S_raw_pix0[7:0],
+                                     S_skin_use[0], S_motion_mask[0]) : 2'd0;
         wire [1:0]  S_w1 = (F_w_inroi(S_wc1, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0], S_gray1, S_skin_use[1]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix1[23:16], S_raw_pix1[15:8], S_raw_pix1[7:0],
+                                     S_skin_use[1], S_motion_mask[1]) : 2'd0;
         wire [1:0]  S_w2 = (F_w_inroi(S_wc2, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0], S_gray2, S_skin_use[2]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix2[23:16], S_raw_pix2[15:8], S_raw_pix2[7:0],
+                                     S_skin_use[2], S_motion_mask[2]) : 2'd0;
         wire [1:0]  S_w3 = (F_w_inroi(S_wc3, S_y_pos) && S_occ_keep)
-                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0], S_gray3, S_skin_use[3]) : 2'd0;
+                           ? F_w_rgb(S_raw_pix3[23:16], S_raw_pix3[15:8], S_raw_pix3[7:0],
+                                     S_skin_use[3], S_motion_mask[3]) : 2'd0;
 
         // w∈0..2：w·x = (w[0] ? x : 0) + (w[1] ? x<<1 : 0) —— 移位加法，不碰 DSP
         wire [11:0] S_wx0 = (S_w0[0] ? {1'b0,S_wc0} : 12'd0) + (S_w0[1] ? {S_wc0,1'b0} : 12'd0);
@@ -2808,6 +2814,40 @@ module recog_top #(
                                (S_locked && (S_wsum_h >= MIN_WSUM_HOLD)))
                                                 : (S_mcnt >= MIN_CNT)) && !S_gate_bad;
 
+        // ====================================================================
+        // P0-04b：低置信度重播种
+        //   * 窗口运动 P < 0x0800（实际 32768 px）且全帧运动 Q >= 0x0200
+        //     （实际 32768 px）连续 N 帧 → 视为“窗口没覆盖主要运动源”；
+        //   * 当前手带仍有效且形状/面积像手时，N 放宽到 60 帧；
+        //     否则 20 帧，避免错误锁定长期不释放；
+        //   * 超时后只做“解锁 + ROI 回全帧”，不直接把 bbox 跳到运动区；
+        //     下一帧走现有 skin∩motion 捕获路径重新播种。
+        // ====================================================================
+        wire S_band_handlike = S_band_valid &&
+                               (S_band_area >= 20'd2000) &&
+                               (S_band_area <= 20'd120000) &&
+                               ((S_band_xmax - S_band_xmin) <= 11'd720) &&
+                               ((S_band_ymax - S_band_ymin) <= 10'd720);
+        wire S_low_conf = S_locked && S_hit &&
+                          (S_band_mot_win < 20'd32768) &&
+                          (S_band_mot_all >= 20'd32768);
+        reg [5:0] S_low_cnt;
+        wire [5:0] S_low_th = S_band_handlike ? 6'd60 : 6'd20;
+        wire S_force_unlock = S_low_conf && (S_low_cnt >= (S_low_th - 6'd1));
+
+        always @(posedge I_clk or negedge I_rst_n) begin
+            if(!I_rst_n)
+                S_low_cnt <= 6'd0;
+            else if(I_raw_tuser) begin
+                if(!S_locked)
+                    S_low_cnt <= 6'd0;
+                else if(S_low_conf)
+                    S_low_cnt <= (S_low_cnt == 6'h3F) ? 6'h3F : (S_low_cnt + 6'd1);
+                else
+                    S_low_cnt <= 6'd0;
+            end
+        end
+
         // 观测误差 + 死区：|err| ≤ DEADBAND 时按 0 处理（噪声抖动不再推动准星）
         wire signed [12:0] S_err_raw_x = {2'b0, S_obs_x} - S_pos_x;
         wire signed [12:0] S_err_raw_y = {2'b0, S_obs_y} - S_pos_y;
@@ -2837,6 +2877,20 @@ module recog_top #(
                 S_vel_x  <= 13'sd0;   S_vel_y  <= 13'sd0;
             end
             else if(I_raw_tuser) begin
+                if(S_force_unlock) begin
+                    // 低置信度：只释放锁定并回全帧搜索，不直接把 bbox 跳到运动区。
+                    // 下一帧由未锁定路径的 skin∩motion 重新播种。
+                    S_locked    <= 1'b0;
+                    S_hit_cnt   <= 4'd0;
+                    S_miss_cnt  <= 6'd0;
+                    S_vel_x     <= 13'sd0;
+                    S_vel_y     <= 13'sd0;
+                    S_roi_x0    <= 11'd0;
+                    S_roi_x1    <= 11'd1279;
+                    S_roi_y0    <= 10'd0;
+                    S_roi_y1    <= 10'd719;
+                end
+                else begin
                 // (1) 命中/丢失计数与锁定状态
                 if(S_hit) begin
                     S_miss_cnt <= 6'd0;
@@ -2875,6 +2929,7 @@ module recog_top #(
                 else if(!S_locked) begin
                     S_roi_x0 <= 11'd0;    S_roi_x1 <= 11'd1279;
                     S_roi_y0 <= 10'd0;    S_roi_y1 <= 10'd719;
+                end
                 end
             end
         end
@@ -2954,6 +3009,7 @@ module recog_top #(
             .I_clk        ( I_clk          ),
             .I_rst_n      ( I_rst_n        ),
             .I_mask       ( S_m_pick_v     ),
+            .I_motion     ( S_motion_mask  ),
             .I_x_grp      ( S_x_grp         ),
             .I_y_pos      ( S_y_pos         ),
             .I_tvalid     ( I_raw_tvalid    ),
@@ -2969,7 +3025,9 @@ module recog_top #(
             .O_y_max      ( S_band_ymax     ),
             .O_area       ( S_band_area     ),
             .O_cx         ( S_band_cx       ),
-            .O_cy         ( S_band_cy       )
+            .O_cy         ( S_band_cy       ),
+            .O_mot_win    ( S_band_mot_win  ),
+            .O_mot_all    ( S_band_mot_all  )
         );
 
         // ---- 【v2，档 15】**显示/指尖 vs 统计/跟踪 分流** -------------------------
@@ -3022,15 +3080,54 @@ module recog_top #(
                                { F_in_m2(S_col3), F_in_m2(S_col2),
                                  F_in_m2(S_col1), F_in_m2(S_col0) };
 
-        reg [10:0] a_m2_tx, a_m2_ty;    // 本帧指尖（列 / 行）
-        reg        a_m2_got;            // 本帧找到指尖了吗
+        // ---- P0-02 粘指候选 ----------------------------------------------------
+        reg        a_m2_top_seen;       // 本帧是否已找到第一个非空顶带行
+        reg [9:0]  a_m2_top_y;          // 第一个非空顶带行
+        reg [10:0] h_m2_tx, h_m2_ty;    // 上一帧确认结果（画点 / DBG / 粘指参考）
+        reg [4:0]  h_m2_max;
+        reg        h_m2_got;            // 上一帧指尖是否有效
+        reg        h_m2_pending;        // 大跳候选等待下一帧确认
+        reg [10:0] h_m2_pending_x;
+        reg [10:0] a_m2_tx, a_m2_ty;
+        reg        a_m2_got;
+        reg [10:0] a_m2_fb_tx, a_m2_fb_ty;
+        reg        a_m2_fb_got;
+        reg        S_m2_ref_valid_r;
+        reg [10:0] S_m2_stick_lo_r, S_m2_stick_hi_r;
+
+        // 先找顶带第一个非空行，再在它和随后几行里选择离上帧指尖 x 最近的像素。
+        // 无历史指尖时全候选距离按 0 处理，等价于原来的“最上行、最左像素”。
+        function [10:0] F_m2_abs_x;
+            input [10:0] I_a, I_b;
+            begin
+                F_m2_abs_x = (I_a >= I_b) ? (I_a - I_b) : (I_b - I_a);
+            end
+        endfunction
+
+        wire [10:0] S_m2_tip_yhi = {1'b0, a_m2_top_y} + {1'b0, M2_TIP_EXTRA_ROWS};
+        wire        S_m2_tip_allow = !a_m2_top_seen ||
+                                     ({1'b0, S_y_pos} <= S_m2_tip_yhi);
+        wire [3:0] S_m2_stick = {
+            S_m2_top[3] && (!S_m2_ref_valid_r || ((S_col3 >= S_m2_stick_lo_r) && (S_col3 <= S_m2_stick_hi_r))),
+            S_m2_top[2] && (!S_m2_ref_valid_r || ((S_col2 >= S_m2_stick_lo_r) && (S_col2 <= S_m2_stick_hi_r))),
+            S_m2_top[1] && (!S_m2_ref_valid_r || ((S_col1 >= S_m2_stick_lo_r) && (S_col1 <= S_m2_stick_hi_r))),
+            S_m2_top[0] && (!S_m2_ref_valid_r || ((S_col0 >= S_m2_stick_lo_r) && (S_col0 <= S_m2_stick_hi_r)))
+        };
+        wire [10:0] S_m2_stick_x = S_m2_stick[0] ? S_col0 :
+                                   S_m2_stick[1] ? S_col1 :
+                                   S_m2_stick[2] ? S_col2 : S_col3;
+        wire [10:0] S_m2_any_x = S_m2_top[0] ? S_col0 :
+                                 S_m2_top[1] ? S_col1 :
+                                 S_m2_top[2] ? S_col2 : S_col3;
+        wire        S_m2_tip_any = a_m2_got || a_m2_fb_got;
+        wire [10:0] S_m2_tip_x_final = a_m2_got ? a_m2_tx : a_m2_fb_tx;
+        wire [9:0]  S_m2_tip_y_final = a_m2_got ? a_m2_ty : a_m2_fb_ty;
+
         reg [9:0]  a_m2_py;             // 上一拍的行（检测换行）
         reg        a_m2_prev;           // 上一拍最右像素在不在顶带
         reg [4:0]  a_m2_runs;           // 当前行的连续段数（饱和）
         reg [4:0]  a_m2_max;            // 本帧各行的最大段数
-        reg [10:0] h_m2_tx, h_m2_ty;    // 上一帧结果（画点 / DBG 用）
-        reg [4:0]  h_m2_max;
-        reg        h_m2_got;            // 上一帧有没有找到指尖（2026-10-16：准星观测源要用它判有效）
+        reg [2:0]  S_m2_tip_hold_cnt;   // 当前指尖整帧缺失时的一帧保持
         reg [2:0]  S_m2_shape;          // 手型状态：0=未知 1=握拳 2=张开
         reg [3:0]  S_m2_agree;          // 连续同类帧数（滞回用）
 
@@ -3045,21 +3142,88 @@ module recog_top #(
                                  {2'b0, S_m2_e[2]} + {2'b0, S_m2_e[3]};
         wire [4:0] S_m2_runs_n = (a_m2_runs > 5'd28) ? 5'd31 : (a_m2_runs + {2'b0, S_m2_new});
         // 手型原始类别（用刚结束那一帧的整帧结果）：0=未知 1=并指/握拳 2=张开
-        wire [2:0] S_m2_raw = a_m2_got ? ((a_m2_max >= M2_OPEN_MIN) ? 3'd2 : 3'd1) : 3'd0;
+        wire [2:0] S_m2_raw = S_m2_tip_any ? ((a_m2_max >= M2_OPEN_MIN) ? 3'd2 : 3'd1) : 3'd0;
+        // 帧末判定：小幅变化直接跟随；大跳先进入 pending，下一帧仍靠近才确认。
+        wire [10:0] S_m2_cand_dx_h = F_m2_abs_x(S_m2_tip_x_final, h_m2_tx);
+        wire [10:0] S_m2_cand_dx_p = F_m2_abs_x(S_m2_tip_x_final, h_m2_pending_x);
+        wire        S_m2_near_h = h_m2_got && (S_m2_cand_dx_h <= M2_TIP_STICK_X);
+        wire        S_m2_near_p = h_m2_pending && (S_m2_cand_dx_p <= M2_TIP_CONFIRM_X);
 
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 a_m2_tx <= 11'd0; a_m2_ty <= 11'd0; a_m2_got <= 1'b0;
+                a_m2_fb_tx <= 11'd0; a_m2_fb_ty <= 10'd0; a_m2_fb_got <= 1'b0;
+                a_m2_top_seen <= 1'b0; a_m2_top_y <= 10'd0;
                 a_m2_py <= 10'd0; a_m2_prev <= 1'b0;
                 a_m2_runs <= 5'd0; a_m2_max <= 5'd0;
                 h_m2_tx <= 11'd0; h_m2_ty <= 11'd0; h_m2_max <= 5'd0; h_m2_got <= 1'b0;
+                h_m2_pending <= 1'b0;
+                h_m2_pending_x <= 11'd0;
+                S_m2_tip_hold_cnt <= 3'd0;
+                S_m2_ref_valid_r <= 1'b0;
+                S_m2_stick_lo_r <= 11'd0; S_m2_stick_hi_r <= 11'd1279;
                 S_m2_shape <= 3'd0; S_m2_agree <= 4'd0;
             end
             else if(I_raw_tuser) begin
-                // 帧首：锁存这一帧的结果（画点/DBG 用），并清零累加器
-                h_m2_tx  <= a_m2_tx;  h_m2_ty <= a_m2_ty;  h_m2_max <= a_m2_max;
-                h_m2_got <= a_m2_got;
+                // 帧首：先完成粘指判定，再清零本帧扫描状态。
+                h_m2_max <= a_m2_max;
+                if(S_m2_tip_any) begin
+                    S_m2_ref_valid_r <= 1'b1;
+                    S_m2_stick_lo_r <= (S_m2_tip_x_final > M2_TIP_STICK_X)
+                                       ? (S_m2_tip_x_final - M2_TIP_STICK_X) : 11'd0;
+                    S_m2_stick_hi_r <= ({1'b0, S_m2_tip_x_final} + {1'b0, M2_TIP_STICK_X} > 12'd1279)
+                                       ? 11'd1279
+                                       : S_m2_tip_x_final + M2_TIP_STICK_X;
+                end
+                else if(h_m2_got && (S_m2_tip_hold_cnt < M2_TIP_HOLD_FRAMES)) begin
+                    S_m2_ref_valid_r <= 1'b1;
+                    S_m2_stick_lo_r <= (h_m2_tx > M2_TIP_STICK_X)
+                                       ? (h_m2_tx - M2_TIP_STICK_X) : 11'd0;
+                    S_m2_stick_hi_r <= ({1'b0, h_m2_tx} + {1'b0, M2_TIP_STICK_X} > 12'd1279)
+                                       ? 11'd1279 : h_m2_tx + M2_TIP_STICK_X;
+                end
+                else begin
+                    S_m2_ref_valid_r <= 1'b0;
+                    S_m2_stick_lo_r <= 11'd0;
+                    S_m2_stick_hi_r <= 11'd1279;
+                end
+                if(S_m2_tip_any) begin
+                    S_m2_tip_hold_cnt <= 3'd0;
+                    if(!h_m2_got) begin
+                        // 首次捕获不等确认，保持原来 3 帧内锁定的入口时序。
+                        h_m2_tx <= S_m2_tip_x_final; h_m2_ty <= S_m2_tip_y_final;
+                        h_m2_got <= 1'b1; h_m2_pending <= 1'b0;
+                    end
+                    else if(S_m2_near_h) begin
+                        // 同一根手指的小幅移动直接跟随。
+                        h_m2_tx <= S_m2_tip_x_final; h_m2_ty <= S_m2_tip_y_final;
+                        h_m2_got <= 1'b1; h_m2_pending <= 1'b0;
+                    end
+                    else if(S_m2_near_p) begin
+                        // 大跳候选连续两帧仍在附近，确认换到新指尖。
+                        h_m2_tx <= S_m2_tip_x_final; h_m2_ty <= S_m2_tip_y_final;
+                        h_m2_got <= 1'b1; h_m2_pending <= 1'b0;
+                    end
+                    else begin
+                        // 先保持旧指尖一帧，防止最左/最近段切换造成瞬跳。
+                        h_m2_pending <= 1'b1;
+                        h_m2_pending_x <= S_m2_tip_x_final;
+                    end
+                end
+                else begin
+                    h_m2_pending <= 1'b0;
+                    if(h_m2_got && (S_m2_tip_hold_cnt < M2_TIP_HOLD_FRAMES)) begin
+                        // 掩码边缘单帧闪断：保持上一指尖，不打断 S_hit。
+                        S_m2_tip_hold_cnt <= S_m2_tip_hold_cnt + 3'd1;
+                    end
+                    else begin
+                        S_m2_tip_hold_cnt <= 3'd0;
+                        h_m2_got <= 1'b0;
+                    end
+                end
                 a_m2_tx  <= 11'd0;    a_m2_ty <= 11'd0;    a_m2_got <= 1'b0;
+                a_m2_fb_tx <= 11'd0; a_m2_fb_ty <= 10'd0; a_m2_fb_got <= 1'b0;
+                a_m2_top_seen <= 1'b0; a_m2_top_y <= 10'd0;
                 a_m2_py  <= 10'd0;    a_m2_prev <= 1'b0;
                 a_m2_runs <= 5'd0;    a_m2_max <= 5'd0;
 
@@ -3086,12 +3250,22 @@ module recog_top #(
                     a_m2_prev <= S_m2_top[3];
                 end
 
-                // 指尖：本帧顶带里遇到的第一个像素（最上那一行的最左一个）
-                if(!a_m2_got && (|S_m2_top)) begin
-                    a_m2_got <= 1'b1;
+                // 粘指：找顶带第一个非空行；只在其后 M2_TIP_EXTRA_ROWS 行内，
+                // 优先接受上一指尖 x 左右 M2_TIP_STICK_X 内的首个像素。
+                // 该窗口没有候选时，另记首个全顶带像素作为大跳/快速移动候选。
+                if((|S_m2_top) && !a_m2_top_seen) begin
+                    a_m2_top_seen <= 1'b1;
+                    a_m2_top_y    <= S_y_pos;
+                end
+                if(S_m2_tip_allow && !a_m2_got && (|S_m2_stick)) begin
+                    a_m2_tx  <= S_m2_stick_x;
                     a_m2_ty  <= {1'b0, S_y_pos};
-                    a_m2_tx  <= S_m2_top[0] ? S_col0 : (S_m2_top[1] ? S_col1 :
-                                (S_m2_top[2] ? S_col2 : S_col3));
+                    a_m2_got <= 1'b1;
+                end
+                if(S_m2_tip_allow && !a_m2_fb_got && (|S_m2_top)) begin
+                    a_m2_fb_tx  <= S_m2_any_x;
+                    a_m2_fb_ty  <= {1'b0, S_y_pos};
+                    a_m2_fb_got <= 1'b1;
                 end
             end
         end
@@ -3245,6 +3419,8 @@ module recog_top #(
         assign S_band_area  = 20'd0;
         assign S_band_cx    = 11'd0;
         assign S_band_cy    = 10'd0;
+        assign S_band_mot_win = 20'd0;
+        assign S_band_mot_all = 20'd0;
         assign S_m2_dbg_p   = 16'd0;
         assign S_m2_dbg_q   = 14'd0;
         assign S_m2_dbg_on  = 1'b0;
@@ -3302,16 +3478,22 @@ module recog_top #(
     //   Q(14) = {左计数[4:0], 右计数[4:0], 下计数[3:0]} —— 上板"20 次/方向"直接对这三个数
     //   （R 保持行带 bbox 的 y，用来同时盯手框健康；交付档 Q/R = 行带 bbox）
     wire S_m21_dbg_on = (S_cfg == 4'd10) || (S_cfg == 4'd11);
+    // P0-04a：档 2 的运动门是开的；借 P/Q 报运动证据用于上板验证：
+    //   P(16) = 窗口内运动像素数 >>4
+    //   Q(14) = 全帧运动像素数 >>6
+    wire S_mot_dbg_on = (S_cfg == 4'd2);
     // 【2026-10-16 ⑤】观测档（13/14）借 P/Q 报"肤色掩码内 Y/sat 的帧内极值"：
     //   P(16) = { 掩码内 minY, maxY }     ← 定 SKIN_Y_MIN / SKIN_Y_CAP
     //   Q(14) = { 掩码内 minSat[6:0], maxSat[6:0] }   ← 定比例饱和 SKIN_SAT_SH（配 P 的 Y）
     assign O_mask_cnt_shift = S_m21_dbg_on ? {2'b0, S_gest_dir, S_gest_cnt}
                             : S_obs_on     ? {h_obs_ymin, h_obs_ymax}
+                            : S_mot_dbg_on ? S_band_mot_win[19:4]
                             : S_m2_dbg_on  ? S_m2_dbg_p
                                            : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
     assign O_bbox_x         = S_m21_dbg_on ? {S_gest_cl, S_gest_cr, S_gest_cd}
                             : S_obs_on     ? {h_obs_smin[6:0], h_obs_smax[6:0]}
+                            : S_mot_dbg_on ? S_band_mot_all[19:6]
                             : S_m2_dbg_on  ? S_m2_dbg_q
                                             : ((DIAG_CHROMA != 0) ? S_ch_word_x
                                                                   : {S_band_xmin[10:4], S_band_xmax[10:4]});
