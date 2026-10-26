@@ -457,6 +457,15 @@ module recog_top #(
     // 顶带：以"上一帧掩码最高行 S_ymin"为中心，向上 M2_TOP_UP、向下 M2_TOP_DN 像素
     parameter [9:0]    M2_TOP_UP = 10'd16,
     parameter [9:0]    M2_TOP_DN = 10'd48,
+    // P0-02 粘指：在第一个非空行之后再看几行，并在这些顶部像素中选择离上帧
+    // 指尖 x 最近的点。只覆盖指尖帽，不把更下方的手掌拉进候选。
+    parameter [9:0]    M2_TIP_EXTRA_ROWS = 10'd3,
+    // 小于该 x 距离视为同一根手指，立即跟随；更大变化先保持一帧再确认。
+    parameter [10:0]   M2_TIP_STICK_X = 11'd32,
+    // pending 候选的跨帧允许位移；快速水平挥动可在下一帧确认，避免持续追不上。
+    parameter [10:0]   M2_TIP_CONFIRM_X = 11'd64,
+    // 当前顶带整帧没有候选时，指尖状态保持帧数。
+    parameter [2:0]    M2_TIP_HOLD_FRAMES = 3'd1,
     // 峰数 ≥ 它 = 张开（=1 段 = 并指/握拳）
     parameter integer  M2_OPEN_MIN = 2,
     // 手型滞回：连续这么多帧同类才改状态
@@ -3071,15 +3080,54 @@ module recog_top #(
                                { F_in_m2(S_col3), F_in_m2(S_col2),
                                  F_in_m2(S_col1), F_in_m2(S_col0) };
 
-        reg [10:0] a_m2_tx, a_m2_ty;    // 本帧指尖（列 / 行）
-        reg        a_m2_got;            // 本帧找到指尖了吗
+        // ---- P0-02 粘指候选 ----------------------------------------------------
+        reg        a_m2_top_seen;       // 本帧是否已找到第一个非空顶带行
+        reg [9:0]  a_m2_top_y;          // 第一个非空顶带行
+        reg [10:0] h_m2_tx, h_m2_ty;    // 上一帧确认结果（画点 / DBG / 粘指参考）
+        reg [4:0]  h_m2_max;
+        reg        h_m2_got;            // 上一帧指尖是否有效
+        reg        h_m2_pending;        // 大跳候选等待下一帧确认
+        reg [10:0] h_m2_pending_x;
+        reg [10:0] a_m2_tx, a_m2_ty;
+        reg        a_m2_got;
+        reg [10:0] a_m2_fb_tx, a_m2_fb_ty;
+        reg        a_m2_fb_got;
+        reg        S_m2_ref_valid_r;
+        reg [10:0] S_m2_stick_lo_r, S_m2_stick_hi_r;
+
+        // 先找顶带第一个非空行，再在它和随后几行里选择离上帧指尖 x 最近的像素。
+        // 无历史指尖时全候选距离按 0 处理，等价于原来的“最上行、最左像素”。
+        function [10:0] F_m2_abs_x;
+            input [10:0] I_a, I_b;
+            begin
+                F_m2_abs_x = (I_a >= I_b) ? (I_a - I_b) : (I_b - I_a);
+            end
+        endfunction
+
+        wire [10:0] S_m2_tip_yhi = {1'b0, a_m2_top_y} + {1'b0, M2_TIP_EXTRA_ROWS};
+        wire        S_m2_tip_allow = !a_m2_top_seen ||
+                                     ({1'b0, S_y_pos} <= S_m2_tip_yhi);
+        wire [3:0] S_m2_stick = {
+            S_m2_top[3] && (!S_m2_ref_valid_r || ((S_col3 >= S_m2_stick_lo_r) && (S_col3 <= S_m2_stick_hi_r))),
+            S_m2_top[2] && (!S_m2_ref_valid_r || ((S_col2 >= S_m2_stick_lo_r) && (S_col2 <= S_m2_stick_hi_r))),
+            S_m2_top[1] && (!S_m2_ref_valid_r || ((S_col1 >= S_m2_stick_lo_r) && (S_col1 <= S_m2_stick_hi_r))),
+            S_m2_top[0] && (!S_m2_ref_valid_r || ((S_col0 >= S_m2_stick_lo_r) && (S_col0 <= S_m2_stick_hi_r)))
+        };
+        wire [10:0] S_m2_stick_x = S_m2_stick[0] ? S_col0 :
+                                   S_m2_stick[1] ? S_col1 :
+                                   S_m2_stick[2] ? S_col2 : S_col3;
+        wire [10:0] S_m2_any_x = S_m2_top[0] ? S_col0 :
+                                 S_m2_top[1] ? S_col1 :
+                                 S_m2_top[2] ? S_col2 : S_col3;
+        wire        S_m2_tip_any = a_m2_got || a_m2_fb_got;
+        wire [10:0] S_m2_tip_x_final = a_m2_got ? a_m2_tx : a_m2_fb_tx;
+        wire [9:0]  S_m2_tip_y_final = a_m2_got ? a_m2_ty : a_m2_fb_ty;
+
         reg [9:0]  a_m2_py;             // 上一拍的行（检测换行）
         reg        a_m2_prev;           // 上一拍最右像素在不在顶带
         reg [4:0]  a_m2_runs;           // 当前行的连续段数（饱和）
         reg [4:0]  a_m2_max;            // 本帧各行的最大段数
-        reg [10:0] h_m2_tx, h_m2_ty;    // 上一帧结果（画点 / DBG 用）
-        reg [4:0]  h_m2_max;
-        reg        h_m2_got;            // 上一帧有没有找到指尖（2026-10-16：准星观测源要用它判有效）
+        reg [2:0]  S_m2_tip_hold_cnt;   // 当前指尖整帧缺失时的一帧保持
         reg [2:0]  S_m2_shape;          // 手型状态：0=未知 1=握拳 2=张开
         reg [3:0]  S_m2_agree;          // 连续同类帧数（滞回用）
 
@@ -3094,21 +3142,88 @@ module recog_top #(
                                  {2'b0, S_m2_e[2]} + {2'b0, S_m2_e[3]};
         wire [4:0] S_m2_runs_n = (a_m2_runs > 5'd28) ? 5'd31 : (a_m2_runs + {2'b0, S_m2_new});
         // 手型原始类别（用刚结束那一帧的整帧结果）：0=未知 1=并指/握拳 2=张开
-        wire [2:0] S_m2_raw = a_m2_got ? ((a_m2_max >= M2_OPEN_MIN) ? 3'd2 : 3'd1) : 3'd0;
+        wire [2:0] S_m2_raw = S_m2_tip_any ? ((a_m2_max >= M2_OPEN_MIN) ? 3'd2 : 3'd1) : 3'd0;
+        // 帧末判定：小幅变化直接跟随；大跳先进入 pending，下一帧仍靠近才确认。
+        wire [10:0] S_m2_cand_dx_h = F_m2_abs_x(S_m2_tip_x_final, h_m2_tx);
+        wire [10:0] S_m2_cand_dx_p = F_m2_abs_x(S_m2_tip_x_final, h_m2_pending_x);
+        wire        S_m2_near_h = h_m2_got && (S_m2_cand_dx_h <= M2_TIP_STICK_X);
+        wire        S_m2_near_p = h_m2_pending && (S_m2_cand_dx_p <= M2_TIP_CONFIRM_X);
 
         always @(posedge I_clk or negedge I_rst_n) begin
             if(!I_rst_n) begin
                 a_m2_tx <= 11'd0; a_m2_ty <= 11'd0; a_m2_got <= 1'b0;
+                a_m2_fb_tx <= 11'd0; a_m2_fb_ty <= 10'd0; a_m2_fb_got <= 1'b0;
+                a_m2_top_seen <= 1'b0; a_m2_top_y <= 10'd0;
                 a_m2_py <= 10'd0; a_m2_prev <= 1'b0;
                 a_m2_runs <= 5'd0; a_m2_max <= 5'd0;
                 h_m2_tx <= 11'd0; h_m2_ty <= 11'd0; h_m2_max <= 5'd0; h_m2_got <= 1'b0;
+                h_m2_pending <= 1'b0;
+                h_m2_pending_x <= 11'd0;
+                S_m2_tip_hold_cnt <= 3'd0;
+                S_m2_ref_valid_r <= 1'b0;
+                S_m2_stick_lo_r <= 11'd0; S_m2_stick_hi_r <= 11'd1279;
                 S_m2_shape <= 3'd0; S_m2_agree <= 4'd0;
             end
             else if(I_raw_tuser) begin
-                // 帧首：锁存这一帧的结果（画点/DBG 用），并清零累加器
-                h_m2_tx  <= a_m2_tx;  h_m2_ty <= a_m2_ty;  h_m2_max <= a_m2_max;
-                h_m2_got <= a_m2_got;
+                // 帧首：先完成粘指判定，再清零本帧扫描状态。
+                h_m2_max <= a_m2_max;
+                if(S_m2_tip_any) begin
+                    S_m2_ref_valid_r <= 1'b1;
+                    S_m2_stick_lo_r <= (S_m2_tip_x_final > M2_TIP_STICK_X)
+                                       ? (S_m2_tip_x_final - M2_TIP_STICK_X) : 11'd0;
+                    S_m2_stick_hi_r <= ({1'b0, S_m2_tip_x_final} + {1'b0, M2_TIP_STICK_X} > 12'd1279)
+                                       ? 11'd1279
+                                       : S_m2_tip_x_final + M2_TIP_STICK_X;
+                end
+                else if(h_m2_got && (S_m2_tip_hold_cnt < M2_TIP_HOLD_FRAMES)) begin
+                    S_m2_ref_valid_r <= 1'b1;
+                    S_m2_stick_lo_r <= (h_m2_tx > M2_TIP_STICK_X)
+                                       ? (h_m2_tx - M2_TIP_STICK_X) : 11'd0;
+                    S_m2_stick_hi_r <= ({1'b0, h_m2_tx} + {1'b0, M2_TIP_STICK_X} > 12'd1279)
+                                       ? 11'd1279 : h_m2_tx + M2_TIP_STICK_X;
+                end
+                else begin
+                    S_m2_ref_valid_r <= 1'b0;
+                    S_m2_stick_lo_r <= 11'd0;
+                    S_m2_stick_hi_r <= 11'd1279;
+                end
+                if(S_m2_tip_any) begin
+                    S_m2_tip_hold_cnt <= 3'd0;
+                    if(!h_m2_got) begin
+                        // 首次捕获不等确认，保持原来 3 帧内锁定的入口时序。
+                        h_m2_tx <= S_m2_tip_x_final; h_m2_ty <= S_m2_tip_y_final;
+                        h_m2_got <= 1'b1; h_m2_pending <= 1'b0;
+                    end
+                    else if(S_m2_near_h) begin
+                        // 同一根手指的小幅移动直接跟随。
+                        h_m2_tx <= S_m2_tip_x_final; h_m2_ty <= S_m2_tip_y_final;
+                        h_m2_got <= 1'b1; h_m2_pending <= 1'b0;
+                    end
+                    else if(S_m2_near_p) begin
+                        // 大跳候选连续两帧仍在附近，确认换到新指尖。
+                        h_m2_tx <= S_m2_tip_x_final; h_m2_ty <= S_m2_tip_y_final;
+                        h_m2_got <= 1'b1; h_m2_pending <= 1'b0;
+                    end
+                    else begin
+                        // 先保持旧指尖一帧，防止最左/最近段切换造成瞬跳。
+                        h_m2_pending <= 1'b1;
+                        h_m2_pending_x <= S_m2_tip_x_final;
+                    end
+                end
+                else begin
+                    h_m2_pending <= 1'b0;
+                    if(h_m2_got && (S_m2_tip_hold_cnt < M2_TIP_HOLD_FRAMES)) begin
+                        // 掩码边缘单帧闪断：保持上一指尖，不打断 S_hit。
+                        S_m2_tip_hold_cnt <= S_m2_tip_hold_cnt + 3'd1;
+                    end
+                    else begin
+                        S_m2_tip_hold_cnt <= 3'd0;
+                        h_m2_got <= 1'b0;
+                    end
+                end
                 a_m2_tx  <= 11'd0;    a_m2_ty <= 11'd0;    a_m2_got <= 1'b0;
+                a_m2_fb_tx <= 11'd0; a_m2_fb_ty <= 10'd0; a_m2_fb_got <= 1'b0;
+                a_m2_top_seen <= 1'b0; a_m2_top_y <= 10'd0;
                 a_m2_py  <= 10'd0;    a_m2_prev <= 1'b0;
                 a_m2_runs <= 5'd0;    a_m2_max <= 5'd0;
 
@@ -3135,12 +3250,22 @@ module recog_top #(
                     a_m2_prev <= S_m2_top[3];
                 end
 
-                // 指尖：本帧顶带里遇到的第一个像素（最上那一行的最左一个）
-                if(!a_m2_got && (|S_m2_top)) begin
-                    a_m2_got <= 1'b1;
+                // 粘指：找顶带第一个非空行；只在其后 M2_TIP_EXTRA_ROWS 行内，
+                // 优先接受上一指尖 x 左右 M2_TIP_STICK_X 内的首个像素。
+                // 该窗口没有候选时，另记首个全顶带像素作为大跳/快速移动候选。
+                if((|S_m2_top) && !a_m2_top_seen) begin
+                    a_m2_top_seen <= 1'b1;
+                    a_m2_top_y    <= S_y_pos;
+                end
+                if(S_m2_tip_allow && !a_m2_got && (|S_m2_stick)) begin
+                    a_m2_tx  <= S_m2_stick_x;
                     a_m2_ty  <= {1'b0, S_y_pos};
-                    a_m2_tx  <= S_m2_top[0] ? S_col0 : (S_m2_top[1] ? S_col1 :
-                                (S_m2_top[2] ? S_col2 : S_col3));
+                    a_m2_got <= 1'b1;
+                end
+                if(S_m2_tip_allow && !a_m2_fb_got && (|S_m2_top)) begin
+                    a_m2_fb_tx  <= S_m2_any_x;
+                    a_m2_fb_ty  <= {1'b0, S_y_pos};
+                    a_m2_fb_got <= 1'b1;
                 end
             end
         end
