@@ -53,22 +53,13 @@ module game_render (
     input  wire [3:0]   I_state,
     input  wire         I_marker_en,    // 0xA3：1 像素对齐标记（L1 自检）
 
-    // ---- 动态手势扫掠带（B 侧 game_gesture 产生，逐帧稳定）------------------
-    input  wire [11:0]  I_band_x0,
-    input  wire [11:0]  I_band_x1,
-    input  wire [11:0]  I_band_y0,
-    input  wire [11:0]  I_band_y1,
-    input  wire         I_band_en,
-    input  wire [23:0]  I_band_color,
-
     // ---- 精灵 ROM 接口（地址本拍给、数据下一拍到）--------------------------
     output wire [11:0]  O_spr_addr,
     input  wire [7:0]   I_spr_px,
 
     // ---- 叠加结果（与下一拍的 I_pixel_in 同拍）-----------------------------
     output wire         O_hit,
-    output wire [23:0]  O_color,
-    output wire         O_blend          // 1 = O_color 与背景做 50% 混合
+    output wire [23:0]  O_color
 );
 
     // ---- 配色（按 I_display_mode 二选一，不新增寄存器）---------------------
@@ -119,14 +110,14 @@ module game_render (
             wire [11:0] W_dy = I_y_nxt - W_y;
 
             wire        W_is_spr   = (W_type == 2'd2) | (W_type == 2'd3);
-            // type 1 = 命中白闪块：固定 64×64（尺寸字段只有 5 位，装不下 64，所以单独立型）
+            // type 1 = 命中白闪块：固定 128×128（尺寸字段只有 5 位，装不下 128，所以单独立型）
             wire        W_is_flash = (W_type == 2'd1);
-            // 精灵/半片：上屏坐标 >>1 换到源像素空间再比（2× 放大，见规划 §4.4 第 2 条）；
+            // 精灵/半片：上屏坐标 >>2 换到源像素空间再比（4× 放大，见规划 §4.4 第 2 条）；
             // 方块/屏幕矩形：直接按上屏像素比。
-            wire [11:0] W_dxs = W_dx >> 1;
-            wire [11:0] W_dys = W_dy >> 1;
+            wire [11:0] W_dxs = W_dx >> 2;
+            wire [11:0] W_dys = W_dy >> 2;
             wire        W_win = W_is_flash
-                              ? ((W_dx <= 12'd63) && (W_dy <= 12'd63))
+                              ? ((W_dx <= 12'd127) && (W_dy <= 12'd127))
                               : (W_is_spr
                                  ? ((W_dxs <= {7'b0, W_w}) && (W_dys <= {7'b0, W_h}))
                                  : ((W_dx  <= {7'b0, W_w}) && (W_dy  <= {7'b0, W_h})));
@@ -311,42 +302,30 @@ module game_render (
                        ((I_x_nxt == 12'd106)  && (I_y_nxt == 12'd127))  |
                        ((I_x_nxt == 12'd152)  && (I_y_nxt == 12'd34)));
 
-    // ---- 动态手势扫掠带 ----------------------------------------------------
-    // 文字/标记最高，扫掠带其次（可压住水果和拖尾），再往下是拖尾/粒子/对象。
-    wire S_hit_text = S_hit_mark | S_hit_score | S_hit_life;
-    wire S_hit_band = I_band_en &&
-                      (I_x_nxt >= I_band_x0) && (I_x_nxt <= I_band_x1) &&
-                      (I_y_nxt >= I_band_y0) && (I_y_nxt <= I_band_y1) &&
-                      !S_hit_text;
-
     // ---- 图层优先级与输出寄存 ----------------------------------------------
-    wire S_hit_flat = S_hit_text | S_hit_band | S_hit_trail | S_hit_part;
+    wire S_hit_flat = S_hit_mark | S_hit_score | S_hit_life | S_hit_trail | S_hit_part;
     wire S_win_spr  = S_hit_obj & S_obj_spr_win & ~S_hit_flat;
     wire S_win_flat = S_hit_flat | (S_hit_obj & ~S_obj_spr_win);
 
     wire [23:0] S_flat_col = S_hit_mark  ? 24'hFFFFFF  :
                              S_hit_score ? S_col_text  :
                              S_hit_life  ? S_col_text  :
-                             S_hit_band  ? I_band_color :
                              S_hit_trail ? S_col_trail :
                              S_hit_part  ? S_col_part  : S_obj_rect_col;
 
     reg        S_win_flat_d;
     reg        S_win_spr_d;
-    reg        S_hit_band_d;
     reg [23:0] S_flat_col_d;
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             S_win_flat_d <= 1'b0;
             S_win_spr_d  <= 1'b0;
-            S_hit_band_d <= 1'b0;
             S_flat_col_d <= 24'd0;
         end
         else begin
             S_win_flat_d <= S_win_flat;
             S_win_spr_d  <= S_win_spr;
-            S_hit_band_d <= S_hit_band;
             S_flat_col_d <= S_flat_col;
         end
     end
@@ -358,6 +337,5 @@ module game_render (
     // 精灵透明像素（8'h00）不叠加；其余情况按寄存的判属结果叠加。
     assign O_hit   = S_win_spr_d ? (I_spr_px != 8'h00) : S_win_flat_d;
     assign O_color = S_win_spr_d ? S_spr_rgb : S_flat_col_d;
-    assign O_blend = S_hit_band_d;
 
 endmodule

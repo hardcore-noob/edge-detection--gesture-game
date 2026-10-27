@@ -64,9 +64,7 @@ module game_param #(
     output reg  [11:0] O_dbg_blade_x,
     output reg  [11:0] O_dbg_blade_y,
     output reg         O_dbg_blade_en,
-    output reg         O_dbg_marker_en,     // 0xA3：画 1 像素对齐标记（L1 坐标自检）
-    output reg  [7:0]  O_slash_half_w,
-    output reg  [7:0]  O_slash_frames
+    output reg         O_dbg_marker_en      // 0xA3：画 1 像素对齐标记（L1 坐标自检）
 );
 
     // ---- 0x81 game_ctrl：bit0/1/2 是"脉冲型命令"，bit3 是电平 --------------
@@ -96,8 +94,6 @@ module game_param #(
             O_dbg_blade_y   <= 12'd400;
             O_dbg_blade_en  <= 1'b0;
             O_dbg_marker_en <= 1'b0;
-            O_slash_half_w  <= 8'd64;
-            O_slash_frames  <= 8'd12;
             S_cmd_restart   <= 1'b0;
             S_cmd_standby   <= 1'b0;
         end
@@ -126,10 +122,6 @@ module game_param #(
                     6'h0D: O_particle_cfg <= I_wdata;
                     6'h0E: O_field_y0     <= I_wdata[11:0];
                     6'h0F: O_field_y1     <= I_wdata[11:0];
-                    6'h15: begin
-                        O_slash_half_w <= I_wdata[15:8];
-                        O_slash_frames <= I_wdata[7:0];
-                    end
                     6'h20: O_dbg_blade_x  <= I_wdata[11:0];
                     6'h21: O_dbg_blade_y  <= I_wdata[11:0];
                     6'h22: O_dbg_blade_en <= I_wdata[0];
@@ -171,7 +163,6 @@ module game_param #(
             8'h92:   O_rd_data = I_fruit_pos;
             8'h93:   O_rd_data = I_hit_cnt;
             8'h94:   O_rd_data = I_miss_cnt;
-            8'h95:   O_rd_data = {O_slash_half_w, O_slash_frames};
             8'hA0:   O_rd_data = {4'b0, O_dbg_blade_x};
             8'hA1:   O_rd_data = {4'b0, O_dbg_blade_y};
             8'hA2:   O_rd_data = {15'b0, O_dbg_blade_en};

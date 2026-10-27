@@ -29,13 +29,10 @@
 // 资源：见各子模块头注释；本模块自身约 60 LUT6 + 40 FF。
 // ============================================================================
 module game_top #(
-    // ---- 临时开关（2026-09-26 拍板：先把"画面"做完整，刀光 / 切割 / 粒子先关）----
-    // 四个都是**编译期常量**：置 0 时 TD 会把对应逻辑整块优化掉（资源反而更省），
-    // 以后要恢复就把这里改回 1——接口与模块端口一律不用动。
     parameter integer TRAIL_EN  = 0,   // 1 = 画刀光拖尾
     parameter integer PART_EN   = 0,   // 1 = 画粒子
-    parameter integer FREEHAND_EN = 0, // 1 = 开旧自由挥切判定
-    parameter integer GEST_SLICE_EN = 1, // 1 = 开手势扫掠带判定
+    parameter integer BLADE_CUT_EN = 1, // 1 = 每帧刀锋轨迹连续判定
+    parameter integer CUT_MODE = 0,     // 本轮只实现 0 = 8 历史点 + 16 采样 + AABB
     parameter integer INF_LIVES = 1    // 1 = 不掉命、不进"结束"态（演示用）
 ) (
     input  wire        I_clk,
@@ -121,12 +118,6 @@ module game_top #(
     wire [11:0] S_field_y0, S_field_y1;
     wire [11:0] S_dbg_blade_x, S_dbg_blade_y;
     wire        S_dbg_blade_en, S_dbg_marker_en;
-    wire [7:0]  S_slash_half_w, S_slash_frames;
-    wire        S_slash_valid;
-    wire [1:0]  S_slash_dir;
-    wire [11:0] S_band_x0, S_band_x1, S_band_y0, S_band_y1;
-    wire        S_band_vis;
-    wire [23:0] S_band_color;
     wire        S_cmd_restart, S_cmd_standby, S_cmd_pause;
     wire [15:0] S_state_word, S_blade_pos, S_hit_cnt, S_miss_cnt;
     wire [3:0]  S_lives, S_state;
@@ -173,9 +164,7 @@ module game_top #(
         .O_dbg_blade_x  (S_dbg_blade_x    ),
         .O_dbg_blade_y  (S_dbg_blade_y    ),
         .O_dbg_blade_en (S_dbg_blade_en   ),
-        .O_dbg_marker_en(S_dbg_marker_en  ),
-        .O_slash_half_w (S_slash_half_w   ),
-        .O_slash_frames (S_slash_frames   )
+        .O_dbg_marker_en(S_dbg_marker_en  )
     );
 
     // ------------------------------------------------------------------------
@@ -209,28 +198,19 @@ module game_top #(
     );
 
     // ------------------------------------------------------------------------
-    // 动态手势事件 → 斩击请求 + 扫掠带
+    // 动态手势事件（菜单预留；本轮不接任何消费者）
     // ------------------------------------------------------------------------
     game_gesture u_game_gesture (
         .I_clk          (I_clk          ),
         .I_rst_n        (I_rst_n        ),
-        .I_vsync        (I_vsync        ),
         .I_bypass       (I_bypass       ),
         .I_game_mode    (I_game_mode    ),
         .I_track_locked (I_ctrl_valid   ),
         .I_game_running (S_state == 4'd1),
         .I_ctx          (2'd0           ),
         .I_gest_word    (I_gest_word    ),
-        .I_half_w       (S_slash_half_w ),
-        .I_flash_frames (S_slash_frames ),
-        .O_slash_valid  (S_slash_valid  ),
-        .O_slash_dir    (S_slash_dir    ),
-        .O_band_x0      (S_band_x0      ),
-        .O_band_x1      (S_band_x1      ),
-        .O_band_y0      (S_band_y0      ),
-        .O_band_y1      (S_band_y1      ),
-        .O_band_vis     (S_band_vis     ),
-        .O_band_color   (S_band_color   )
+        .O_gesture_valid(),
+        .O_gesture_dir  ()
     );
 
     // ------------------------------------------------------------------------
@@ -246,8 +226,8 @@ module game_top #(
     wire [7:0]   S_score;
 
     game_fruit #(
-        .FREEHAND_EN   (FREEHAND_EN   ),
-        .GEST_SLICE_EN (GEST_SLICE_EN ),
+        .BLADE_CUT_EN  (BLADE_CUT_EN  ),
+        .CUT_MODE      (CUT_MODE      ),
         .INF_LIVES     (INF_LIVES     )
     ) u_game_fruit (
         .I_clk           (I_clk          ),
@@ -265,11 +245,8 @@ module game_top #(
         .I_blade_x       (S_blade_x      ),
         .I_blade_y       (S_blade_y      ),
         .I_blade_valid   (S_blade_valid  ),
-        .I_slash_valid   (S_slash_valid  ),
-        .I_slash_x0      (S_band_x0      ),
-        .I_slash_x1      (S_band_x1      ),
-        .I_slash_y0      (S_band_y0      ),
-        .I_slash_y1      (S_band_y1      ),
+        .I_track_locked  (I_ctrl_valid   ),
+        .I_cut_src_ok    (S_input_src == 4'd1),
         .O_obj           (S_obj          ),
         .O_tip_x         (S_tip_x        ),
         .O_tip_y         (S_tip_y        ),
@@ -303,7 +280,6 @@ module game_top #(
     );
 
     wire        S_render_hit;
-    wire        S_render_blend;
     wire [23:0] S_render_col;
 
     game_render u_game_render (
@@ -326,28 +302,14 @@ module game_top #(
         .I_lives       (S_lives        ),
         .I_state       (S_state        ),
         .I_marker_en   (S_dbg_marker_en),
-        .I_band_x0     (S_band_x0      ),
-        .I_band_x1     (S_band_x1      ),
-        .I_band_y0     (S_band_y0      ),
-        .I_band_y1     (S_band_y1      ),
-        .I_band_en     (S_band_vis     ),
-        .I_band_color  (S_band_color   ),
         .O_spr_addr    (S_spr_addr     ),
         .I_spr_px      (S_spr_px       ),
         .O_hit         (S_render_hit   ),
-        .O_color       (S_render_col   ),
-        .O_blend       (S_render_blend )
+        .O_color       (S_render_col   )
     );
 
     // 0 拍叠加：非 de 或旁路时逐位透传（L4 旁路回归靠这条）
-    wire [8:0] S_blend_r = {1'b0, I_pixel_in[23:16]} + {1'b0, S_render_col[23:16]};
-    wire [8:0] S_blend_g = {1'b0, I_pixel_in[15:8]}  + {1'b0, S_render_col[15:8]};
-    wire [8:0] S_blend_b = {1'b0, I_pixel_in[7:0]}   + {1'b0, S_render_col[7:0]};
-    wire [23:0] S_blend_px = {S_blend_r[8:1], S_blend_g[8:1], S_blend_b[8:1]};
-
-    assign O_pixel_out = (I_de & ~I_bypass & S_render_hit)
-                       ? (S_render_blend ? S_blend_px : S_render_col)
-                       : I_pixel_in;
+    assign O_pixel_out = (I_de & ~I_bypass & S_render_hit) ? S_render_col : I_pixel_in;
 
     // ------------------------------------------------------------------------
     // CTRL_SYNC 下行：M0 起每帧第一个 de 发一个往返自检字；
