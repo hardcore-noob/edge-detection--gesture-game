@@ -13,7 +13,7 @@
 //   * 位置 `pos[15:0]` = 上屏像素 12.4 定点（整数部分 = pos[15:4]）；
 //   * 速度 16 位有符号，单位 1/16 上屏像素 / 帧；
 //   * 重力每帧加 `I_grav >> 4`（默认 0x40 → 0.25 px/帧²）；
-//   * 初速：垂直 = -(I_v0[15:8] << 5)（默认 0x06 → 12 px/帧 向上），水平 ±(LFSR[2:0] << 4)。
+//   * 初速：垂直 = -(I_v0[15:8] << 5)（默认 0x09 → 18 px/帧 向上），水平 ±(LFSR[2:0] << 4)。
 //
 // 判定：默认 `BLADE_CUT_EN=1`，每帧用最近 8 个刀锋点插值出 16 个采样点，
 //   对 3 个活动水果槽做 128×128 碰撞箱（外扩 10 px）AABB 判定。
@@ -92,7 +92,6 @@ module game_fruit #(
     reg [1:0]  S_typ [0:5];      // 0 = 空闲、2 = 水果、3 = 半片
     reg        S_half [0:5];     // 半片左右（pal[3]）
     reg [1:0]  S_rowoff [0:5];   // 半片"自旋"：源行偏移，每 4 帧 +1（规划 §3 第 5 步 2）
-    reg        S_flash [0:5];    // 命中白闪（1 帧）
     reg        S_missed[0:5];    // 已经记过一次漏切（防止同一个水果反复扣命）
 
     // ---- 刀光历史（8 点，hist[0] = 最新 = 刀尖）----------------------------
@@ -137,6 +136,15 @@ module game_fruit #(
     // ---- 组合：B 段默认值（I_grav >> 4 = 每帧速度增量，单位 1/16 px/帧）----
     wire [15:0] S_dv = {4'b0, I_grav[15:4]};
     wire S_cut_enable = I_blade_valid && I_track_locked && I_cut_src_ok;
+
+    // 半片继承速度必须按有符号数右移。S_vx/S_vy 用 16 位补码保存负速度，
+    // 直接对 unsigned 向量使用 >>> 会退化成逻辑右移并把负速度变成极大正值。
+    function [15:0] F_half_vel;
+        input [15:0] I_vel;
+        begin
+            F_half_vel = $signed(I_vel) >>> 1;
+        end
+    endfunction
 
     // ---- 组合：刀光采样点（16 个：0 = 尾巴、1..14 = 每段 1/4 与 3/4 插值、15 = 刀尖）----
     // 插值只用移位（d >>> 2），不做除法；返回顺序从 hist[7] 到 hist[0]，
@@ -250,17 +258,20 @@ module game_fruit #(
     wire [1:0]  S_miss_num = {1'b0, S_miss_mask[0]} + {1'b0, S_miss_mask[1]} + {1'b0, S_miss_mask[2]};
     wire [1:0]  S_hit_num  = {1'b0, S_hit_f[0]} + {1'b0, S_hit_f[1]} + {1'b0, S_hit_f[2]};
 
-    // ---- 组合：完全离开屏幕才回收槽位（中心 > 783 = 整颗掉到 720 之下）-------
+    // ---- 组合：完全离开屏幕才回收槽位 --------------------------------------
     wire [5:0] S_gone_mask;
     genvar gm;
     generate
         for (gm = 0; gm < 6; gm = gm + 1) begin : g_gone
-            // 回收条件：① 正在下行且中心已掉到屏幕下方（>783）；或 ② 横向飞出画面
-            // （初速提高后飞行时间变长，果子可能先飘出左右边界——不回收会白占一个槽位）
+            // x 位置是 12.4 定点，扩展成 17 位有符号数后判断完整出屏：
+            // 右侧 top_left_x >= 1280；左侧 right_edge <= 0，即 top_left_x <= -128。
+            wire signed [16:0] W_px = $signed({S_px[gm][15], S_px[gm]});
+            wire S_x_gone = (W_px >= 17'sd20480) || (W_px <= -17'sd2048);
+            // 下方同样是完整出屏：水果中心 > 783 等价于左上角 >= 720。
             assign S_gone_mask[gm] = (S_typ[gm] != 2'd0) &&
                                      ( (((S_vy[gm][15] == 1'b0)) &&
                                          (({1'b0, S_py[gm][15:4]} + 13'd64) > 13'd783))
-                                       || (({1'b0, S_px[gm][15:4]} + 13'd64) > 13'd1343) );
+                                       || S_x_gone );
         end
     endgenerate
 
@@ -340,7 +351,6 @@ module game_fruit #(
                 S_typ[oi]    <= 2'd0;
                 S_half[oi]   <= 1'b0;
                 S_rowoff[oi] <= 2'd0;
-                S_flash[oi]  <= 1'b0;
                 S_missed[oi] <= 1'b0;
             end
             for(oi = 0; oi < 8; oi = oi + 1) begin
@@ -372,10 +382,6 @@ module game_fruit #(
             // 帧节拍：vsync 上升沿挂标志，PH_IDLE 消费
             S_vs_d <= I_vsync;
             if(I_vsync & ~S_vs_d) S_frame_pend <= 1'b1;
-
-            // 白闪只保持一帧
-            for(oi = 0; oi < 6; oi = oi + 1)
-                if(S_flash[oi]) S_flash[oi] <= 1'b0;
 
             // ---- 命令 -----------------------------------------------------
             if(I_restart) begin
@@ -585,7 +591,7 @@ module game_fruit #(
             end
             // ----------------------------------------------------------------
             PH_ACT: begin
-                // 命中：计分 + 计数 + 白闪 + 自己变半片 A（左）+ 借备用槽做半片 B（右）
+                // 命中：计分 + 计数 + 自己变半片 A（左）+ 借备用槽做半片 B（右）
                 if(S_hit_num != 2'd0) begin
                     S_hit_cnt <= S_hit_cnt + {14'b0, S_hit_num};
                     S_score   <= F_bcd_add(S_score, S_hit_num);
@@ -611,13 +617,12 @@ module game_fruit #(
 
                     for(oi = 0; oi < 3; oi = oi + 1) begin
                         if(S_hit_f[oi]) begin
-                            S_flash[oi]  <= 1'b1;               // 命中当帧白闪
                             S_typ[oi]    <= 2'd3;               // 原地变半片 A（左半）
                             S_half[oi]   <= 1'b0;
                             S_rowoff[oi] <= 2'd0;
                             // 左半：窗口起点不动（源列 0..15 就画在原来的左半边）
-                            S_vx[oi]     <= 16'd0 - (S_vx[oi] >>> 1) - 16'd32;
-                            S_vy[oi]     <= (S_vy[oi] >>> 1) - 16'd32;
+                            S_vx[oi]     <= 16'd0 - F_half_vel(S_vx[oi]) - 16'd32;
+                            S_vy[oi]     <= F_half_vel(S_vy[oi]) - 16'd32;
                         end
                     end
 
@@ -631,8 +636,8 @@ module game_fruit #(
                             // 右半：窗口起点右移 32 px（上屏半宽）
                             S_px[S_spare_slot]    <= S_px[0] + 16'd1024;
                             S_py[S_spare_slot]    <= S_py[0];
-                            S_vx[S_spare_slot]    <= (S_vx[0] >>> 1) + 16'd32;
-                            S_vy[S_spare_slot]    <= (S_vy[0] >>> 1) - 16'd32;
+                            S_vx[S_spare_slot]    <= F_half_vel(S_vx[0]) + 16'd32;
+                            S_vy[S_spare_slot]    <= F_half_vel(S_vy[0]) - 16'd32;
                         end
                         else if(S_hit_f[1]) begin
                             S_typ[S_spare_slot]   <= 2'd3;
@@ -641,8 +646,8 @@ module game_fruit #(
                             S_pal[S_spare_slot]   <= S_pal[1];
                             S_px[S_spare_slot]    <= S_px[1] + 16'd1024;
                             S_py[S_spare_slot]    <= S_py[1];
-                            S_vx[S_spare_slot]    <= (S_vx[1] >>> 1) + 16'd32;
-                            S_vy[S_spare_slot]    <= (S_vy[1] >>> 1) - 16'd32;
+                            S_vx[S_spare_slot]    <= F_half_vel(S_vx[1]) + 16'd32;
+                            S_vy[S_spare_slot]    <= F_half_vel(S_vy[1]) - 16'd32;
                         end
                         else begin
                             S_typ[S_spare_slot]   <= 2'd3;
@@ -651,8 +656,8 @@ module game_fruit #(
                             S_pal[S_spare_slot]   <= S_pal[2];
                             S_px[S_spare_slot]    <= S_px[2] + 16'd1024;
                             S_py[S_spare_slot]    <= S_py[2];
-                            S_vx[S_spare_slot]    <= (S_vx[2] >>> 1) + 16'd32;
-                            S_vy[S_spare_slot]    <= (S_vy[2] >>> 1) - 16'd32;
+                            S_vx[S_spare_slot]    <= F_half_vel(S_vx[2]) + 16'd32;
+                            S_vy[S_spare_slot]    <= F_half_vel(S_vy[2]) - 16'd32;
                         end
                     end
                 end
@@ -672,16 +677,17 @@ module game_fruit #(
         for (go = 0; go < 6; go = go + 1) begin : g_obj
             wire        W_idle = (S_typ[go] == 2'd0);
             wire        W_is_h = (S_typ[go] == 2'd3);
-            // 白闪：当帧用 **type 1 = 128×128 白色闪块**盖住该槽（type 0 是普通矩形，
-            // 尺寸字段只有 5 位装不下 128，所以闪块单独立一个类型，见 game_render）
-            wire [1:0]  W_t = S_flash[go] ? 2'd1 : (W_idle ? 2'd2 : S_typ[go]);
+            wire [1:0]  W_t = W_idle ? 2'd2 : S_typ[go];
             wire [11:0] W_x = W_idle ? 12'd2000 : S_px[go][15:4];
             wire [11:0] W_y = W_idle ? 12'd0    : S_py[go][15:4];
             wire [4:0]  W_w = W_idle ? 5'd0 : (W_is_h ? 5'd15 : 5'd31);
             wire [4:0]  W_h = W_idle ? 5'd0 : 5'd31;
             // 半片的"自旋"用 color[5:4] 传源行偏移（精灵不用 color 的其它位）
-            wire [7:0]  W_c = S_flash[go] ? 8'hFF : {2'b0, (W_is_h ? S_rowoff[go] : 2'd0), 4'b0};
-            wire [3:0]  W_p = W_is_h ? {S_half[go], 2'b00, S_pal[go]} : {2'b00, S_pal[go]};
+            wire [7:0]  W_c = {2'b0, (W_is_h ? S_rowoff[go] : 2'd0), 4'b0};
+            // pal[2] 携带负 x 标志，供 game_render 还原左侧部分出屏的坐标。
+            wire        W_x_neg = !W_idle && S_px[go][15];
+            wire [3:0]  W_p = W_is_h ? {S_half[go], W_x_neg, 1'b0, S_pal[go]}
+                                     : {1'b0, W_x_neg, 1'b0, S_pal[go]};
 
             assign O_obj[go*48 +: 48] = {W_t, W_x, W_y, W_w, W_h, W_c, W_p};
         end

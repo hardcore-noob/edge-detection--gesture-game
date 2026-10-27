@@ -85,7 +85,7 @@ module game_param #(
             O_input_offset  <= 16'h0000;
             O_fruit_spawn   <= 8'd48;
             O_fruit_grav    <= 16'h0040;
-            O_fruit_v0      <= 16'h0800;    // 垂直初速 8×2 = 16 px/帧 → 顶点升高约 512 px
+            O_fruit_v0      <= 16'h0900;    // 垂直初速 9×2 = 18 px/帧 → 水果上侧顶点约 y=193
             O_trail_cfg     <= 16'h080A;
             O_particle_cfg  <= 16'h0814;
             O_field_y0      <= 12'd200;

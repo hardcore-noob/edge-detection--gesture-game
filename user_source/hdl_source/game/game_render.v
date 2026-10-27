@@ -105,22 +105,22 @@ module game_render (
             wire [7:0]  W_c    = I_obj[gi*48 +  4 +: 8];
             wire [3:0]  W_pal  = I_obj[gi*48 +  0 +: 4];
 
-            // 减法回绕天然安全：x < W_x 时结果是"很大的 12 位值"，一定超窗口
-            wire [11:0] W_dx = I_x_nxt - W_x;
+            // pal[2] 是负 x 标志。负数在 W_x 里是 12 位补码，拼上符号位后
+            // 再做 13 位有符号差，才能让水果在左侧只被裁掉溢出的部分。
+            wire signed [12:0] W_obj_x = {W_pal[2], W_x};
+            wire signed [12:0] W_scr_x = {1'b0, I_x_nxt};
+            wire signed [12:0] W_dx_s = W_scr_x - W_obj_x;
+            wire [11:0] W_dx = W_dx_s[12] ? 12'hFFF : W_dx_s[11:0];
             wire [11:0] W_dy = I_y_nxt - W_y;
 
             wire        W_is_spr   = (W_type == 2'd2) | (W_type == 2'd3);
-            // type 1 = 命中白闪块：固定 128×128（尺寸字段只有 5 位，装不下 128，所以单独立型）
-            wire        W_is_flash = (W_type == 2'd1);
             // 精灵/半片：上屏坐标 >>2 换到源像素空间再比（4× 放大，见规划 §4.4 第 2 条）；
             // 方块/屏幕矩形：直接按上屏像素比。
             wire [11:0] W_dxs = W_dx >> 2;
             wire [11:0] W_dys = W_dy >> 2;
-            wire        W_win = W_is_flash
-                              ? ((W_dx <= 12'd127) && (W_dy <= 12'd127))
-                              : (W_is_spr
-                                 ? ((W_dxs <= {7'b0, W_w}) && (W_dys <= {7'b0, W_h}))
-                                 : ((W_dx  <= {7'b0, W_w}) && (W_dy  <= {7'b0, W_h})));
+            wire        W_win = W_is_spr
+                              ? ((W_dxs <= {7'b0, W_w}) && (W_dys <= {7'b0, W_h}))
+                              : ((W_dx  <= {7'b0, W_w}) && (W_dy  <= {7'b0, W_h}));
 
             // 半片的列窗：pal[3] = 0 → 源列 0..15（左半），1 → 16..31（右半）
             wire [4:0] W_dx_src = W_dxs[4:0] + (W_pal[3] ? 5'd16 : 5'd0);
