@@ -3391,11 +3391,13 @@ DSP 8/40、feedthrough 6812、final Setup WNS **+683 ps** / Hold +20 ps，0 违�
 
 ### 长期文档
 
-`docs/` 现在只保留三份长期文档：
+旧的阶段性总结、开工包、修复记录和 AI 交接文档已删除。长期文档按主题拆分：
 
-- `docs/CHANGELOG.md`
-- `docs/手势游戏实现路线规划.md`
-- `docs/手势识别待修复问题-20261023.md`
+- `docs/CHANGELOG.md`：实现历史、实验和构建结论。
+- `docs/手势游戏实现路线规划.md`：里程碑、职责和资源预算。
+- `docs/手势识别待修复问题-20261023.md`：当前识别问题与复现条件。
+- `docs/debug-uart.md`：完整 DBG 字段和读取方法。
+- `docs/resource-budget.md`：资源基线、门禁和面积表方法。
+- `docs/gesture-game-interface.md`：插座、参数地址、玩法和测试清单。
 
-其余阶段性总结、开工包、问题记录和 AI 交接文档已删除，避免与 README 和长期文档
-形成多份互相漂移的“当前事实源”。
+边缘算法原理和调参过程继续以本 CHANGELOG 为准，不建立重复的平行文档。

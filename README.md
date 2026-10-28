@@ -8,10 +8,13 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 新会话先阅读以下资料，再改代码：
 
 1. `参考资料/赛题解析二-整理.md`：赛题目标和交付要求。
-2. [`docs/手势游戏实现路线规划.md`](docs/手势游戏实现路线规划.md)：里程碑、模块职责、接口和资源预算。
-3. [`docs/手势识别待修复问题-20261023.md`](docs/手势识别待修复问题-20261023.md)：识别问题、复现条件和待验证方案。
-4. 本 README 第 1～3 节：工程概览、数据流和按键。
-5. [`docs/CHANGELOG.md`](docs/CHANGELOG.md)：历史实现、构建数字、实验过程和已上板结论。
+2. 本 README 第 1～3 节：工程概览、数据流和按键。
+3. [`docs/手势游戏实现路线规划.md`](docs/手势游戏实现路线规划.md)：里程碑、模块职责和资源预算。
+4. [`docs/手势识别待修复问题-20261023.md`](docs/手势识别待修复问题-20261023.md)：识别问题、复现条件和待验证方案。
+5. [`docs/gesture-game-interface.md`](docs/gesture-game-interface.md)：插座、完整寄存器、玩法和测试清单。
+6. 查串口字段时读 [`docs/debug-uart.md`](docs/debug-uart.md)。
+7. 查资源、面积表和布局参数时读 [`docs/resource-budget.md`](docs/resource-budget.md)。
+8. 查历史实现、实验过程和旧构建结论时读 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
 
 硬件参考资料位于 `参考资料/`。Markdown 是整理版，若与 PDF/PPTX 或硬件手册冲突，
 以原始资料为准。
@@ -172,7 +175,7 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 | `P/Q/R/U/X/Y` | 掩码/手势统计、VIDEO_TAP 像素数、CTRL_SYNC 往返自检 |
 
 `P/Q/R` 在 `GEST_DBG_SEL=1` 时借用为挥手方向调试字段。完整字段历史与复用规则见
-CHANGELOG《串口日志》和《手势游戏 M0》。
+[`docs/debug-uart.md`](docs/debug-uart.md)。
 
 读取日志：
 
@@ -194,6 +197,11 @@ CHANGELOG《串口日志》和《手势游戏 M0》。
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md)：实现历史、构建数字、实验和上板结论。
 - [`docs/手势游戏实现路线规划.md`](docs/手势游戏实现路线规划.md)：里程碑、模块所有权、接口和资源预算。
 - [`docs/手势识别待修复问题-20261023.md`](docs/手势识别待修复问题-20261023.md)：识别问题清单和复现条件。
+- [`docs/debug-uart.md`](docs/debug-uart.md)：完整 DBG 字段、复用规则和读取方法。
+- [`docs/resource-budget.md`](docs/resource-budget.md)：当前资源、门禁、面积表和布局参数。
+- [`docs/gesture-game-interface.md`](docs/gesture-game-interface.md)：插座、参数地址、玩法和测试清单。
+
+边缘算法原理和调参过程以 CHANGELOG 为准，不再另建平行文档。
 
 ## 9. 当前已知风险
 
@@ -245,6 +253,7 @@ CHANGELOG《串口日志》和《手势游戏 M0》。
 
 只看本次运行生成的 `td_YYYYMMDD_HHMMSS.log` 和 `*.area`，不要误用旧的 `run.log`。
 模块开销优先查 `*.area` 文末的层次面积表；RTL 级门数用于判断大块逻辑是否值得搬迁。
+完整方法和布局参数见 [`docs/resource-budget.md`](docs/resource-budget.md)。
 
 ### 11.4 余量策略与门禁
 
@@ -269,6 +278,8 @@ CHANGELOG《串口日志》和《手势游戏 M0》。
 | `MODE_SYNC` | 像素域 → CSI | 算法类寄存器在相机帧首提交；像素域使用回执 |
 
 跨域固定规则：发送侧同拍锁存数据和 toggle；接收侧两级同步并整包捕获；禁止逐位同步。
+完整插座、参数地址、玩法和测试清单见
+[`docs/gesture-game-interface.md`](docs/gesture-game-interface.md)。
 
 ### 12.2 系统地址
 
@@ -361,3 +372,32 @@ W 85 0001      # 切回手势源
 | 12 | 亮度灰阶 |
 | 13 | 肤色判据按 Y 分档 |
 | 14/15 | 亮暖反射+运动门 / 全部候选 |
+
+## 13. README 更新准则
+
+README 面向项目介绍、快速上手和新会话交接。更新时按以下规则放置内容：
+
+| 内容 | 放置位置 |
+|---|---|
+| 项目目标、数据流、按键、快速构建、当前状态 | README |
+| 完整 DBG 字段、字段复用和读取细节 | `docs/debug-uart.md` |
+| 资源表、门禁、面积表方法和布局参数 | `docs/resource-budget.md` |
+| 插座、完整参数地址、玩法与测试清单 | `docs/gesture-game-interface.md` |
+| 历史实现、实验过程、构建演化和旧结论 | `docs/CHANGELOG.md` |
+| 里程碑、模块所有权和资源分配 | `docs/手势游戏实现路线规划.md` |
+| 当前识别问题、复现条件和待验证方案 | `docs/手势识别待修复问题-20261023.md` |
+
+执行规则：
+
+1. README 只写当前有效事实；同一事实只在最合适的位置维护，其他位置用链接。
+2. 详细参考超过约 10 行时，优先写入专题文档，README 保留摘要和触发条件明确的链接。
+3. 更新资源数字时同步检查第 0、11、12.5 节；完整资源方法只维护在
+   `docs/resource-budget.md`。
+4. 更新 DBG 字段或字段复用时同步检查 `debug_uart_logger.v`、读取脚本、
+   `docs/debug-uart.md` 和 README 第 7 节。
+5. 更新参数地址、插座或玩法时同步检查 `docs/gesture-game-interface.md` 和 README 第 12 节。
+6. 历史过程、失败方案、逐次构建数字和旧阈值只写 CHANGELOG，不写进 README。
+7. 第 1～3 节是项目最小介绍，除非数据流或按键实际变化，否则保持稳定。
+8. 保留第 4～12 节和 `12.2.1`、`12.5` 等被源码引用的编号；改编号时全仓搜索引用并一起更新。
+9. README 目标控制在约 400 行、10～12k 字符以内；新增内容先判断能否链接到专题文档。
+10. 只改文档时无需重新构建；RTL、约束、工具参数或构建结果变化时，按仓库规则重新构建并更新相关文档。
