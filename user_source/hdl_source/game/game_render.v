@@ -10,7 +10,8 @@
 //   下一拍正是那个像素到达的时候，于是：
 //     * 对外仍然是 0 拍——`O_pixel_out = O_hit ? O_color : I_pixel_in` 与输入同拍；
 //     * 精灵 ERAM 的地址也在本拍给出，数据下一拍到，与 `O_hit/O_color` 同拍对齐。
-//   半片 = 同一张水果图的列窗（`pal[3]` 选左/右半），所以查表通路只有一条。
+//   半片 = 同一张水果图的列窗或行窗（`color[6]` 选切割轴、`pal[3]` 选 A/B 侧），
+//   所以查表通路仍然只有一条。
 //
 // 透明：RGB332 的 `8'h00` = 透明。精灵像素为 0 时不叠加（露出摄像头背景），
 //   因为单口 ERAM 一拍只查得到一个对象，不能再去查下一个候选。
@@ -122,12 +123,22 @@ module game_render (
                               ? ((W_dxs <= {7'b0, W_w}) && (W_dys <= {7'b0, W_h}))
                               : ((W_dx  <= {7'b0, W_w}) && (W_dy  <= {7'b0, W_h}));
 
-            // 半片的列窗：pal[3] = 0 → 源列 0..15（左半），1 → 16..31（右半）
-            wire [4:0] W_dx_src = W_dxs[4:0] + (W_pal[3] ? 5'd16 : 5'd0);
-            // 半片的"自旋"：源行偏移由 color[5:4] 传入（game_fruit 每 4 帧 +1）；
-            // 只在 5 位行地址里回绕，永远落回**同一张水果图**，不会串到别的水果或另一半。
-            wire [1:0] W_rowsft = (W_type == 2'd3) ? W_c[5:4] : 2'b00;
-            wire [4:0] W_dy_src = W_dys[4:0] + {3'b0, W_rowsft};
+            // 半片字段：pal[3]=A/B 侧，pal[2]=负 x，pal[1:0]=水果种类；
+            // color[6]=切割轴（0=左右、1=上下），color[5:4]=左右半片的行偏移。
+            wire W_is_piece = (W_type == 2'd3);
+            wire W_axis     = W_is_piece && W_c[6];
+            wire W_side     = W_pal[3];
+            wire [1:0] W_rowsft = (W_is_piece && !W_axis) ? W_c[5:4] : 2'b00;
+            // 左右切割：B 取源列 16..31；上下切割：B 取源行 16..31。
+            wire [5:0] W_dx_src_ext =
+                {1'b0, W_dxs[4:0]} +
+                ((W_is_piece && !W_axis && W_side) ? 6'd16 : 6'd0);
+            wire [5:0] W_dy_src_ext =
+                {1'b0, W_dys[4:0]} +
+                ((W_is_piece && W_axis && W_side) ? 6'd16 : 6'd0) +
+                {4'b0, W_rowsft};
+            wire [4:0] W_dx_src = W_dx_src_ext[4:0];
+            wire [4:0] W_dy_src = W_dy_src_ext[4:0];
 
             assign S_obj_hit[gi] = W_win;
             assign S_obj_is_spr[gi] = W_is_spr;

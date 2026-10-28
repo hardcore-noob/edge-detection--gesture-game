@@ -90,7 +90,8 @@ module game_fruit #(
     reg [15:0] S_vy [0:5];
     reg [1:0]  S_pal [0:5];
     reg [1:0]  S_typ [0:5];      // 0 = 空闲、2 = 水果、3 = 半片
-    reg        S_half [0:5];     // 半片左右（pal[3]）
+    reg        S_half [0:5];     // 半片 A/B 侧（pal[3]）
+    reg        S_axis [0:5];     // 0 = 左右半片，1 = 上下半片（color[6]）
     reg [1:0]  S_rowoff [0:5];   // 半片"自旋"：源行偏移，每 4 帧 +1（规划 §3 第 5 步 2）
     reg        S_missed[0:5];    // 已经记过一次漏切（防止同一个水果反复扣命）
 
@@ -136,6 +137,7 @@ module game_fruit #(
     // ---- 组合：B 段默认值（I_grav >> 4 = 每帧速度增量，单位 1/16 px/帧）----
     wire [15:0] S_dv = {4'b0, I_grav[15:4]};
     wire S_cut_enable = I_blade_valid && I_track_locked && I_cut_src_ok;
+    wire S_split_h = (S_cut_dir == 3'd1) || (S_cut_dir == 3'd2);
 
     // 半片继承速度必须按有符号数右移。S_vx/S_vy 用 16 位补码保存负速度，
     // 直接对 unsigned 向量使用 >>> 会退化成逻辑右移并把负速度变成极大正值。
@@ -350,6 +352,7 @@ module game_fruit #(
                 S_pal[oi]    <= 2'd0;
                 S_typ[oi]    <= 2'd0;
                 S_half[oi]   <= 1'b0;
+                S_axis[oi]   <= 1'b0;
                 S_rowoff[oi] <= 2'd0;
                 S_missed[oi] <= 1'b0;
             end
@@ -468,6 +471,7 @@ module game_fruit #(
                     S_typ[S_fruit_slot]  <= 2'd2;
                     S_pal[S_fruit_slot]  <= S_lfsr[1:0];
                     S_half[S_fruit_slot] <= 1'b0;
+                    S_axis[S_fruit_slot] <= 1'b0;
                     S_rowoff[S_fruit_slot] <= 2'd0;
                     S_missed[S_fruit_slot] <= 1'b0;
                     // 上屏 x = 100 + LFSR[9:0]（100..1123），避开场地左右边界
@@ -617,12 +621,20 @@ module game_fruit #(
 
                     for(oi = 0; oi < 3; oi = oi + 1) begin
                         if(S_hit_f[oi]) begin
-                            S_typ[oi]    <= 2'd3;               // 原地变半片 A（左半）
+                            S_typ[oi]    <= 2'd3;               // 原地变半片 A
                             S_half[oi]   <= 1'b0;
+                            S_axis[oi]   <= S_split_h;
                             S_rowoff[oi] <= 2'd0;
-                            // 左半：窗口起点不动（源列 0..15 就画在原来的左半边）
-                            S_vx[oi]     <= 16'd0 - F_half_vel(S_vx[oi]) - 16'd32;
-                            S_vy[oi]     <= F_half_vel(S_vy[oi]) - 16'd32;
+                            if(S_split_h) begin
+                                // 水平挥切：A 是上半片，保留原位置并向斜上飞。
+                                S_vx[oi] <= F_half_vel(S_vx[oi]);
+                                S_vy[oi] <= F_half_vel(S_vy[oi]) - 16'd32;
+                            end
+                            else begin
+                                // 竖直挥切：A 是左半片，窗口起点保持不动。
+                                S_vx[oi] <= 16'd0 - F_half_vel(S_vx[oi]) - 16'd32;
+                                S_vy[oi] <= F_half_vel(S_vy[oi]) - 16'd32;
+                            end
                         end
                     end
 
@@ -631,33 +643,61 @@ module game_fruit #(
                         if(S_hit_f[0]) begin
                             S_typ[S_spare_slot]   <= 2'd3;
                             S_half[S_spare_slot]  <= 1'b1;
+                            S_axis[S_spare_slot]  <= S_split_h;
                             S_rowoff[S_spare_slot]<= 2'd0;
                             S_pal[S_spare_slot]   <= S_pal[0];
-                            // 右半：窗口起点右移 32 px（上屏半宽）
-                            S_px[S_spare_slot]    <= S_px[0] + 16'd1024;
-                            S_py[S_spare_slot]    <= S_py[0];
-                            S_vx[S_spare_slot]    <= F_half_vel(S_vx[0]) + 16'd32;
-                            S_vy[S_spare_slot]    <= F_half_vel(S_vy[0]) - 16'd32;
+                            if(S_split_h) begin
+                                // 水平挥切：B 是下半片，向下移动 64 px 并向斜下飞。
+                                S_px[S_spare_slot] <= S_px[0];
+                                S_py[S_spare_slot] <= S_py[0] + 16'd1024;
+                                S_vx[S_spare_slot] <= F_half_vel(S_vx[0]);
+                                S_vy[S_spare_slot] <= F_half_vel(S_vy[0]) + 16'd32;
+                            end
+                            else begin
+                                // 竖直挥切：B 是右半片，向右移动 64 px。
+                                S_px[S_spare_slot] <= S_px[0] + 16'd1024;
+                                S_py[S_spare_slot] <= S_py[0];
+                                S_vx[S_spare_slot] <= F_half_vel(S_vx[0]) + 16'd32;
+                                S_vy[S_spare_slot] <= F_half_vel(S_vy[0]) - 16'd32;
+                            end
                         end
                         else if(S_hit_f[1]) begin
                             S_typ[S_spare_slot]   <= 2'd3;
                             S_half[S_spare_slot]  <= 1'b1;
+                            S_axis[S_spare_slot]  <= S_split_h;
                             S_rowoff[S_spare_slot]<= 2'd0;
                             S_pal[S_spare_slot]   <= S_pal[1];
-                            S_px[S_spare_slot]    <= S_px[1] + 16'd1024;
-                            S_py[S_spare_slot]    <= S_py[1];
-                            S_vx[S_spare_slot]    <= F_half_vel(S_vx[1]) + 16'd32;
-                            S_vy[S_spare_slot]    <= F_half_vel(S_vy[1]) - 16'd32;
+                            if(S_split_h) begin
+                                S_px[S_spare_slot] <= S_px[1];
+                                S_py[S_spare_slot] <= S_py[1] + 16'd1024;
+                                S_vx[S_spare_slot] <= F_half_vel(S_vx[1]);
+                                S_vy[S_spare_slot] <= F_half_vel(S_vy[1]) + 16'd32;
+                            end
+                            else begin
+                                S_px[S_spare_slot] <= S_px[1] + 16'd1024;
+                                S_py[S_spare_slot] <= S_py[1];
+                                S_vx[S_spare_slot] <= F_half_vel(S_vx[1]) + 16'd32;
+                                S_vy[S_spare_slot] <= F_half_vel(S_vy[1]) - 16'd32;
+                            end
                         end
                         else begin
                             S_typ[S_spare_slot]   <= 2'd3;
                             S_half[S_spare_slot]  <= 1'b1;
+                            S_axis[S_spare_slot]  <= S_split_h;
                             S_rowoff[S_spare_slot]<= 2'd0;
                             S_pal[S_spare_slot]   <= S_pal[2];
-                            S_px[S_spare_slot]    <= S_px[2] + 16'd1024;
-                            S_py[S_spare_slot]    <= S_py[2];
-                            S_vx[S_spare_slot]    <= F_half_vel(S_vx[2]) + 16'd32;
-                            S_vy[S_spare_slot]    <= F_half_vel(S_vy[2]) - 16'd32;
+                            if(S_split_h) begin
+                                S_px[S_spare_slot] <= S_px[2];
+                                S_py[S_spare_slot] <= S_py[2] + 16'd1024;
+                                S_vx[S_spare_slot] <= F_half_vel(S_vx[2]);
+                                S_vy[S_spare_slot] <= F_half_vel(S_vy[2]) + 16'd32;
+                            end
+                            else begin
+                                S_px[S_spare_slot] <= S_px[2] + 16'd1024;
+                                S_py[S_spare_slot] <= S_py[2];
+                                S_vx[S_spare_slot] <= F_half_vel(S_vx[2]) + 16'd32;
+                                S_vy[S_spare_slot] <= F_half_vel(S_vy[2]) - 16'd32;
+                            end
                         end
                     end
                 end
@@ -680,14 +720,16 @@ module game_fruit #(
             wire [1:0]  W_t = W_idle ? 2'd2 : S_typ[go];
             wire [11:0] W_x = W_idle ? 12'd2000 : S_px[go][15:4];
             wire [11:0] W_y = W_idle ? 12'd0    : S_py[go][15:4];
-            wire [4:0]  W_w = W_idle ? 5'd0 : (W_is_h ? 5'd15 : 5'd31);
-            wire [4:0]  W_h = W_idle ? 5'd0 : 5'd31;
-            // 半片的"自旋"用 color[5:4] 传源行偏移（精灵不用 color 的其它位）
-            wire [7:0]  W_c = {2'b0, (W_is_h ? S_rowoff[go] : 2'd0), 4'b0};
-            // pal[2] 携带负 x 标志，供 game_render 还原左侧部分出屏的坐标。
+            wire        W_axis = W_is_h && S_axis[go];
+            // 左右半片各 64×128；上下半片各 128×64。
+            wire [4:0]  W_w = W_idle ? 5'd0 : ((W_is_h && !W_axis) ? 5'd15 : 5'd31);
+            wire [4:0]  W_h = W_idle ? 5'd0 : ((W_is_h &&  W_axis) ? 5'd15 : 5'd31);
+            // color[6] = 切割轴，color[5:4] = 左右半片的行偏移。
+            wire [7:0]  W_c = {1'b0, W_axis,
+                               ((W_is_h && !W_axis) ? S_rowoff[go] : 2'd0), 4'b0};
+            // pal[3] = A/B 侧，pal[2] = 负 x，pal[1:0] = 水果种类。
             wire        W_x_neg = !W_idle && S_px[go][15];
-            wire [3:0]  W_p = W_is_h ? {S_half[go], W_x_neg, 1'b0, S_pal[go]}
-                                     : {1'b0, W_x_neg, 1'b0, S_pal[go]};
+            wire [3:0]  W_p = {W_is_h && S_half[go], W_x_neg, S_pal[go]};
 
             assign O_obj[go*48 +: 48] = {W_t, W_x, W_y, W_w, W_h, W_c, W_p};
         end
