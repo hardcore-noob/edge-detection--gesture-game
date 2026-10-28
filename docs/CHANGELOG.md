@@ -3436,3 +3436,27 @@ DSP 8/40、feedthrough 6812、final Setup WNS **+683 ps** / Hold +20 ps，0 违�
 - 实验 bit：
   `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`，
   SHA256 `74D117EF9B9433C5E91ACCB630329FC548C7CD09BD2A34795CB8A840889D7534`。
+
+---
+
+## 2026-10-28　恢复手部行带裁剪门
+
+### 根因与处理
+
+- 上板对比表明，`3882ab5` 虽然名义上只删除水平窗和提前拆带，但
+  `S_mask_win` 同时驱动行带、ROI、质心权重和指尖窗口；整行统计会把脸、手臂和背景
+  并入手选框，造成识别明显退化。
+- 在当前 AWB 优化分支反向恢复 `3882ab5`，保留种子左右 ±200 px 肤色统计窗和
+  窄行拆带；运动证据窗保持独立。
+
+### 构建
+
+- 一次 PnR、0 ERROR、0 违例、bitgen 成功。
+- slices **17901 / 21216（84.38%）**、LUT6 **16439（77.48%）**、
+  FF **15602**、ERAM 76/108、DSP 8/40、feedthrough 6224。
+- final Setup **+342 ps** / Hold **+20 ps**。
+- 相对第三版参考 bit：slices 18877 → 17901（**−976**），
+  LUT6 17488 → 16439（**−1049**）。
+- 恢复基线 bit 归档于
+  `tmp/gesture-restored-handband-awb-20261028/camera_to_dsi_display.bit`，
+  SHA256 `6B8BA1B9FFB6F2B1D505580B85C06F2042C3B3CF79124E4BA4705194261D7B9E`。
