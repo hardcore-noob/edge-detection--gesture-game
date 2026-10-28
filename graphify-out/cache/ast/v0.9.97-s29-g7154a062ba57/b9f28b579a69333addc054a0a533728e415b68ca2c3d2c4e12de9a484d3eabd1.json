@@ -1,0 +1,1 @@
+{"nodes": [{"id": "$graphify-root$_user_source_hdl_source_mipi_dphy_rx_hs_detect_enc_v", "label": "hs_detect.enc.v", "file_type": "code", "source_file": "user_source/hdl_source/mipi_dphy_rx/hs_detect.enc.v", "source_location": "L1", "confidence_score": 1.0}], "edges": []}
