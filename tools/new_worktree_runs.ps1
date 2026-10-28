@@ -133,21 +133,14 @@ foreach ($dir in $skeletonFiles.Keys) {
     }
     if ($missing.Count -eq 0) { continue }
 
-    # 新条目只可能是 Verilog 源（.v）：<Verilog> 段里逐条登记。放进 </Source_Files>
-    # 之前会落到 <IP_FILE> 段外，TD 报 `PRJ-8641 ERROR: XML tag File is invalid`。
-    $nonVerilog = @($missing | Where-Object { -not $_.EndsWith('.v') })
-    if ($nonVerilog.Count -gt 0) {
-        throw ("这些新条目不是 .v，脚本不知道它们该进哪一段，请手工登记：`n  " + ($nonVerilog -join "`n  "))
+    # 新条目只可能是 HDL 源：.v 进 <Verilog>、.sv 进 <System_Verilog>。放进
+    # </Source_Files> 之前会落到 <IP_FILE> 段外，TD 报 `PRJ-8641 ERROR`。
+    $nonHdl = @($missing | Where-Object { $_ -notmatch '\.(v|sv)$' })
+    if ($nonHdl.Count -gt 0) {
+        throw ("这些新条目不是 .v/.sv，脚本不知道它们该进哪一段，请手工登记：`n  " + ($nonHdl -join "`n  "))
     }
 
     $nl     = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $vStart = $text.IndexOf('<Verilog>')
-    $vEnd   = $text.IndexOf('</Verilog>')
-    if ($vStart -lt 0 -or $vEnd -le $vStart) { throw "$prj 里找不到 <Verilog> 段，格式与预期不一致" }
-
-    $head = $text.Substring(0, $vStart)
-    $body = $text.Substring($vStart, $vEnd - $vStart).TrimEnd("`r", "`n", " ") + $nl
-    $tail = $text.Substring($vEnd)
 
     # 版本段里每一个设计源条目都带 BelongTo + CompileOrder，两个 Attr 缺一不可：
     # 只写 UsedInSyn/UsedInP&R 时 TD 不报具体原因，只说
@@ -160,20 +153,40 @@ foreach ($dir in $skeletonFiles.Keys) {
         if ($v -gt $maxOrder) { $maxOrder = $v }
     }
 
-    $blocks = ''
-    foreach ($p in $missing) {
-        $maxOrder++
-        $blocks += "            <File Path=""$p"">$nl" +
-                   "                <FileInfo>$nl" +
-                   "                    <Attr Name=""UsedInSyn"" Val=""true""/>$nl" +
-                   "                    <Attr Name=""UsedInP&R"" Val=""true""/>$nl" +
-                   "                    <Attr Name=""BelongTo"" Val=""design_1""/>$nl" +
-                   "                    <Attr Name=""CompileOrder"" Val=""$maxOrder""/>$nl" +
-                   "                </FileInfo>$nl" +
-                   "            </File>$nl"
+    function New-FileBlocks {
+        param([string[]]$Paths, [int]$StartOrder)
+        $result = ''
+        foreach ($p in $Paths) {
+            $StartOrder++
+            $result += "            <File Path=""$p"">$nl" +
+                       "                <FileInfo>$nl" +
+                       "                    <Attr Name=""UsedInSyn"" Val=""true""/>$nl" +
+                       "                    <Attr Name=""UsedInP&R"" Val=""true""/>$nl" +
+                       "                    <Attr Name=""BelongTo"" Val=""design_1""/>$nl" +
+                       "                    <Attr Name=""CompileOrder"" Val=""$StartOrder""/>$nl" +
+                       "                </FileInfo>$nl" +
+                       "            </File>$nl"
+        }
+        return $result
     }
 
-    $newText = $head + $body + $blocks + $tail
+    $verilogMissing = @($missing | Where-Object { $_.EndsWith('.v') })
+    $systemVerilogMissing = @($missing | Where-Object { $_.EndsWith('.sv') })
+    $verilogBlocks = New-FileBlocks -Paths $verilogMissing -StartOrder $maxOrder
+    $maxOrder += $verilogMissing.Count
+    $systemVerilogBlocks = New-FileBlocks -Paths $systemVerilogMissing -StartOrder $maxOrder
+
+    $newText = $text
+    if ($verilogBlocks) {
+        $vEnd = $newText.IndexOf('</Verilog>')
+        if ($vEnd -lt 0) { throw "$prj 里找不到 </Verilog> 段，格式与预期不一致" }
+        $newText = $newText.Insert($vEnd, $verilogBlocks)
+    }
+    if ($systemVerilogBlocks) {
+        $svEnd = $newText.IndexOf('</System_Verilog>')
+        if ($svEnd -lt 0) { throw "$prj 里找不到 </System_Verilog> 段，格式与预期不一致" }
+        $newText = $newText.Insert($svEnd, $systemVerilogBlocks)
+    }
     [IO.File]::WriteAllText($prj, $newText, $utf8NoBom)
     $added[$dir] = $missing
 }
