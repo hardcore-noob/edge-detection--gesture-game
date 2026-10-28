@@ -3401,3 +3401,38 @@ DSP 8/40、feedthrough 6812、final Setup WNS **+683 ps** / Hold +20 ps，0 违�
 - `docs/gesture-game-interface.md`：插座、参数地址、玩法和测试清单。
 
 边缘算法原理和调参过程继续以本 CHANGELOG 为准，不建立重复的平行文档。
+
+---
+
+## 2026-10-28　AWB 除法器窄位宽实验
+
+### 实现
+
+- 新增参数化 Divider 2.0 RTL，替换原 48 位被除数、32 位除数、50 拍流水的
+  `divider` gate netlist。
+- AWB 累加器由 32 位缩到 28 位；新除法器使用 40 位被除数、28 位除数、
+  42 拍流水。
+- 除法先得到 12.12 定点商，再左移 4 位形成既有 16.16 增益，仅牺牲增益最低
+  4 个小数位；R/B 像素乘法、4 像素并行通路和结果锁存位置不变。
+- `tools/new_worktree_runs.ps1` 增加 `.sv` 源登记支持，SystemVerilog 文件
+  写入 Run 目录 prj 的 `<System_Verilog>` 段。
+
+### 构建
+
+- 合成与 PnR 均为 0 ERROR，一次 PnR、0 违例、bitgen 成功。
+- slices **17894 / 21216（84.34%）**，相对基线 18838 **−944**。
+- LUT6 **16496（77.75%）**，相对基线 17395 **−899**。
+- FF **15589**，相对基线 17063 **−1474**。
+- ERAM 76/108、DSP 8/40、feedthrough 6035。
+- final Setup **+591 ps** / Hold **+20 ps**。
+- `awb` 层次面积由 logic/ripple/FF `2377/2292/6015` 降到
+  `1754/1682/4553`。
+
+### 验证状态
+
+- 代码、综合、布局布线、时序门禁和 bitgen 已通过。
+- 尚未上板对比固定场景 RAW 画面。需要确认灰度/白墙、肤色、高饱和背景和强光反射
+  下与基线无可见色偏或分块。
+- 实验 bit：
+  `td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`，
+  SHA256 `74D117EF9B9433C5E91ACCB630329FC548C7CD09BD2A34795CB8A840889D7534`。

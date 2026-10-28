@@ -64,9 +64,10 @@ module awb  #(
 
 
   //累加RGB通道的�??
-  reg  [31:0]         sum_r[0:3];
-  reg  [31:0]         sum_g[0:3];
-  reg  [31:0]         sum_b[0:3];
+  // 1280x720x255 < 2^28；宽度实验只保留累加器真正需要的位宽。
+  reg  [27:0]         sum_r[0:3];
+  reg  [27:0]         sum_g[0:3];
+  reg  [27:0]         sum_b[0:3];
 
   
   wire  [95:0]        data_d0 ;
@@ -145,15 +146,16 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
                            计算增益                                       
 *****************************************************************/
 
-  wire [47:0] dout_R[3:0];
-  wire [47:0] dout_B[3:0];
+  // Divider 2.0 输出 {quotient, remainder}；本实验只消费 40 位商。
+  wire [71:0] dout_R[3:0];
+  wire [71:0] dout_B[3:0];
 
   wire done[3:0];
 
-  wire [47:0] in_r_x1;
-  wire [47:0] in_b_x1;
-  assign in_r_x1 = dout_R[0][47:0];
-  assign in_b_x1 = dout_B[0][47:0];
+  wire [39:0] in_r_x1;
+  wire [39:0] in_b_x1;
+  assign in_r_x1 = dout_R[0][71:32];
+  assign in_b_x1 = dout_B[0][71:32];
 
 
 
@@ -162,24 +164,28 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
 *****************************************************************/
     //为了保证合理的延迟，这里使用了除法器
 
-      divider div_gen_G_R_r1 (
-          .clk(I_clk),  // input wire aclk
-          .rst(!I_rst_n),
-          .start(I_tvalid_r1),
-          .denominator(sum_r[0]),  // input wire [31 : 0] s_axis_divisor_tdata
-          .numerator({sum_g[0],16'd0}),  // input wire [47 : 0] s_axis_dividend_tdata
-          .quotient(dout_R[0]),  // output wire [79 : 0] m_axis_dout_tdata
-          .done(done[0])
+      // N=Gsum<<12、D=Rsum，先算 12.12 定点，再左移 4 位成 16.16。
+      // 分母保留完整 28 位，只牺牲增益最低 4 个小数位。
+      divider_narrow div_gen_G_R_r1 (
+          .aclk(I_clk),
+          .aresetn(I_rst_n),
+          .s_axis_dividend_tdata({sum_g[0],12'd0}),
+          .s_axis_dividend_tvalid(I_tvalid_r1),
+          .s_axis_divisor_tdata({{4{1'b0}}, sum_r[0]}),
+          .s_axis_divisor_tvalid(I_tvalid_r1),
+          .m_axis_dout_tdata(dout_R[0]),
+          .m_axis_dout_tvalid(done[0])
       );
 
-      divider divide_G_B_r1 (
-          .clk(I_clk),  // input wire aclk
-          .rst(!I_rst_n),
-          .start(I_tvalid_r1),
-          .denominator(sum_b[0]),  // input wire [31 : 0] s_axis_divisor_tdata
-          .numerator({sum_g[0],16'd0}),  // input wire [47 : 0] s_axis_dividend_tdata
-          .quotient(dout_B[0]),  // output wire [79 : 0] m_axis_dout_tdata
-          .done()
+      divider_narrow divide_G_B_r1 (
+          .aclk(I_clk),
+          .aresetn(I_rst_n),
+          .s_axis_dividend_tdata({sum_g[0],12'd0}),
+          .s_axis_dividend_tvalid(I_tvalid_r1),
+          .s_axis_divisor_tdata({{4{1'b0}}, sum_b[0]}),
+          .s_axis_divisor_tvalid(I_tvalid_r1),
+          .m_axis_dout_tdata(dout_B[0]),
+          .m_axis_dout_tvalid()
       );
 
      
@@ -187,7 +193,7 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
         .IMG_HEIGHT   (IMG_HEIGHT),
         .IMG_WIDTH    (IMG_WIDTH ),
         .DATA_WIDTH   (96  ),
-        .DELAY_CYCLE  (50)
+        .DELAY_CYCLE  (42)
     )signal_delay_d (
         /*input                       */ .I_clk  (I_clk  ),
         /*input                       */ .I_rst_n(I_rst_n),
@@ -213,14 +219,14 @@ assign  rgb888_b_d0[0] = I_tdata_d0[0+:8];
             in_b_r1 <= 20'h10000;
         end
         else if(done[0])begin
-            if(|in_r_x1[47:20])
+            if(|in_r_x1[39:16])
                 in_r_r1 <= 20'hfffff;
             else 
-                in_r_r1 <= in_r_x1[19:0];
-            if(|in_b_x1[47:20])
+                in_r_r1 <= {in_r_x1[15:0], 4'b0};
+            if(|in_b_x1[39:16])
                 in_b_r1 <= 20'hfffff;
             else 
-                in_b_r1 <= in_b_x1[19:0];
+                in_b_r1 <= {in_b_x1[15:0], 4'b0};
         end
     end
 

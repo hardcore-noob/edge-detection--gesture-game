@@ -11,6 +11,14 @@
     </HardWare>
     <Source_Files>
         <Verilog>
+            <File Path="../user_source/ip_source/divider_narrow/divider.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&amp;R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="17"/>
+                </FileInfo>
+            </File>
             <File Path="../user_source/hdl_source/design_top_wrapper.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
@@ -476,6 +484,14 @@
             </File>
         </Verilog>
         <System_Verilog>
+            <File Path="../user_source/ip_source/divider_narrow/RTL/divider_top_divider.sv">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&amp;R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="16"/>
+                </FileInfo>
+            </File>
             <File Path="../user_source/hdl_source/mipi_dphy_rx/mipi_dphy_rx_ph1p_mipiio_wrapper.sv">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>

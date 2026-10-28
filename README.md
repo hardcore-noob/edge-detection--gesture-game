@@ -22,8 +22,8 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 ### 当前状态
 
 - 当前分支：`main`。
-- 当前基线：slices `18838/21216`（88.79%）、LUT6 `17395`、ERAM `76/108`、
-  DSP `8/40`、final Setup `+550 ps`、Hold `+20 ps`，0 违例。
+- 当前基线：slices `17894/21216`（84.34%）、LUT6 `16496`、ERAM `76/108`、
+  DSP `8/40`、final Setup `+591 ps`、Hold `+20 ps`，0 违例。
 - 手部行带当前优先保留完整手部：肤色行统计取消 ±200 px 水平窗，并移除窄行拆带；
   运动证据窗单独保留，脸/手臂/背景的粘连隔离留给后续种子连通域处理。
 - 下一阶段：优先优化资源占用和手势识别算法。
@@ -201,6 +201,8 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 - [`docs/手势识别待修复问题-20261023.md`](docs/手势识别待修复问题-20261023.md)：识别问题清单和复现条件。
 - [`docs/debug-uart.md`](docs/debug-uart.md)：完整 DBG 字段、复用规则和读取方法。
 - [`docs/resource-budget.md`](docs/resource-budget.md)：当前资源、门禁、面积表和布局参数。
+- [`docs/resource-optimization-backlog.md`](docs/resource-optimization-backlog.md)：
+  资源优化候选、优先级和已完成实验结果。
 - [`docs/gesture-game-interface.md`](docs/gesture-game-interface.md)：插座、参数地址、玩法和测试清单。
 
 边缘算法原理和调参过程以 CHANGELOG 为准，不再另建平行文档。
@@ -209,7 +211,7 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 
 - 手势识别仍需改善下劈稳定性、脸/背景误锁、白/自然光鲁棒性、远距离锁定和坐标抖动；
   行带取消截断门后完整度提升，但脸、手臂和背景更容易并入同一组件。
-- 当前 slices 已到 88.79%，新增功能前必须先评估资源和 feedthrough。
+- 当前 slices 为 84.34%，新增功能前仍必须先评估资源和 feedthrough。
 - 时序余量对布局落点敏感；同一网表重复 PnR 不会自动改善，必须改逻辑或约束。
 - 链路没有完整 ready/backpressure 闭环；DDR/FIFO 拥塞时可能静默丢数，需监控 `D/E/W/V`。
 - CSI 与 HDMI 像素域是异步组，TD 不检查其间路径；跨域必须使用 toggle 握手、两级同步
@@ -237,19 +239,20 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 
 | 资源 | 用量 | 占比 |
 |---|---:|---:|
-| slices | 18838 / 21216 | 88.79% |
-| LUT6 | 17395 / 21216 | 81.99% |
-| 触发器 | 17063 / 42432 | 40.21% |
+| slices | 17894 / 21216 | 84.34% |
+| LUT6 | 16496 / 21216 | 77.75% |
+| 触发器 | 15589 / 42432 | 36.74% |
 | ERAM | 76 / 108 | 70.37% |
 | DSP | 8 / 40 | 20.00% |
-| feedthrough | 5487 | — |
-| final Setup WNS | +550 ps | 0 违例 |
+| feedthrough | 6035 | — |
+| final Setup WNS | +591 ps | 0 违例 |
 | final Hold WNS | +20 ps | 0 违例 |
 
 ### 11.2 优化方向
 
-1. 清理已完成功能留下的死代码、重复 mux 和未使用寄存器。
-2. 压缩 `recog_top`、游戏对象槽和 `game_render` 的 LUT/feedthrough。
+1. 按 [`docs/resource-optimization-backlog.md`](docs/resource-optimization-backlog.md)
+   的顺序继续裁剪 `recog_top` 调试档和 `game_fruit` 状态/物理通路。
+2. 清理已完成功能留下的死代码、重复 mux 和未使用寄存器。
 3. 优先复用已有 ERAM/DSP 和共享数据通路，不为单一功能复制整套组合逻辑。
 
 ### 11.3 资源判读
@@ -360,7 +363,7 @@ W 85 0001      # 切回手势源
    `pal[3]=A/B侧`、`pal[2]=负x`、`pal[1:0]=水果种类`、`color[6]=切割轴`。
 6. 左侧水果逐渐裁剪到 `x<=-128` 后回收；右侧在 `x>=1280` 回收。
 7. `game_gesture` 只作为未来菜单事件源，不连接计分；`0x95` 已移除。
-8. 当前构建：slices `18838/21216`（88.79%）、LUT6 `17395`、Setup `+550 ps`、
+8. 当前构建：slices `17894/21216`（84.34%）、LUT6 `16496`、Setup `+591 ps`、
    Hold `+20 ps`，0 违例。
 
 | `W 08 000X` | 识别视图 |
