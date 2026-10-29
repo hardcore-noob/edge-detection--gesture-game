@@ -15,13 +15,15 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 6. 查串口字段时读 [`docs/debug-uart.md`](docs/debug-uart.md)。
 7. 查资源、面积表和布局参数时读 [`docs/resource-budget.md`](docs/resource-budget.md)。
 8. 查历史实现、实验过程和旧构建结论时读 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
+9. 实现手部二维种子连通域前读
+   [`docs/手势种子连通域实现计划.md`](docs/手势种子连通域实现计划.md)。
 
 硬件参考资料位于 `参考资料/`。Markdown 是整理版，若与 PDF/PPTX 或硬件手册冲突，
 以原始资料为准。
 
 ### 当前状态
 
-- 当前分支：`feat/resource-opt-awb`。
+- 当前分支：`main`。
 - 当前基线：slices `17555/21216`（82.74%）、LUT6 `16130`、ERAM `76/108`、
   DSP `8/40`、final Setup `+577 ps`、Hold `+20 ps`，0 违例。
 - 手部行带恢复种子左右 ±200 px 的肤色统计窗和窄行拆带；运动证据仍使用独立窗。
@@ -210,8 +212,9 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 ## 9. 当前已知风险
 
 - 手势识别仍需改善下劈稳定性、脸/背景误锁、白/自然光鲁棒性、远距离锁定和坐标抖动；
-  行带取消截断门后完整度提升，但脸、手臂和背景更容易并入同一组件。
-- 当前 slices 为 84.38%，新增功能前仍必须先评估资源和 feedthrough。
+  当前已恢复行带水平窗和窄行拆带，识别稳定性优先；脸、手臂和背景粘连留给后续
+  种子连通域处理。
+- 当前 slices 为 82.74%，新增功能前仍必须先评估资源和 feedthrough。
 - 时序余量对布局落点敏感；同一网表重复 PnR 不会自动改善，必须改逻辑或约束。
 - 链路没有完整 ready/backpressure 闭环；DDR/FIFO 拥塞时可能静默丢数，需监控 `D/E/W/V`。
 - CSI 与 HDMI 像素域是异步组，TD 不检查其间路径；跨域必须使用 toggle 握手、两级同步
@@ -239,13 +242,13 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 
 | 资源 | 用量 | 占比 |
 |---|---:|---:|
-| slices | 17901 / 21216 | 84.38% |
-| LUT6 | 16439 / 21216 | 77.48% |
-| 触发器 | 15602 / 42432 | 36.77% |
+| slices | 17555 / 21216 | 82.74% |
+| LUT6 | 16130 / 21216 | 76.03% |
+| 触发器 | 15392 / 42432 | 36.27% |
 | ERAM | 76 / 108 | 70.37% |
 | DSP | 8 / 40 | 20.00% |
-| feedthrough | 6224 | — |
-| final Setup WNS | +342 ps | 0 违例 |
+| feedthrough | 6235 | — |
+| final Setup WNS | +577 ps | 0 违例 |
 | final Hold WNS | +20 ps | 0 违例 |
 
 ### 11.2 优化方向
@@ -363,7 +366,7 @@ W 85 0001      # 切回手势源
    `pal[3]=A/B侧`、`pal[2]=负x`、`pal[1:0]=水果种类`、`color[6]=切割轴`。
 6. 左侧水果逐渐裁剪到 `x<=-128` 后回收；右侧在 `x>=1280` 回收。
 7. 动态挥手事件与 `game_gesture` 已移除；游戏主路径使用独立的刀锋轨迹判定，`0x95` 已移除。
-8. 当前构建：slices `17901/21216`（84.38%）、LUT6 `16439`、Setup `+342 ps`、
+8. 当前构建：slices `17555/21216`（82.74%）、LUT6 `16130`、Setup `+577 ps`、
    Hold `+20 ps`，0 违例。
 
 | `W 08 000X` | 识别视图 |
