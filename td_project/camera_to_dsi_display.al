@@ -411,14 +411,6 @@
                     <Attr Name="CompileOrder" Val="70"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/game/game_gesture.v">
-                <FileInfo>
-                    <Attr Name="UsedInSyn" Val="true"/>
-                    <Attr Name="UsedInP&R" Val="true"/>
-                    <Attr Name="BelongTo" Val="design_1"/>
-                    <Attr Name="CompileOrder" Val="71"/>
-                </FileInfo>
-            </File>
             <File Path="../user_source/hdl_source/key_event.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>

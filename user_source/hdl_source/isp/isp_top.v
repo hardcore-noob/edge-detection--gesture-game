@@ -64,9 +64,7 @@ module isp_top #(
     // 游戏层要用（6c95b87 加的 3 个口，合并时保留）
     output [10:0]   O_track_x,
     output [9:0]    O_track_y,
-    output          O_track_locked,
-    // 动态手势事件字（M2.1 → 游戏层；40 位，帧锁存，见 recog_top 头注释）
-    output [39:0]   O_gest_word
+    output          O_track_locked
 );
 
     // Algorithm selection: 0 = RAW (AWB output), 1 = EDGE (edge_detect_96 output).
@@ -112,7 +110,7 @@ module isp_top #(
     //   12 = **亮度灰阶**（画面换成 8 位灰度 Y，看亮度分布）
     //   13 = 肤色判据观测（过肤色判据的像素按 Y 分档着色：绿/青/黄/红）
     //   14 = ② 亮暖反射门 + 运动门（候选）；**15 = ② + 运动门 + ① 块级占比门（交付候选）**
-    //   10/11 = M2.1 开（15 原来是"M2.1 关"，2026-10-16 第 4 轮改成"全家桶"）
+    //   10/11 = 旧肤色预设；15 = 运动门全家桶
     //   ⚠ 2026-10-17：**8/12/13/14/15 = 数字增益 ×2、9 = ×4**（其余 ×1）——
     //     档 8/9 原来分别是"旧 Y 基准 / 柔和跟随"的老标定档，现在改当**亮度 A/B 档**：
     //     `W 08 0001`（×1）↔ `W 08 0008`（×2）↔ `W 08 0009`（×4）可以直接比亮度和杂码。
@@ -133,7 +131,6 @@ module isp_top #(
     wire [7:0]  S_bg_px;                       // recog_top 给的"当前块背景灰度"
     wire        S_teach_flash;                 // recog_top 的一键示教"闪叠加"指示（~2 s）
     wire [3:0]  S_dbg_mode = I_mode_committed[15:12];
-    wire        S_gest_flash;                  // recog_top 的 M2.1 挥手提示条指示（~0.4 s）
     // 【M2.2】归因档（5 = 只看原始肤色门；12/13/14 = 投票/门的组合）也打开叠加：
     //   否则这几个档位下用户看不到掩码，没法做"哪一档被谁啃了"的判断。
     // ⚠ 2026-10-16 第 3 轮：**这里漏了 4/6/7** —— 用户上板看"档 4 一根掩码都没有"，
@@ -147,16 +144,13 @@ module isp_top #(
                      (S_dbg_mode == 4'd2)  || (S_dbg_mode == 4'd3);
     // 档 12 = **亮度灰阶**（画面直接换成 8 位灰度 Y）：看"手 vs 反光"的亮度分布。
     wire S_yview = (S_dbg_mode == 4'd12);
-    // 10/11 = M2.1 开（默认/松档），15 = M2.1 关（对照）；
+    // 10/11 = 旧肤色预设（当前走普通融合视图），15 = 运动门全家桶；
     // **2 = 运动门开、3 = 运动门关（对照）**（2026-10-16 从新实现运动门时加的）——
     // 这两档都要能在画面里看到掩码 + 准星，现场才能"同一个手、同一个位置，切 2/3 对比"。
     // 【2026-10-17 ⑤】13 = 肤色判据观测（皮肤掩码按 Y 分档着色）、14 = ② 亮暖反射门
     //   + 运动门（最终候选）；两档都借 P/Q 报"掩码内 Y/sat 的帧内极值"。
     //   4 = 运动门归因（红=两个门都过 / 绿=只过绝对门 / 青=只过相对门）。
-    // 【M2.1】挥手提示条也并进叠加使能：这样 recog_algo=0（画面本来是纯摄像头）时，挥手照样
-    // 会在屏幕上打一条按方向着色的横条 —— 不用串口、不用按键就能看到识别结果。
-    // 代价：闪条那 ~0.4 s 里画面会从 EDGE 切回 RAW（叠加通路的时间基准锁在 RAW 流上）。
-    wire S_ovl_en = MASK_PREVIEW | S_teach_flash | S_gest_flash | S_dbg_ovl |
+    wire S_ovl_en = MASK_PREVIEW | S_teach_flash | S_dbg_ovl |
                     ((DIAG_MODE_SEL != 0) ? (S_dbg_mode != 4'd0) : (S_dbg_mode == 4'd1));
     wire S_bgview = (DIAG_MODE_SEL != 0) && (S_dbg_mode == 4'd2);
 
@@ -370,14 +364,7 @@ module isp_top #(
 
     // ---- 识别支路（M0：tap 监视 + 掩码统计 + CTRL_SYNC 端点）------------------
     // 取点：AWB 输出的彩色 RAW 流与边缘流，都在上面的 MUX 之前。
-    // M2.1（挥手方向）2026-10-11 用户决定**先跳过**：本行置 0 → 不借 DBG 的 P/Q/R，
-    // 配合 recog_top 的 `GEST_VIS=0`，整段挥手逻辑被综合裁掉（交付口径 0 增量）。
-    // 要复活 M2.1 定标：本行置 1 + recog_top 的 `GEST_VIS` 置 1。
-    localparam integer GEST_DBG_SEL = 0;
-
-    recog_top #(
-        .GEST_DBG        (GEST_DBG_SEL)
-    ) u_recog_top (
+    recog_top u_recog_top (
         .I_clk           (axi4s_video_aclk),
         .I_rst_n         (I_rst_n),
         // 【2026-10-17】识别支路也吃**带数字增益**的流（以前这里接的是 awb_O_tdata，
@@ -405,9 +392,7 @@ module isp_top #(
         .O_track_locked  (O_track_locked),
         .O_ovl_sel       (S_ovl_sel),
         .O_bg_px         (S_bg_px),
-        .O_teach_flash   (S_teach_flash),
-        .O_gest_flash    (S_gest_flash),
-        .O_gest_word     (O_gest_word)
+        .O_teach_flash   (S_teach_flash)
     );
 
     data_96bit_to_128bit u_data_96bit_to_128bit(

@@ -58,7 +58,6 @@ module game_top #(
     input  wire [10:0] I_ctrl_x,
     input  wire [10:0] I_ctrl_y,
     input  wire        I_ctrl_valid,
-    input  wire [39:0] I_gest_word,
 
     // ---- CTRL_SYNC 下行（M4c 起由 C 驱动；本轮为空 → 发自检字，见需求单 3）--
     input  wire [25:0] I_ctrl_down_data,
@@ -195,22 +194,6 @@ module game_top #(
         .O_valid     (S_blade_valid  ),
         .O_fake_x    (S_fake_x       ),
         .O_fake_y    (S_fake_y       )
-    );
-
-    // ------------------------------------------------------------------------
-    // 动态手势事件（菜单预留；本轮不接任何消费者）
-    // ------------------------------------------------------------------------
-    game_gesture u_game_gesture (
-        .I_clk          (I_clk          ),
-        .I_rst_n        (I_rst_n        ),
-        .I_bypass       (I_bypass       ),
-        .I_game_mode    (I_game_mode    ),
-        .I_track_locked (I_ctrl_valid   ),
-        .I_game_running (S_state == 4'd1),
-        .I_ctx          (2'd0           ),
-        .I_gest_word    (I_gest_word    ),
-        .O_gesture_valid(),
-        .O_gesture_dir  ()
     );
 
     // ------------------------------------------------------------------------
