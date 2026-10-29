@@ -63,8 +63,8 @@
 //
 // M2 · 运动门 第 3 轮（2026-10-16，用户上板读数："档 13 全绿、档 14 杂码没了但手也很少、
 //   档 4 什么都没有"）：
-//   * **档 4 什么都没有 = 我的 bug**：`isp_top` 的 `S_dbg_ovl` 漏了 4/6/7 → 那几档根本没开
-//     叠加通路（画面就是原摄像头）。已补上 4/5/6/7。
+//   * **档 4 什么都没有 = 我的 bug**：`isp_top` 的 `S_dbg_ovl` 漏了档 4 → 没开
+//     叠加通路（画面就是原摄像头）。已补上 4/5。
 //   * "档 13 全绿" = 这一场**整体偏暗**（肤色像素 Y<96）→ 第 2 版的**绝对饱和下限 12**
 //     把暗场里的手一起杀了。② 改成 **Y 下限 + Y 上限 + 比例饱和 `sat ≥ Y/8`**（随亮度归一化）。
 //   * 档 13 的 Y 分档阈值改成 32/64/128（贴合低亮度场，可用 `OBS_Y_T1..T3` 一行改）；
@@ -295,13 +295,6 @@ module recog_top #(
     parameter integer FUSE_CORE_SKIN = 0,
     // 核心区外扩量（像素）：手抖/形变跑不出去，旁边的桌面进不来。
     parameter [10:0] CORE_MARGIN = 11'd48,
-
-    // ---- 诊断叠加（打磨期专用，默认 0）----------------------------------------
-    // 叠加的**视图号是运行时的**：取提交字的 recog_algo 位 [15:12]，串口 `W 08 000X`
-    // 随时可切、不用重编译（视图表见下面"运行时视图叠加"那一段）。
-    // DIAG_OVL=1 时强制走视图 7（三色图），忽略运行时视图号。
-    // **正式交付必须为 0**（视图 0/1 就是正常交付行为）。
-    parameter integer DIAG_OVL = 0,
 
     // ---- 打磨②：肤色判据 v2（默认 0 = 原判据）--------------------------------
     // 原判据是 (B−Y)/(R−Y) 的绝对矩形，对"整体曝光/白平衡"极敏感：曝光过头或整体偏冷
@@ -1796,7 +1789,7 @@ module recog_top #(
     // v2（档 15）本来就是颜色统计，不受这一行影响。
     wire       S_cap_locked;   // 跟踪器已锁定（由 g_track / g_notrack 驱动）
     // ---- 行带（2026-10-21）：手部唯一权威 bbox ------------------------------
-    // 由 g_track 里的 hand_band 驱动；ROI、M2 顶带、手势 y_min、DBG Q/R、视图 6
+    // 由 g_track 里的 hand_band 驱动；ROI、M2 顶带、手势 y_min、DBG Q/R
     // 都以它为基准，避免"掩码看对了、准星却按另一个框算"。
     wire        S_band_valid;
     wire [10:0] S_band_xmin, S_band_xmax;
@@ -2892,25 +2885,19 @@ module recog_top #(
         //   3     = AWB 之前视图（同上）
         //   4     = **只看运动门**（绿）——查"亮区/桌面一直高亮"是不是运动门误报
         //   5     = **只看肤色门**（红）——查是不是肤色门误判
-        //   6     = ROI 边框（蓝）+ 融合掩码
-        //   7     = 三色诊断（红=只肤色 / 绿=只运动 / 黄=两者都过 / 蓝=ROI 边框）
-        // 喂给 4/5/7 的是**原始**肤色/运动位（不经开运算、不经 ROI 门控）；
-        // 喂给 0/1/6 的是 ROI 门控后的融合掩码。
         // 色码（3 bit）：0=原像素 1=掩码红 2=准星黄 3=只肤色红 4=只运动绿
         //                5=两者都过黄 6=ROI 边框蓝 7=准星青（保留）
         // 资源：准星 4 个 + ROI 边框 4 个比较器 × 4 个像素通道，≈60 LUT6 / 0 ERAM / 0 DSP。
-        wire [3:0] S_view = (DIAG_OVL != 0) ? 4'd7 : S_mode_word[15:12];
+        wire [3:0] S_view = S_mode_word[15:12];
 
         function [2:0] F_ovl_view;
             input [10:0] I_x;
             input [9:0]  I_y;
             input        I_fuse;      // 融合掩码（ROI 门控 + 开运算后）
             input        I_skin;      // 原始肤色门
-            input        I_motion;    // 原始运动门
             input [7:0]  I_gray;      // 本像素灰度（视图 13 的 Y 分档用）
             input [1:0]  I_mlv;       // 运动门归因（视图 4 用，见 F_mot_lv）
             reg S_x_on, S_y_on, S_x_th, S_y_th, S_bx, S_by, S_border;
-            reg S_bbx, S_bby, S_band_border;
             begin
                 // 臂长 ±CROSS_LEN、线宽 ±CROSS_TH（十字两个方向各一条粗线）
                 // 【2026-10-18】准星走独立的质心通道，不再跟 S_trk_x/y（指尖）。
@@ -2925,14 +2912,6 @@ module recog_top #(
                        ((I_y + 2 >= S_roi_y1) && (I_y <= S_roi_y1 + 1));
                 S_border = (S_bx && (I_y >= S_roi_y0) && (I_y <= S_roi_y1)) ||
                            (S_by && (I_x >= S_roi_x0) && (I_x <= S_roi_x1));
-                // 行带边框（视图 6 专用）：2 像素粗，颜色仍用蓝
-                S_bbx = ((I_x + 2 >= S_band_xmin) && (I_x <= S_band_xmin + 11'd1)) ||
-                        ((I_x + 2 >= S_band_xmax) && (I_x <= S_band_xmax + 11'd1));
-                S_bby = ((I_y + 2 >= S_band_ymin) && (I_y <= S_band_ymin + 10'd1)) ||
-                        ((I_y + 2 >= S_band_ymax) && (I_y <= S_band_ymax + 10'd1));
-                S_band_border = S_band_valid &&
-                                ((S_bbx && (I_y >= S_band_ymin) && (I_y <= S_band_ymax)) ||
-                                 (S_bby && (I_x >= S_band_xmin) && (I_x <= S_band_xmax)));
                 // M2.2 指尖方点：颜色 = 手型（黄 = 张开、红 = 握拳；手型未知就不画）
                 if((S_m2_shape != 3'd0) &&
                         (I_x + {7'b0, M2_TIP_R} >= S_m2_tx) &&
@@ -2959,14 +2938,6 @@ module recog_top #(
                                  (I_mlv == 2'd2) ? 3'd7 : (S_border ? 3'd6 : 3'd0);
                 else if(S_view == 4'd5)
                     F_ovl_view = I_skin   ? 3'd3 : (S_border ? 3'd6 : 3'd0);
-                else if(S_view == 4'd7) begin
-                    if(I_skin && I_motion) F_ovl_view = 3'd5;   // 两者都过（黄）
-                    else if(I_skin)        F_ovl_view = 3'd3;   // 只过肤色（红）
-                    else if(I_motion)      F_ovl_view = 3'd4;   // 只过运动（绿）
-                    else                   F_ovl_view = S_border ? 3'd6 : 3'd0;
-                end
-                else if(S_view == 4'd6)
-                    F_ovl_view = S_band_border ? 3'd6 : (I_fuse ? 3'd1 : 3'd0);
                 else
                     // 0/1/2/3：正常融合视图。**形状门不过时不涂红**（否则门只挡跟踪、屏幕上桌面
                     // 仍然是红的 —— 用户看到的就是"桌面高亮"）。宁可画面干净，也不误导。
@@ -2975,10 +2946,10 @@ module recog_top #(
         endfunction
 
         // 叠加用 S_mask_disp（v2 已 ∩ 运动；其余档与 S_mask_gated 相同）
-        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_disp[3], S_skin_use[3], S_motion_mask[3], S_gray3, S_mot_lv[7:6]),
-                                 F_ovl_view(S_col2, S_y_pos, S_mask_disp[2], S_skin_use[2], S_motion_mask[2], S_gray2, S_mot_lv[5:4]),
-                                 F_ovl_view(S_col1, S_y_pos, S_mask_disp[1], S_skin_use[1], S_motion_mask[1], S_gray1, S_mot_lv[3:2]),
-                                 F_ovl_view(S_col0, S_y_pos, S_mask_disp[0], S_skin_use[0], S_motion_mask[0], S_gray0, S_mot_lv[1:0]) };
+        wire [11:0] S_ovl_rt = { F_ovl_view(S_col3, S_y_pos, S_mask_disp[3], S_skin_use[3], S_gray3, S_mot_lv[7:6]),
+                                 F_ovl_view(S_col2, S_y_pos, S_mask_disp[2], S_skin_use[2], S_gray2, S_mot_lv[5:4]),
+                                 F_ovl_view(S_col1, S_y_pos, S_mask_disp[1], S_skin_use[1], S_gray1, S_mot_lv[3:2]),
+                                 F_ovl_view(S_col0, S_y_pos, S_mask_disp[0], S_skin_use[0], S_gray0, S_mot_lv[1:0]) };
 
         assign S_ovl_sel = S_ovl_rt;
 

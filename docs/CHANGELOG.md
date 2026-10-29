@@ -49,6 +49,18 @@ ERAM（−1457）、place `opt_timing high`（+226 → +866 ps，不改 RTL）�
 `tmp/resource-p1-observation-removed-20261029/`；普通 bit SHA256 为
 `ACF64DF9B704A46D558D280D1851BB29EC06C2BF92BF6103339CAD63DC9B3FAF`。
 
+### 11.1.0b P1：删除视图 6/7 与行带边框（2026-10-29）
+
+视图 6 和 7 已不再用于当前 0–5 的主调试流程。删除它们后，逐像素叠加路径不再计算
+行带 bbox 边框，三色诊断和对应运动掩码输入也一并消失。交付融合掩码、准星、M2.2
+指尖点、视图 4/5 的 ROI 边框保持不变。
+
+相对上一刀减少 152 slices、153 feedthrough；LUT6 增加 43、FF 增加 24，属于本轮
+布局打包变化。最终为 17555 slices（82.74%）、16130 LUT6、15392 FF、Setup +577 ps、
+Hold +20 ps，0 ERROR、一次 PnR、bitgen 成功。相对 P1 前基线累计减少 346 slices、
+309 LUT6、210 FF。归档位于 `tmp/resource-p1-view67-removed-20261029/`；普通 bit
+SHA256 为 `CFE5A019FBB782E29FBAFAF589E12816549CEBFC19AE62B87F5AC0C886CD31B9`。
+
 ### 11.1.1 资源优化第一版：Logo ROM 搬 ERAM（`feat/resource-opt` @ `0aa5c25`）
 
 2026-09-12 的构建（`pwsh -NoProfile -File tools/build_td.ps1`，综合 + 布局布线 +
