@@ -55,8 +55,7 @@
 //   用户给了 5 条候选，并明确"**观测档应该先做**"（M1 的阈值全是读回来的，别再靠猜）。
 //   本轮落地 ⑤ + ②（② 是 5 条里最便宜、最可能立竿见影的），全部挂在运行时档位上：
 //     档 4  = **运动门归因**：红=两个门都过（= 运动掩码）/ 绿=只过绝对门 / 青=只过相对门；
-//     档 13 = **肤色判据观测**：过肤色判据的像素按 Y 分档着色（阈值见 OBS_Y_T1..T3），
-//             并把"掩码内 Y、饱和度的帧内极值"借 P/Q 上报（P={minY,maxY}、Q={minSat,maxSat}）；
+//     档 13 = **肤色判据观测**：过肤色判据的像素按 Y 分档着色（阈值见 OBS_Y_T1..T3）；
 //     档 14 = **② 生效 + 运动门开**（最终候选）：肤色再加 Y 上下限 + 比例饱和门
 //             （第 3 轮改成 `sat ≥ Y/8`）—— 铁皮上的灯光反射**又亮又暖**，
 //             用 M1 档 10 那句老话："过亮的像素落不进窗口"。
@@ -1162,54 +1161,6 @@ module recog_top #(
                             (S_v2      ? S_skin_warm_mask :
                              (S_cap_on ? S_skin_cap_mask :
                               ((SKIN_NORM != 0)  ? S_skin_norm_mask : S_skin_mask)));
-
-    // ========================================================================
-    // 【2026-10-16 ⑤：观测档】肤色掩码内 Y / 饱和度的**帧内最小、最大值**
-    //   为什么要它：用户明说了"我们盲调的现状，别再靠猜"。M1 的每个阈值都是这么读回来的。
-    //   现场定标配方（档 13 打开，画面里只对一个东西）：
-    //     ① 只对着**铁皮反光** → 读 P/Q = 反光的 Y 区间 / sat 区间
-    //     ② 只对着**手**       → 读 P/Q = 手的 Y 区间 / sat 区间
-    //     ③ `SKIN_Y_MIN` ≤ 手 minY；`SKIN_Y_CAP` 取在手 maxY 与反光 minY 之间；
-    //        比例饱和 `SKIN_SAT_SH` 取在"手 minSat/手 maxY"与"反光 maxSat/反光 minY"之间
-    //        （先试默认 Y/8；手被杀了就改成 4 = Y/16）
-    //     ④ 切档 14（② 生效）看红色是否只剩手
-    //   P(16) = { 掩码内 minY, 掩码内 maxY }
-    //   Q(14) = { 掩码内 minSat[6:0], 掩码内 maxSat[6:0] }（sat 饱和到 127）
-    //   R(12) = M1 语义（包围盒 y）不变 —— 顺手盯掩码健康
-    //   采样密度：每拍只并**像素 3**（= 每 4 列取 1 列，与示教那套同一招）→ 极值统计
-    //   仍然够用（反光/手的面积远大于 4 像素），而成本降到 1/4（≈60 LUT6）。
-    //   只在档 13/14 借 P/Q；其余档位 P/Q/R 一字不动。
-    // ========================================================================
-    wire S_obs_on = (S_cfg == 4'd13) || (S_cfg == 4'd14) || (S_cfg == 4'd15);
-    reg [7:0] a_obs_ymin, a_obs_ymax, a_obs_smin, a_obs_smax;
-    reg [7:0] h_obs_ymin, h_obs_ymax, h_obs_smin, h_obs_smax;
-    // 饱和先钳到 127（Q 只有 7 位给它）：皮肤/反光的 sat 都远小于 127，钳位不影响判读
-    wire [7:0] S_sat3_c = (S_sat3 > 8'd127) ? 8'd127 : S_sat3;
-    wire [7:0] S_obs_ymin_in = S_skin_use[3] ? S_gray3 : 8'hFF;
-    wire [7:0] S_obs_ymax_in = S_skin_use[3] ? S_gray3 : 8'h00;
-    wire [7:0] S_obs_smin_in = S_skin_use[3] ? S_sat3_c : 8'h7F;
-    wire [7:0] S_obs_smax_in = S_skin_use[3] ? S_sat3_c : 8'h00;
-    always @(posedge I_clk or negedge I_rst_n) begin
-        if(!I_rst_n) begin
-            a_obs_ymin <= 8'hFF;  a_obs_ymax <= 8'h00;
-            a_obs_smin <= 8'h7F;  a_obs_smax <= 8'h00;
-            h_obs_ymin <= 8'hFF;  h_obs_ymax <= 8'h00;
-            h_obs_smin <= 8'h7F;  h_obs_smax <= 8'h00;
-        end
-        else if(I_raw_tuser) begin
-            // 帧首：把上一帧的极值锁存出去，累加器重置成"空集"的初值
-            h_obs_ymin <= a_obs_ymin;  h_obs_ymax <= a_obs_ymax;
-            h_obs_smin <= a_obs_smin;  h_obs_smax <= a_obs_smax;
-            a_obs_ymin <= 8'hFF;       a_obs_ymax <= 8'h00;
-            a_obs_smin <= 8'h7F;       a_obs_smax <= 8'h00;
-        end
-        else if(I_raw_tvalid) begin
-            if(S_obs_ymin_in < a_obs_ymin) a_obs_ymin <= S_obs_ymin_in;
-            if(S_obs_ymax_in > a_obs_ymax) a_obs_ymax <= S_obs_ymax_in;
-            if(S_obs_smin_in < a_obs_smin) a_obs_smin <= S_obs_smin_in;
-            if(S_obs_smax_in > a_obs_smax) a_obs_smax <= S_obs_smax_in;
-        end
-    end
 
     // ========================================================================
     // M1 Step 2：背景帧（80x45 灰度）+ 运动掩码 → 融合掩码 = 肤色 ∩ 运动
@@ -3101,16 +3052,11 @@ module recog_top #(
     //   P(16) = 窗口内运动像素数 >>4
     //   Q(14) = 全帧运动像素数 >>6
     wire S_mot_dbg_on = (S_cfg == 4'd2);
-    // 【2026-10-16 ⑤】观测档（13/14）借 P/Q 报"肤色掩码内 Y/sat 的帧内极值"：
-    //   P(16) = { 掩码内 minY, maxY }     ← 定 SKIN_Y_MIN / SKIN_Y_CAP
-    //   Q(14) = { 掩码内 minSat[6:0], maxSat[6:0] }   ← 定比例饱和 SKIN_SAT_SH（配 P 的 Y）
-    assign O_mask_cnt_shift = S_obs_on     ? {h_obs_ymin, h_obs_ymax}
-                            : S_mot_dbg_on ? S_band_mot_win[19:4]
+    assign O_mask_cnt_shift = S_mot_dbg_on ? S_band_mot_win[19:4]
                             : S_m2_dbg_on  ? S_m2_dbg_p
                                            : ((DIAG_CHROMA != 0) ? S_ch_mot : (S_mcnt >> 4));
     // DIAG_CHROMA=1 时 Q/R 改报帧内 (d1,d2) 极值（调试用，见参数说明）
-    assign O_bbox_x         = S_obs_on     ? {h_obs_smin[6:0], h_obs_smax[6:0]}
-                            : S_mot_dbg_on ? S_band_mot_all[19:6]
+    assign O_bbox_x         = S_mot_dbg_on ? S_band_mot_all[19:6]
                             : S_m2_dbg_on  ? S_m2_dbg_q
                                             : ((DIAG_CHROMA != 0) ? S_ch_word_x
                                                                   : {S_band_xmin[10:4], S_band_xmax[10:4]});

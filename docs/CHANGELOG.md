@@ -37,6 +37,18 @@ ERAM（−1457）、place `opt_timing high`（+226 → +866 ps，不改 RTL）�
 归档位于 `tmp/resource-p1-m21-removed-20261029/`；普通 bit SHA256 为
 `3AE6D87C4522CF53DB2B260E63CD8A1172776B928643F6983D8912D34CC0A3C3`。
 
+### 11.1.0a P1：删除 Y/sat 极值观测（2026-10-29）
+
+档 13/14/15 的 P/Q 观测值原先把肤色掩码内 Y、饱和度的帧内极值借给串口。该统计
+需要每拍比较并维护八个 8 位寄存器，且运行时 `S_obs_on` mux 使其始终留在交付网表。
+本轮只删除观测统计和 P/Q 借用分支，肤色判据、暖色门与运动门保持不变。
+
+相对上一刀又减少 57 slices、203 LUT6、110 FF；feedthrough 由 6161 增至 6388。
+最终为 17707 slices（83.46%）、16087 LUT6、15368 FF、Setup +830 ps、Hold +20 ps，
+0 ERROR、一次 PnR、bitgen 成功。归档位于
+`tmp/resource-p1-observation-removed-20261029/`；普通 bit SHA256 为
+`ACF64DF9B704A46D558D280D1851BB29EC06C2BF92BF6103339CAD63DC9B3FAF`。
+
 ### 11.1.1 资源优化第一版：Logo ROM 搬 ERAM（`feat/resource-opt` @ `0aa5c25`）
 
 2026-09-12 的构建（`pwsh -NoProfile -File tools/build_td.ps1`，综合 + 布局布线 +
