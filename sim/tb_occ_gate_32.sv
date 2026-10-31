@@ -20,11 +20,12 @@ module tb_occ_gate_32;
     reg dense_keep;
     reg boundary_keep;
     reg sparse_keep;
+    reg off_grid_keep;
     reg row_start_keep;
     reg late_row_keep;
 
     occ_gate_32 #(
-        .OCC_MIN(7'd16),
+        .OCC_MIN(11'd128),
         .BLOCK_COLS(2),
         .BLOCK_ROWS(2),
         .IMG_H(64)
@@ -56,27 +57,29 @@ module tb_occ_gate_32;
             tuser  = (yy == 0) && (xx_group == 0);
             mask   = 4'b0000;
 
-            // 32x32 block (0,0): 128/128 sampled pixels, must pass.
-            if (((yy % 8) == 0) && (yy < 32) && (xx_group < 8))
+            // 32x32 block (0,0): 1024/1024 pixels, must pass.
+            if ((yy < 32) && (xx_group < 8))
                 mask = 4'b1111;
 
-            // 32x32 block (1,0): exactly 16/128 sampled pixels (12.5%), must pass.
-            if (((yy % 8) == 0) && (yy < 32) && (xx_group == 8))
+            // 32x32 block (1,0): four complete rows = 128/1024 (12.5%).
+            // Deliberately place them off the old sparse sample rows.
+            if ((yy >= 1) && (yy <= 4) &&
+                (xx_group >= 8) && (xx_group < 16))
                 mask = 4'b1111;
 
-            // 32x32 block (0,1): 8/128 sampled pixels (6.25%), must drop.
-            if (((yy % 8) == 0) && (yy >= 32) && (xx_group == 0))
-                mask = 4'b0011;
+            // 32x32 block (0,1): two complete rows = 64/1024 (6.25%), must drop.
+            if ((yy >= 33) && (yy <= 34) && (xx_group < 8))
+                mask = 4'b1111;
 
-            // 32x32 block (1,1): dense, used to catch stale flags after a
-            // settlement-row write has shifted the read address.
-            if (((yy % 8) == 0) && (yy >= 32) &&
+            // 32x32 block (1,1): seven complete rows = 224/1024 (21.875%).
+            // This is the regression that catches vertical sampling aliasing.
+            if ((yy >= 33) && (yy <= 39) &&
                 (xx_group >= 8) && (xx_group < 16))
                 mask = 4'b1111;
 
             // Last block in row 0: dense. Its flag must not leak into the
             // first block of row 1 after the y=31 settlement write.
-            if (((yy % 8) == 0) && (yy < 32) && (xx_group >= 72))
+            if ((yy < 32) && (xx_group >= 8) && (xx_group < 16))
                 mask = 4'b1111;
 
             // Wait until the following rising edge has consumed this group.
@@ -87,8 +90,9 @@ module tb_occ_gate_32;
                 // Four-pixel groups are prefetched one block ahead. Observe each
                 // 32-pixel block at its beat0, where block_byte has settled.
                 if ((yy == 1) && (xx_group == 1)) dense_keep = occ_keep;
-                if ((yy == 1) && (xx_group == 9)) boundary_keep = occ_keep;
+                if ((yy == 5) && (xx_group == 9)) boundary_keep = occ_keep;
                 if ((yy == 33) && (xx_group == 1)) sparse_keep = occ_keep;
+                if ((yy == 40) && (xx_group == 9)) off_grid_keep = occ_keep;
                 if ((yy == 32) && (xx_group == 1)) row_start_keep = occ_keep;
                 if ((yy == 63) && (xx_group == 9)) late_row_keep = occ_keep;
             end
@@ -124,11 +128,13 @@ module tb_occ_gate_32;
             $fatal(1, "12.5%% boundary block was incorrectly dropped");
         if (sparse_keep)
             $fatal(1, "6.25%% sparse block was incorrectly kept");
+        if (!off_grid_keep)
+            $fatal(1, "21.875%% block was dropped because it missed old sample rows");
         if (row_start_keep)
             $fatal(1, "row-start block inherited the previous row's last flag");
         if (!late_row_keep)
             $fatal(1, "settlement-row write shifted a later block's read flag");
-        $display("PASS: occ_gate_32 keeps 12.5%%, drops 6.25%%, and preserves row-boundary flags");
+        $display("PASS: full-area occupancy keeps 12.5%% and 21.875%%, drops 6.25%%, preserves row boundaries");
         $finish;
     end
 endmodule
