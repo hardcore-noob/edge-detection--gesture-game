@@ -29,7 +29,9 @@ module occ_gate_32 #(
         (OCC_MIN * LAST_BLOCK_H + 31) / 32;
 
     wire [2:0] beat = I_x_grp[2:0];
-    wire [5:0] col  = I_x_grp[7:3];
+    // 1280 px = 40 blocks of 32 px. Each block spans eight 4-pixel groups,
+    // so the block column needs x_grp[8:3], not x_grp[7:3].
+    wire [5:0] col  = I_x_grp[8:3];
     wire [4:0] row  = I_y_pos[9:5];
     wire [9:0] base = row * BLOCK_COLS;
     wire [9:0] cur  = base + {4'b0, col};
@@ -45,16 +47,21 @@ module occ_gate_32 #(
     wire [9:0] read_addr = (beat == 3'd7) ? next_addr : cur;
 
     reg [2:0] frame_count;
+    reg       bank_sel;
     always @(posedge I_clk or negedge I_rst_n) begin
-        if(!I_rst_n)
+        if(!I_rst_n) begin
             frame_count <= 3'd0;
-        else if(I_tuser && !(&frame_count))
-            frame_count <= frame_count + 3'd1;
+            bank_sel    <= 1'b0;
+        end
+        else if(I_tuser) begin
+            if(!(&frame_count))
+                frame_count <= frame_count + 3'd1;
+            bank_sel <= ~bank_sel;
+        end
     end
 
-    // frame_count[0] selects the write bank for this frame. The other bank
-    // holds the previous frame's accepted-block flags.
-    wire bank_sel = frame_count[0];
+    // bank_sel must keep toggling after frame_count saturates. The write bank
+    // holds this frame's flags while the other bank retains the previous frame.
     wire [9:0] write_addr = cur;
     wire write_enable = I_tvalid && block_last && (beat == 3'd7);
     wire [9:0] bank0_addr = (write_enable && !bank_sel) ? write_addr : read_addr;
