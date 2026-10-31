@@ -3505,3 +3505,29 @@ DSP 8/40、feedthrough 6812、final Setup WNS **+683 ps** / Hold +20 ps，0 违�
 - 恢复基线 bit 归档于
   `tmp/gesture-restored-handband-awb-20261028/camera_to_dsi_display.bit`，
   SHA256 `6B8BA1B9FFB6F2B1D505580B85C06F2042C3B3CF79124E4BA4705194261D7B9E`。
+
+---
+
+## 2026-10-31　刀锋候选专用 7/8 密度门
+
+### 根因与实现
+
+- 矩形 bbox 顶部的背景区域可能残留低密度小团；M2 只取“第一个非空行”，
+  因而会把背景斑点选成指尖，随后再跳回真实手指。
+- 保留全局 `VOTE_MIN=5/8`，新增 `M2_VOTE_MIN=7/8`，只收窄 `S_m2_top` 的
+  指尖候选。显示掩码、行带、质心、ROI 和跟踪统计继续使用全局 5/8。
+
+### 构建
+
+- 一次 PnR、0 ERROR、0 违例、bitgen 成功。
+- slices **17555 / 21216（82.74%）**、LUT6 **16030（75.56%）**、
+  FF **15415**、ERAM 76/108、DSP 8/40、feedthrough 6455。
+- final Setup **+672 ps** / Hold **+20 ps**。
+- bit：`td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display.bit`，
+  SHA256 `B4600EBB23581DBE8538B120201254E75A2E9036EDA7453898E01027CE284860`。
+
+### 验证状态
+
+- 代码、综合、布局布线、时序门禁和 bitgen 已通过。
+- 尚未上板；需确认矩形顶部背景噪声不再引起刀锋大幅跳动，并回归远处手、
+  弱光边缘、左右快挥和切水果命中。
