@@ -8,13 +8,13 @@
 
 | 资源 | 当前用量 | 占比 |
 |---|---:|---:|
-| slices | 17785 / 21216 | 83.83% |
-| LUT6 | 16249 / 21216 | 76.59% |
-| FF | 15857 / 42432 | 37.37% |
+| slices | 17885 / 21216 | 84.30% |
+| LUT6 | 16335 / 21216 | 76.99% |
+| FF | 16141 / 42432 | 38.04% |
 | ERAM | 78 / 108 | 72.22% |
 | DSP | 8 / 40 | 20.00% |
-| feedthrough | 6357 | — |
-| final Setup WNS | +658 ps | 0 违例 |
+| feedthrough | 6301 | — |
+| final Setup WNS | +633 ps | 0 违例 |
 | final Hold WNS | +20 ps | 0 违例 |
 
 验收门禁沿用 `docs/resource-budget.md`：slices < 95%、Setup WNS ≥ +200 ps、

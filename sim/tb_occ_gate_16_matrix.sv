@@ -1,11 +1,11 @@
 `timescale 1ns/1ps
 
-module tb_occ_gate_32_matrix;
+module tb_occ_gate_16_matrix;
     localparam integer FRAME_W = 1280;
     localparam integer FRAME_H = 720;
     localparam integer X_GROUPS = FRAME_W / 4;
-    localparam integer BLOCK_COLS = FRAME_W / 32;
-    localparam integer BLOCK_ROWS = (FRAME_H + 31) / 32;
+    localparam integer BLOCK_COLS = FRAME_W / 16;
+    localparam integer BLOCK_ROWS = FRAME_H / 16;
 
     reg clk;
     reg rst_n;
@@ -29,10 +29,8 @@ module tb_occ_gate_32_matrix;
     reg actual_flags [0:BLOCK_ROWS-1][0:BLOCK_COLS-1];
     reg mismatch_flags [0:BLOCK_ROWS-1][0:BLOCK_COLS-1];
 
-    occ_gate_32 #(
-        .OCC_MIN(11'd128),
-        .BLOCK_COLS(BLOCK_COLS),
-        .BLOCK_ROWS(BLOCK_ROWS),
+    occ_gate_16 #(
+        .OCC_MIN(9'd32),
         .IMG_H(FRAME_H)
     ) dut (
         .I_clk(clk),
@@ -55,8 +53,42 @@ module tb_occ_gate_32_matrix;
         input integer row;
         input integer pattern_frame;
         begin
-            expected_block =
-                (((col * 13 + row * 17 + pattern_frame * 7) % 11) < 5);
+            if ((row == 0) && (col == 2))
+                expected_block = 1'b0;
+            else if ((row == 0) && (col <= 3))
+                expected_block = 1'b1;
+            else
+                expected_block =
+                    (((col * 13 + row * 17 + pattern_frame * 7) % 11) < 5);
+        end
+    endfunction
+
+    function automatic [3:0] group_mask;
+        input integer col;
+        input integer row;
+        input integer pattern_frame;
+        input integer yy;
+        input integer xx_group;
+        integer block_y;
+        integer block_x;
+        begin
+            block_y = yy % 16;
+            block_x = xx_group % 4;
+            group_mask = 4'b0000;
+            if ((row == 0) && (col == 0))
+                group_mask = 4'b1111;                 // dense
+            else if ((row == 0) && (col == 1))
+                group_mask = ((block_y >= 1) && (block_y <= 2)) ?
+                             4'b1111 : 4'b0000;        // exactly 32/256
+            else if ((row == 0) && (col == 2))
+                group_mask = (block_y == 1) ?
+                             4'b1111 : 4'b0000;        // 16/256, must drop
+            else if ((row == 0) && (col == 3))
+                group_mask = (((block_y >= 1) && (block_y <= 3)) ||
+                              ((block_y == 4) && (block_x < 2))) ?
+                             4'b1111 : 4'b0000;        // 56/256 = 21.875%
+            else if (expected_block(col, row, pattern_frame))
+                group_mask = 4'b1111;
         end
     endfunction
 
@@ -88,21 +120,9 @@ module tb_occ_gate_32_matrix;
             tvalid = 1'b1;
             tuser  = 1'b0;
 
-            col = xx_group / 8;
-            row = yy / 32;
-            mask = 4'b0000;
-            if (expected_block(col, row, current_frame)) begin
-                // The final block row is only 16 pixels high. Two complete
-                // rows are exactly 12.5% of its real 512-pixel area.
-                if ((row == BLOCK_ROWS - 1) && ((yy % 32) >= 2))
-                    mask = 4'b0000;
-                else
-                    mask = 4'b1111;
-            end
-            else if ((row == BLOCK_ROWS - 1) && ((yy % 32) == 0)) begin
-                // 32/512 for a bottom-row reject block: below the 64-point limit.
-                mask = 4'b1111;
-            end
+            col = xx_group / 4;
+            row = yy / 16;
+            mask = group_mask(col, row, current_frame, yy, xx_group);
 
             #1;
 
@@ -121,9 +141,8 @@ module tb_occ_gate_32_matrix;
             @(posedge clk);
             #1;
 
-            // Observe one pixel group after each block's beat0 flag load.
-            if ((current_frame == 7) && ((yy % 32) == 1) &&
-                ((xx_group % 8) == 1)) begin
+            if ((current_frame == 7) && ((yy % 16) == 0) &&
+                ((xx_group % 4) == 1)) begin
                 checks = checks + 1;
                 expected = expected_block(col, row, 6);
                 actual_flags[row][col] = occ_keep;
@@ -191,14 +210,14 @@ module tb_occ_gate_32_matrix;
             end
         end
         if (checks != BLOCK_COLS * BLOCK_ROWS)
-            $fatal(1, "did not observe every block flag");
+            $fatal(1, "did not observe every 16x16 block flag");
         if (write_checks != BLOCK_COLS * BLOCK_ROWS)
-            $fatal(1, "did not observe every block write");
+            $fatal(1, "did not observe every 16x16 block write");
         if (write_errors != 0)
-            $fatal(1, "full-size block-write matrix mismatch");
+            $fatal(1, "full-size 16x16 block-write matrix mismatch");
         if (errors != 0)
-            $fatal(1, "full-size block-flag matrix mismatch");
-        $display("PASS: all 40x23 block flags match the previous-frame pattern");
+            $fatal(1, "full-size 16x16 block-flag matrix mismatch");
+        $display("PASS: all 80x45 16x16 block flags match the previous-frame pattern");
         $finish;
     end
 endmodule

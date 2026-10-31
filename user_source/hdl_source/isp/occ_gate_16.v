@@ -1,14 +1,12 @@
 // ============================================================================
-// occ_gate_32 —— 32x32 块级掩码占比门
+// occ_gate_16 —— 16x16 块级掩码占比门
 //
-// 每块统计完整 32×32 区域，共 1024 个像素。当前帧按块行累计，
+// 每块统计完整 16×16 区域，共 256 个像素。当前帧按块行累计，
 // 块行结束时把 bit7 标志写入当前 Bank；下一帧从另一 Bank 读取该标志。
-// OCC_MIN=128 为 12.5%，OCC_MIN=256 为 25%。
+// OCC_MIN=32 为 12.5%，OCC_MIN=64 为 25%。
 // ============================================================================
-module occ_gate_32 #(
-    parameter [10:0] OCC_MIN = 11'd128,
-    parameter integer BLOCK_COLS = 40,
-    parameter integer BLOCK_ROWS = 23,
+module occ_gate_16 #(
+    parameter [8:0] OCC_MIN = 9'd32,
     parameter integer IMG_H = 720
 )(
     input  wire        I_clk,
@@ -21,30 +19,33 @@ module occ_gate_32 #(
     output wire        O_keep
 );
 
-    localparam [9:0] ADDR_LAST = BLOCK_COLS * BLOCK_ROWS - 1;
+    localparam integer BLOCK_COLS = 80;
+    localparam integer BLOCK_ROWS = 45;
+    localparam integer ADDR_WIDTH = 12;
+    localparam [ADDR_WIDTH-1:0] ADDR_LAST = BLOCK_COLS * BLOCK_ROWS - 1;
     localparam integer LAST_IMG_ROW = IMG_H - 1;
-    localparam [5:0] COL_LAST = BLOCK_COLS - 1;
-    localparam integer LAST_BLOCK_H = (IMG_H % 32 == 0) ? 32 : (IMG_H % 32);
-    localparam [10:0] LAST_OCC_MIN =
-        (OCC_MIN * LAST_BLOCK_H + 31) / 32;
+    localparam [6:0] COL_LAST = BLOCK_COLS - 1;
+    localparam integer LAST_BLOCK_H = (IMG_H % 16 == 0) ? 16 : (IMG_H % 16);
+    localparam [8:0] LAST_OCC_MIN =
+        (OCC_MIN * LAST_BLOCK_H + 15) / 16;
 
-    wire [2:0] beat = I_x_grp[2:0];
-    // 1280 px = 40 blocks of 32 px. Each block spans eight 4-pixel groups,
-    // so the block column needs x_grp[8:3], not x_grp[7:3].
-    wire [5:0] col  = I_x_grp[8:3];
-    wire [4:0] row  = I_y_pos[9:5];
-    wire [9:0] base = row * BLOCK_COLS;
-    wire [9:0] cur  = base + {4'b0, col};
-    wire block_row_start = (I_y_pos[4:0] == 5'd0);
-    wire block_last = (I_y_pos[4:0] == 5'd31) || (I_y_pos == LAST_IMG_ROW);
+    wire [1:0] beat = I_x_grp[1:0];
+    // 1280 px = 80 blocks of 16 px. Each block spans four 4-pixel groups.
+    wire [6:0] col  = I_x_grp[8:2];
+    wire [5:0] row  = I_y_pos[9:4];
+    // 80 = 64 + 16. Use explicit shifts so TD does not infer a multiplier/DSP.
+    wire [ADDR_WIDTH-1:0] base = {row, 6'b0} + {row, 4'b0};
+    wire [ADDR_WIDTH-1:0] cur  = base + {5'b0, col};
+    wire block_row_start = (I_y_pos[3:0] == 4'd0);
+    wire block_last = (I_y_pos[3:0] == 4'd15) || (I_y_pos == LAST_IMG_ROW);
 
     // The scan is row-major on video lines while the flag memory is row-major
-    // on 32-line block rows. Prefetch column 0 of the same block row at every
-    // video-row boundary and advance to the next block row after y=31.
-    wire [9:0] next_addr = block_last
-                           ? ((cur == ADDR_LAST) ? 10'd0 : (cur + 10'd1))
-                           : ((col == COL_LAST) ? base : (cur + 10'd1));
-    wire [9:0] read_addr = (beat == 3'd7) ? next_addr : cur;
+    // on 16-line block rows. Prefetch column 0 of the same block row at every
+    // video-row boundary and advance to the next block row after y=15.
+    wire [ADDR_WIDTH-1:0] next_addr = block_last
+                           ? ((cur == ADDR_LAST) ? {ADDR_WIDTH{1'b0}} : (cur + 1'b1))
+                           : ((col == COL_LAST) ? base : (cur + 1'b1));
+    wire [ADDR_WIDTH-1:0] read_addr = (beat == 2'd3) ? next_addr : cur;
 
     reg [2:0] frame_count;
     reg       bank_sel;
@@ -62,10 +63,10 @@ module occ_gate_32 #(
 
     // bank_sel must keep toggling after frame_count saturates. The write bank
     // holds this frame's flags while the other bank retains the previous frame.
-    wire [9:0] write_addr = cur;
-    wire write_enable = I_tvalid && block_last && (beat == 3'd7);
-    wire [9:0] bank0_addr = (write_enable && !bank_sel) ? write_addr : read_addr;
-    wire [9:0] bank1_addr = (write_enable &&  bank_sel) ? write_addr : read_addr;
+    wire [ADDR_WIDTH-1:0] write_addr = cur;
+    wire write_enable = I_tvalid && block_last && (beat == 2'd3);
+    wire [ADDR_WIDTH-1:0] bank0_addr = (write_enable && !bank_sel) ? write_addr : read_addr;
+    wire [ADDR_WIDTH-1:0] bank1_addr = (write_enable &&  bank_sel) ? write_addr : read_addr;
 
     wire [7:0] bank0_rdata;
     wire [7:0] bank1_rdata;
@@ -74,43 +75,43 @@ module occ_gate_32 #(
 
     wire [2:0] beat_count = {2'b0, I_mask[0]} + {2'b0, I_mask[1]} +
                             {2'b0, I_mask[2]} + {2'b0, I_mask[3]};
-    reg [6:0] row_count;
-    reg [10:0] block_count [0:BLOCK_COLS-1];
+    reg [4:0] row_count;
+    reg [8:0] block_count [0:BLOCK_COLS-1];
     integer i;
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n) begin
             for (i = 0; i < BLOCK_COLS; i = i + 1)
-                block_count[i] <= 11'd0;
+                block_count[i] <= 9'd0;
         end
-        else if(I_tvalid && (beat == 3'd7)) begin
+        else if(I_tvalid && (beat == 2'd3)) begin
             if(block_row_start)
-                block_count[col] <= row_count + {4'b0, beat_count};
+                block_count[col] <= row_count + {6'b0, beat_count};
             else
                 block_count[col] <= block_count[col] + row_count +
-                                    {4'b0, beat_count};
+                                    {6'b0, beat_count};
         end
     end
 
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n)
-            row_count <= 7'd0;
+            row_count <= 5'd0;
         else if(I_tvalid) begin
-            if(beat == 3'd0)
-                row_count <= {4'b0, beat_count};
+            if(beat == 2'd0)
+                row_count <= {2'b0, beat_count};
             else
-                row_count <= row_count + {4'b0, beat_count};
+                row_count <= row_count + {2'b0, beat_count};
         end
     end
 
-    wire [10:0] block_total = block_count[col] + row_count + {4'b0, beat_count};
-    wire [10:0] required = (row == BLOCK_ROWS - 1) ? LAST_OCC_MIN : OCC_MIN;
+    wire [8:0] block_total = block_count[col] + row_count + {6'b0, beat_count};
+    wire [8:0] required = (row == BLOCK_ROWS - 1) ? LAST_OCC_MIN : OCC_MIN;
     wire block_passed = (block_total >= required);
     assign bank0_wdata = {block_passed, 7'd0};
     assign bank1_wdata = {block_passed, 7'd0};
 
     eram_spram #(
         .DATA_WIDTH(8),
-        .ADDR_WIDTH(10)
+        .ADDR_WIDTH(ADDR_WIDTH)
     ) u_prev_bank0 (
         .I_clk  (I_clk),
         .I_we   (write_enable && !bank_sel),
@@ -121,7 +122,7 @@ module occ_gate_32 #(
 
     eram_spram #(
         .DATA_WIDTH(8),
-        .ADDR_WIDTH(10)
+        .ADDR_WIDTH(ADDR_WIDTH)
     ) u_prev_bank1 (
         .I_clk  (I_clk),
         .I_we   (write_enable && bank_sel),
@@ -135,7 +136,7 @@ module occ_gate_32 #(
     always @(posedge I_clk or negedge I_rst_n) begin
         if(!I_rst_n)
             block_byte <= 8'd0;
-        else if(I_tvalid && (beat == 3'd0))
+        else if(I_tvalid && (beat == 2'd0))
             block_byte <= prev_rdata;
     end
 

@@ -355,7 +355,7 @@
                     <Attr Name="CompileOrder" Val="72"/>
                 </FileInfo>
             </File>
-            <File Path="../user_source/hdl_source/isp/occ_gate_32.v">
+            <File Path="../user_source/hdl_source/isp/occ_gate_16.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>
                     <Attr Name="UsedInP&R" Val="true"/>
