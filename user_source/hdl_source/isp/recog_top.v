@@ -487,11 +487,11 @@ module recog_top #(
     //   （保持"掩码与权重同源"这条不变量）。
     // 档 15 = ① 生效（配合 ② + 运动门 = 交付候选）；档 14 = 同一套但不带 ①（A/B 对照）。
     // 资源：1 块 ERAM + ≈150 LUT6 + ≈30 FF，0 DSP。OCC_EN=0 时整段不综合。
-    // 2026-10-31 重新启用：先以 32×32、25% 占比过滤低密度背景块，
+    // 2026-10-31 重新启用：先以 32×32、12.5% 占比过滤低密度背景块，
     // 同时作用于全局掩码/软权重和 M2 共用的 S_m_pick_d。
     parameter integer  OCC_EN  = 1,
-    // 达标门限（采样点口径：128 = 100%）。32 = 25%，38 ≈ 30%，51 ≈ 40%。
-    parameter [6:0]    OCC_MIN = 7'd32,
+    // 达标门限（采样点口径：128 = 100%）。16 = 12.5%，32 = 25%，51 ≈ 40%。
+    parameter [6:0]    OCC_MIN = 7'd16,
     // ---- 【2026-10-17 v2，档 15】三条新参数 ----------------------------------------
     // ③ 全局光照事件：本帧"在动的块"（16×16，活动像素 ≥4）超过它 ⇒ 判为光照事件。
     //    3600 块 → 900 = 25%（用户建议 25~30%）。
@@ -1686,90 +1686,18 @@ module recog_top #(
     wire S_occ_keep;      // 1 = 这一块的像素保留（门开着 / 这一块是"实的"）
     generate
     if ((MASK_SRC != 0) && (OCC_EN != 0)) begin : g_occ
-
-        wire [2:0] S_obeat = S_x_grp[2:0];              // 块内第几拍（8 拍 = 32 像素）
-        wire [5:0] S_ocol  = S_x_grp[7:3];              // 块列 0..39
-        wire [4:0] S_orow  = S_y_pos[9:5];              // 块行 0..22
-        wire [9:0] S_obase = {S_orow, 5'b0} + {S_orow, 3'b0};   // 行 × 40（32 + 8）
-        wire [9:0] S_ocur  = S_obase + {4'b0, S_ocol};
-        wire [9:0] S_onext = (S_ocur == 10'd919) ? 10'd0 : (S_ocur + 10'd1);
-        wire [9:0] S_oprev = (S_ocur == 10'd0)   ? 10'd919 : (S_ocur - 10'd1);
-
-        wire S_osmp  = (S_y_pos[2:0] == 3'd0);          // 采样行：块内每 8 行采 1 行
-        // 块的最后一行 → 结算。⚠ 最底下那一块行只有 16 行（720 = 22×32 + 16），
-        // 永远等不到 y[4:0]==31，所以**帧的最后一行**也当结算点。
-        wire S_olast = (S_y_pos[4:0] == 5'd31) || (S_y_pos == 10'd719);
-
-        wire [9:0] S_oaddr;
-        wire       S_owe;
-        wire [7:0] S_owdata;
-        wire [7:0] S_ordata;
-
-        eram_spram #(.DATA_WIDTH(8), .ADDR_WIDTH(10)) u_occ_mem (
-            .I_clk  (I_clk),
-            .I_we   (S_owe),
-            .I_addr (S_oaddr),
-            .I_wdata(S_owdata),
-            .O_rdata(S_ordata)
+        occ_gate_32 #(
+            .OCC_MIN(OCC_MIN)
+        ) u_occ_gate_32 (
+            .I_clk    (I_clk),
+            .I_rst_n  (I_rst_n),
+            .I_mask   (S_skin_use),
+            .I_x_grp  (S_x_grp),
+            .I_y_pos  (S_y_pos),
+            .I_tvalid (I_raw_tvalid),
+            .I_tuser  (I_raw_tuser),
+            .O_keep   (S_occ_keep)
         );
-
-        assign S_oaddr = (S_obeat == 3'd7) ? S_onext
-                       : (S_obeat == 3'd0) ? S_oprev
-                                           : S_ocur;
-
-        // 本块这一行的字节（beat0 抓到预取回来的值，整块 8 拍都有效）
-        reg [7:0] S_obyte;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n) S_obyte <= 8'd0;
-            else if(I_raw_tvalid && (S_obeat == 3'd0)) S_obyte <= S_ordata;
-        end
-
-        // 本拍 4 个像素里"过最终肤色判据"的个数（0..4）
-        wire [2:0] S_ocnt_beat = {2'b0, S_skin_use[0]} + {2'b0, S_skin_use[1]} +
-                                 {2'b0, S_skin_use[2]} + {2'b0, S_skin_use[3]};
-        // 饱和累加（饱和到 127）：beat0 载入"存量 + 本拍"，其余拍"累加 + 本拍"
-        reg  [6:0] S_oacc;
-        wire [7:0] S_osum_a = {1'b0, S_obyte[6:0]} + {5'b0, S_ocnt_beat};
-        wire [7:0] S_osum_b = {1'b0, S_oacc}       + {5'b0, S_ocnt_beat};
-        wire [6:0] S_ocnt_a = (S_osum_a > 8'd127) ? 7'd127 : S_osum_a[6:0];
-        wire [6:0] S_ocnt_b = (S_osum_b > 8'd127) ? 7'd127 : S_osum_b[6:0];
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n) S_oacc <= 7'd0;
-            else if(I_raw_tvalid && S_osmp) begin
-                if(S_obeat == 3'd0) S_oacc <= S_ocnt_a;
-                else                S_oacc <= S_ocnt_b;
-            end
-        end
-
-        // 结算与写回：beat7 时本行的累计值就是 S_ocnt_b（含本拍）
-        wire S_owin = (S_obyte[6:0] >= OCC_MIN);        // 最后一行用字节里的总计数判决
-        reg       S_opend_we;
-        reg [7:0] S_opend_data;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n) begin
-                S_opend_we   <= 1'b0;
-                S_opend_data <= 8'd0;
-            end
-            else if(S_obeat == 3'd7) begin
-                S_opend_we   <= S_osmp || S_olast;
-                S_opend_data <= S_olast ? {S_owin, 7'd0}
-                                        : {S_obyte[7], S_ocnt_b};
-            end
-            else if(S_obeat == 3'd0) begin
-                S_opend_we   <= 1'b0;
-            end
-        end
-        assign S_owe    = (S_obeat == 3'd0) && S_opend_we;
-        assign S_owdata = S_opend_data;
-
-        // 上电头几帧 ERAM 内容未定义 → 强制放行（过了 4 帧才开始按标志门控）
-        reg [2:0] S_ofrm;
-        always @(posedge I_clk or negedge I_rst_n) begin
-            if(!I_rst_n)                      S_ofrm <= 3'd0;
-            else if(I_raw_tuser && !(&S_ofrm)) S_ofrm <= S_ofrm + 3'd1;
-        end
-        assign S_occ_keep = !S_occ_act ||
-                            ((&S_ofrm) && S_obyte[7]);
 
     end
     else begin : g_occ_off
