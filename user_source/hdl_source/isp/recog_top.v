@@ -537,11 +537,7 @@ module recog_top #(
     //   就需要真正的 16×16 块级投票（要存"上一帧每块的判决"，2 块 ERAM + 约 80 LUT）。
     parameter integer  VOTE_EN = 1,
     // 全局投票在本轮 A/B 中从基准 5/8 提高到 7/8，用来比较对手部覆盖的影响。
-    parameter [3:0]    VOTE_MIN = 4'd7,
-    // M2 指尖/刀锋使用独立的 7/8 邻域支持门，避免矩形顶部低密度背景斑点
-    // 被选成刀锋；M2_VOTE_EN 保留旁路，便于后续单独比较两套门限。
-    parameter integer  M2_VOTE_EN  = 1,
-    parameter [3:0]    M2_VOTE_MIN = 4'd7
+    parameter [3:0]    VOTE_MIN = 4'd7
 )(
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -2586,10 +2582,6 @@ module recog_top #(
         // 投票开关同样受档位控制（只有 12 = 关；见上面 S_cfg_vote_on 的说明）
         wire [3:0] S_m_pick_v = ((VOTE_EN != 0) && S_cfg_vote_on && (S_mv_cnt < VOTE_MIN))
                                 ? 4'd0 : S_m_pick;
-        // M2 专用严格投票：只收窄刀锋候选，不改变全局显示/跟踪掩码。
-        wire [3:0] S_m_pick_tip_v = ((M2_VOTE_EN != 0) && S_cfg_vote_on &&
-                                     (S_mv_cnt < M2_VOTE_MIN))
-                                    ? 4'd0 : S_m_pick;
 
         // ---- 行带：手部唯一权威 bbox ----------------------------------------
         // 输入是"开运算 + 多数投票后、ROI 门控前"的掩码：既不会被上一帧 ROI 裁掉，
@@ -2661,13 +2653,11 @@ module recog_top #(
         wire       S_m2_band = S_band_valid &&
                                ({1'b0, S_y_pos} >= S_m2_ylo) &&
                                ({1'b0, S_y_pos} <= S_m2_yhi);
-        // ★ 2026-10-16 解耦：**不再用 S_mask_gated（ROI 门控后）**，改用未门控的 `S_m_pick_v`
-        //   （选中的掩码 = 开运算 + 全局多数投票 + M2 专用严格投票）+ **M2.2 自己的 x 窗**。这样跟踪器收紧 ROI
+        // ★ 2026-10-16 解耦：**不再用 S_mask_gated（ROI 门控后）**，改用未门控的 `S_m_pick_d`
+        //   （选中的掩码 = 开运算 + 全局 7/8 投票）+ **M2.2 自己的 x 窗**。这样跟踪器收紧 ROI
         //   不会裁掉指尖/手型；而"只在手附近找"这个约束由 M2 窗自己保证（见 M2_MARGIN）。
         // v2：指尖/手型也只看**运动候选区**（静止的暖背景不该被当成指尖）
-        wire [3:0] S_m_pick_tip = S_v2 ? (S_m_pick_tip_v & S_motion_mask)
-                                       : S_m_pick_tip_v;
-        wire [3:0] S_m2_top  = S_m_pick_tip & {4{S_m2_band}} &
+        wire [3:0] S_m2_top  = S_m_pick_d & {4{S_m2_band}} &
                                { F_in_m2(S_col3), F_in_m2(S_col2),
                                  F_in_m2(S_col1), F_in_m2(S_col0) };
 
