@@ -24,8 +24,8 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 ### 当前状态
 
 - 当前分支：`main`。
-- 当前基线：slices `17555/21216`（82.74%）、LUT6 `16030`、ERAM `76/108`、
-  DSP `8/40`、final Setup `+672 ps`、Hold `+20 ps`，0 违例。
+- 当前基线：slices `17584/21216`（82.88%）、LUT6 `16049`、ERAM `76/108`、
+  DSP `8/40`、final Setup `+752 ps`、Hold `+20 ps`，0 违例。
 - 手部行带恢复种子左右 ±200 px 的肤色统计窗和窄行拆带；运动证据仍使用独立窗。
   `3882ab5` 的整行统计/不拆带方案会造成 ROI 和行带选择退化，已反向恢复。
 - 下一阶段：优先优化资源占用和手势识别算法。
@@ -148,6 +148,10 @@ pwsh -NoProfile -File tools/new_worktree_runs.ps1
 pwsh -NoProfile -File tools/build_td.ps1
 ```
 
+每次成功生成 bit 后，脚本会把普通版和压缩版自动归档到
+`temp/<时间戳>_<分支名>[_标签]/`，方便烧录对比；上面的目录已被 Git 忽略。
+可用 `-BitLabel global7` 为本次对照补充可读标签。
+
 `build_td.ps1` 依次运行 `syn_1`、`phy_1` 和 bitgen，并在末尾输出时序、资源和 bit 路径。
 新增 `.v` 后先登记到 `.al`，再运行 `tools/new_worktree_runs.ps1 -SyncOnly` 同步两个
 Run 目录的 `.prj`。
@@ -242,13 +246,13 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 
 | 资源 | 用量 | 占比 |
 |---|---:|---:|
-| slices | 17555 / 21216 | 82.74% |
-| LUT6 | 16030 / 21216 | 75.56% |
-| 触发器 | 15415 / 42432 | 36.33% |
+| slices | 17584 / 21216 | 82.88% |
+| LUT6 | 16049 / 21216 | 75.65% |
+| 触发器 | 15397 / 42432 | 36.29% |
 | ERAM | 76 / 108 | 70.37% |
 | DSP | 8 / 40 | 20.00% |
-| feedthrough | 6455 | — |
-| final Setup WNS | +672 ps | 0 违例 |
+| feedthrough | 6314 | — |
+| final Setup WNS | +752 ps | 0 违例 |
 | final Hold WNS | +20 ps | 0 违例 |
 
 ### 11.2 优化方向
@@ -366,7 +370,7 @@ W 85 0001      # 切回手势源
    `pal[3]=A/B侧`、`pal[2]=负x`、`pal[1:0]=水果种类`、`color[6]=切割轴`。
 6. 左侧水果逐渐裁剪到 `x<=-128` 后回收；右侧在 `x>=1280` 回收。
 7. 动态挥手事件与 `game_gesture` 已移除；游戏主路径使用独立的刀锋轨迹判定，`0x95` 已移除。
-8. 当前构建：slices `17555/21216`（82.74%）、LUT6 `16030`、Setup `+672 ps`、
+8. 当前构建：slices `17584/21216`（82.88%）、LUT6 `16049`、Setup `+752 ps`、
    Hold `+20 ps`，0 违例。
 
 | `W 08 000X` | 识别视图 |

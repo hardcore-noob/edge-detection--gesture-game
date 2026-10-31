@@ -26,3 +26,4 @@ debug_uart.log
 
 # Local scratch / diagnostics directory (see README section 0)
 tmp/
+temp/

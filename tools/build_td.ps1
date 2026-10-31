@@ -12,14 +12,19 @@
   both（默认）= 综合 + 布局布线；syn = 只综合；phy = 只布局布线；summary = 不编译，
   只读现有报告打印汇总（改完代码前后对比数字时很方便）。
 
+.PARAMETER BitLabel
+  可选 bit 归档标签，会和时间戳、分支名一起组成 temp/ 下的对比目录名。
+
 .EXAMPLE
   pwsh -NoProfile -File tools/build_td.ps1
   pwsh -NoProfile -File tools/build_td.ps1 -Stage summary
+  pwsh -NoProfile -File tools/build_td.ps1 -BitLabel global7
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('both', 'syn', 'phy', 'summary')][string]$Stage = 'both'
+    [ValidateSet('both', 'syn', 'phy', 'summary')][string]$Stage = 'both',
+    [string]$BitLabel = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +33,7 @@ $root  = Split-Path -Parent $PSScriptRoot
 $runs  = Join-Path $root 'td_project\camera_to_dsi_display_Runs'
 $synD  = Join-Path $runs 'syn_1'
 $phyD  = Join-Path $runs 'phy_1'
+$tempD = Join-Path $root 'temp'
 $exe   = 'D:\TangDynasty\bin\td_commands_prompt.exe'
 $tcl   = 'D:/TangDynasty/scripts/DefaultFlow.tcl'
 
@@ -151,12 +157,38 @@ function Show-Summary {
     }
 }
 
+function Save-Bitstreams {
+    param([string]$Label)
+
+    $srcBit  = Join-Path $phyD 'camera_to_dsi_display.bit'
+    $srcCbit = Join-Path $phyD 'camera_to_dsi_display_compress.bit'
+    if (-not (Test-Path -LiteralPath $srcBit) -or -not (Test-Path -LiteralPath $srcCbit)) {
+        throw "bit 归档失败：phy_1 目录中缺少普通版或压缩版 bit"
+    }
+
+    $stamp  = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $branch = (& git -C $root branch --show-current 2>$null).Trim()
+    if (-not $branch) { $branch = 'detached' }
+    $suffix = if ($Label) { "_$($Label.Trim() -replace '[^0-9A-Za-z._-]', '_')" } else { '' }
+    $safeBranch = $branch -replace '[^0-9A-Za-z._-]', '_'
+    $outDir = Join-Path $tempD "${stamp}_${safeBranch}${suffix}"
+
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    Copy-Item -LiteralPath $srcBit  -Destination (Join-Path $outDir 'camera_to_dsi_display.bit')
+    Copy-Item -LiteralPath $srcCbit -Destination (Join-Path $outDir 'camera_to_dsi_display_compress.bit')
+    Write-Host "--- bit 已归档到 $outDir" -ForegroundColor Green
+}
+
 switch ($Stage) {
     'syn'     { Invoke-TdStage '综合 syn_1' $synD 'camera_to_dsi_display_gate.db' }
-    'phy'     { Invoke-TdStage '布局布线 phy_1' $phyD 'camera_to_dsi_display.bit' }
+    'phy'     {
+        Invoke-TdStage '布局布线 phy_1' $phyD 'camera_to_dsi_display.bit'
+        Save-Bitstreams $BitLabel
+    }
     'both'    {
         Invoke-TdStage '综合 syn_1' $synD 'camera_to_dsi_display_gate.db'
         Invoke-TdStage '布局布线 phy_1' $phyD 'camera_to_dsi_display.bit'
+        Save-Bitstreams $BitLabel
     }
     'summary' { }
 }
