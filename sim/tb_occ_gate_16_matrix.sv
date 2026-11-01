@@ -30,7 +30,7 @@ module tb_occ_gate_16_matrix;
     reg mismatch_flags [0:BLOCK_ROWS-1][0:BLOCK_COLS-1];
 
     occ_gate_16 #(
-        .OCC_MIN(9'd32),
+        .OCC_MIN(9'd64),
         .IMG_H(FRAME_H)
     ) dut (
         .I_clk(clk),
@@ -53,10 +53,10 @@ module tb_occ_gate_16_matrix;
         input integer row;
         input integer pattern_frame;
         begin
-            if ((row == 0) && (col == 2))
-                expected_block = 1'b0;
-            else if ((row == 0) && (col <= 3))
+            if ((row == 0) && (col <= 1))
                 expected_block = 1'b1;
+            else if ((row == 0) && (col <= 3))
+                expected_block = 1'b0;
             else
                 expected_block =
                     (((col * 13 + row * 17 + pattern_frame * 7) % 11) < 5);
@@ -78,11 +78,12 @@ module tb_occ_gate_16_matrix;
             if ((row == 0) && (col == 0))
                 group_mask = 4'b1111;                 // dense
             else if ((row == 0) && (col == 1))
-                group_mask = ((block_y >= 1) && (block_y <= 2)) ?
-                             4'b1111 : 4'b0000;        // exactly 32/256
+                group_mask = (block_y <= 3) ?
+                             4'b1111 : 4'b0000;        // exactly 64/256
             else if ((row == 0) && (col == 2))
-                group_mask = (block_y == 1) ?
-                             4'b1111 : 4'b0000;        // 16/256, must drop
+                group_mask = ((block_y <= 2) ||
+                              ((block_y == 3) && (block_x < 3))) ?
+                             4'b1111 : 4'b0000;        // 60/256, must drop
             else if ((row == 0) && (col == 3))
                 group_mask = (((block_y >= 1) && (block_y <= 3)) ||
                               ((block_y == 4) && (block_x < 2))) ?

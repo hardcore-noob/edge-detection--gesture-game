@@ -3,10 +3,10 @@
 //
 // 每块统计完整 16×16 区域，共 256 个像素。当前帧按块行累计，
 // 块行结束时把 bit7 标志写入当前 Bank；下一帧从另一 Bank 读取该标志。
-// OCC_MIN=32 为 12.5%，OCC_MIN=64 为 25%。
+// OCC_MIN=64 为 25%。
 // ============================================================================
 module occ_gate_16 #(
-    parameter [8:0] OCC_MIN = 9'd32,
+    parameter [8:0] OCC_MIN = 9'd64,
     parameter integer IMG_H = 720
 )(
     input  wire        I_clk,
