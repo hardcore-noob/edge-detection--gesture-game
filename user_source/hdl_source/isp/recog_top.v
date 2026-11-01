@@ -410,7 +410,7 @@ module recog_top #(
     // 手型滞回：连续这么多帧同类才改状态
     parameter [3:0]    M2_LOCK_FRAMES = 4'd4,
     // 指尖方点半边长（像素；画 (2R+1)² 的方块）
-    parameter [3:0]    M2_TIP_R = 4'd3,
+    parameter [3:0]    M2_TIP_R = 4'd5,   // 仅指尖白点贴图半径，不参与命中判定
     // 调试口径：1 = 把 DBG 的 P/Q 借给指尖/手型（P={峰数,指尖行}、Q={手型,指尖列}），
     //          0 = P/Q 仍是 M1 的掩码像素数 / 包围盒 x。上板定标那一版用 1。
     // ⚠ 2026-10-16 交付口径改 0：P/Q 回到 M1 语义（掩码像素数 / 包围盒 x）—— 这两个字段
@@ -587,6 +587,8 @@ module recog_top #(
     // 每像素 3 bit（低 12 位共 4 像素）：0=原像素 1=掩码高亮(红) 2=准星(黄)
     //                                  3/4/5=诊断色(只肤色/只运动/两者) 6=ROI 边框 7=诊断准星
     output wire [11:0] O_ovl_sel,
+    // 指尖白点独立出口：视图 6 只显示它，不显示掩码和准星。
+    output wire [3:0]  O_m2_tip_px,
 
     // 【第 4 轮】一键示教的"2 秒闪叠加"指示：一次采样窗结束（**不论判定过不过**）后拉高
     // ~120 帧（≈2 s）。isp_top 把它并进叠加使能 S_ovl_en → 示教完立刻在画面上看"手有没有
@@ -2816,6 +2818,22 @@ module recog_top #(
         // 资源：准星 4 个 + ROI 边框 4 个比较器 × 4 个像素通道，≈60 LUT6 / 0 ERAM / 0 DSP。
         wire [3:0] S_view = S_mode_word[15:12];
 
+        function F_m2_tip;
+            input [10:0] I_x;
+            begin
+                F_m2_tip = (S_m2_shape != 3'd0) &&
+                           (I_x + {7'b0, M2_TIP_R} >= S_m2_tx) &&
+                           (I_x <= S_m2_tx + {7'b0, M2_TIP_R}) &&
+                           (S_y_pos + {6'b0, M2_TIP_R} >= S_m2_ty[9:0]) &&
+                           (S_y_pos <= S_m2_ty[9:0] + {6'b0, M2_TIP_R});
+            end
+        endfunction
+
+        wire [3:0] S_m2_tip_px = {
+            F_m2_tip(S_col3), F_m2_tip(S_col2),
+            F_m2_tip(S_col1), F_m2_tip(S_col0)
+        };
+
         function [2:0] F_ovl_view;
             input [10:0] I_x;
             input [9:0]  I_y;
@@ -2838,13 +2856,10 @@ module recog_top #(
                        ((I_y + 2 >= S_roi_y1) && (I_y <= S_roi_y1 + 1));
                 S_border = (S_bx && (I_y >= S_roi_y0) && (I_y <= S_roi_y1)) ||
                            (S_by && (I_x >= S_roi_x0) && (I_x <= S_roi_x1));
-                // M2.2 指尖方点：颜色 = 手型（黄 = 张开、红 = 握拳；手型未知就不画）
-                if((S_m2_shape != 3'd0) &&
-                        (I_x + {7'b0, M2_TIP_R} >= S_m2_tx) &&
-                        (I_x <= S_m2_tx + {7'b0, M2_TIP_R}) &&
-                        (I_y + {6'b0, M2_TIP_R} >= S_m2_ty[9:0]) &&
-                        (I_y <= S_m2_ty[9:0] + {6'b0, M2_TIP_R}))
-                    F_ovl_view = (S_m2_shape == 3'd2) ? 3'd5 : 3'd3;
+                // 视图 6 = 干净游戏视图：掩码和准星都不叠加。
+                // 指尖白点由独立 O_m2_tip_px 出口在 isp_top 中叠加。
+                if(S_view == 4'd6)
+                    F_ovl_view = 3'd0;
                 else if(S_locked && ((S_x_on && S_y_th) || (S_y_on && S_x_th)))
                     F_ovl_view = 3'd2;                  // 准星（黄）：锁定后才画
                 // 【2026-10-16 ⑤】视图 13 = **肤色判据观测**：只在过肤色判据的像素上按 Y 分档
@@ -2878,6 +2893,7 @@ module recog_top #(
                                  F_ovl_view(S_col0, S_y_pos, S_mask_disp[0], S_skin_use[0], S_gray0, S_mot_lv[1:0]) };
 
         assign S_ovl_sel = S_ovl_rt;
+        assign O_m2_tip_px = S_m2_tip_px;
 
     end
     else begin : g_notrack
@@ -2901,6 +2917,7 @@ module recog_top #(
         assign S_m2_dbg_p   = 16'd0;
         assign S_m2_dbg_q   = 14'd0;
         assign S_m2_dbg_on  = 1'b0;
+        assign O_m2_tip_px  = 4'd0;
         assign S_tip_x      = 11'd0;
         assign S_tip_y      = 10'd0;
         assign S_tip_ok     = 1'b0;

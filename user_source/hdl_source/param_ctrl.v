@@ -217,10 +217,11 @@ module param_ctrl #(
                     O_param_wr_cnt <= O_param_wr_cnt + 1'b1;
             end
 
-            // KEY4 短按：进 game_mode 就用默认手势算法（1），退出就停识别（0，省功耗）。
+            // KEY4 短按：进 game_mode 用干净游戏视图（6：识别继续、掩码/准星不叠加），
+            // 退出就停识别（0，省功耗）。视图 1 仍保留为串口掩码调试视图。
             // 同一拍 UART 显式写 0x08 时不覆盖——UART 优先级最高。
             if(I_key4_short && !(I_ext_we && (I_ext_addr == 8'h08)))
-                O_recog_algo <= (S_key4_game_next != 4'd0) ? 4'd1 : 4'd0;
+                O_recog_algo <= (S_key4_game_next != 4'd0) ? 4'd6 : 4'd0;
 
             if(I_key4_short)
                 O_key4_evt[3:0] <= O_key4_evt[3:0] + 1'b1;

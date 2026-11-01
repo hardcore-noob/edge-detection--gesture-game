@@ -118,10 +118,10 @@ module tb_param_ctrl;
         expect_mode(4'd0, 4'd0, "boot");
 
         pulse_key4;
-        expect_mode(4'd1, 4'd1, "cut fruit");
+        expect_mode(4'd1, 4'd6, "cut fruit clean view");
 
         pulse_key4;
-        expect_mode(4'd2, 4'd1, "fruit catcher");
+        expect_mode(4'd2, 4'd6, "fruit catcher clean view");
 
         pulse_key4;
         expect_mode(4'd0, 4'd0, "exit games");

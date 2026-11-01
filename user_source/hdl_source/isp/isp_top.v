@@ -128,6 +128,7 @@ module isp_top #(
     //   0=原像素 1=掩码高亮(红) 2=准星(黄) 3=只过肤色(纯红) 4=只过运动(纯绿)
     //   5=两者都过(纯黄) 6=ROI 窗口边框(纯蓝) 7=准星(青)
     wire [11:0] S_ovl_sel;
+    wire [3:0]  S_m2_tip_px;                   // 指尖白点独立叠加
     wire [7:0]  S_bg_px;                       // recog_top 给的"当前块背景灰度"
     wire        S_teach_flash;                 // recog_top 的一键示教"闪叠加"指示（~2 s）
     wire [3:0]  S_dbg_mode = I_mode_committed[15:12];
@@ -148,7 +149,8 @@ module isp_top #(
     //   + 运动门（最终候选）。
     //   4 = 运动门归因（红=两个门都过 / 绿=只过绝对门 / 青=只过相对门）。
     wire S_ovl_en = MASK_PREVIEW | S_teach_flash | S_dbg_ovl |
-                    ((DIAG_MODE_SEL != 0) ? (S_dbg_mode != 4'd0) : (S_dbg_mode == 4'd1));
+                    ((DIAG_MODE_SEL != 0) ? (S_dbg_mode != 4'd0) : (S_dbg_mode == 4'd1)) |
+                    ((S_dbg_mode == 4'd6) && (|S_m2_tip_px));
     wire S_bgview = (DIAG_MODE_SEL != 0) && (S_dbg_mode == 4'd2);
 
     function [23:0] F_ovl_pix;
@@ -184,10 +186,12 @@ module isp_top #(
     function [23:0] F_preview_pix;
         input [23:0] I_pix;
         input [2:0]  I_sel;
+        input        I_tip;
         reg   [7:0]  S_y;
         begin
             S_y = F_gray8(I_pix);
-            F_preview_pix = S_bgview ? {S_bg_px, S_bg_px, S_bg_px}
+            F_preview_pix = I_tip ? 24'hFFFFFF
+                          : S_bgview ? {S_bg_px, S_bg_px, S_bg_px}
                           : S_yview  ? {S_y,     S_y,     S_y}
                                      : F_ovl_pix(I_pix, I_sel);
         end
@@ -260,10 +264,10 @@ module isp_top #(
 
     // 叠加/显示用的像素取**打拍后**的同一包（与 recog_top 的 tap 严格同拍）
     wire [95:0] S_preview_ovl = {
-        F_preview_pix(S_awb_gd[95:72], S_ovl_sel[11:9]),   // 字内最左像素
-        F_preview_pix(S_awb_gd[71:48], S_ovl_sel[8:6]),
-        F_preview_pix(S_awb_gd[47:24], S_ovl_sel[5:3]),
-        F_preview_pix(S_awb_gd[23:0],  S_ovl_sel[2:0])
+        F_preview_pix(S_awb_gd[95:72], S_ovl_sel[11:9], S_m2_tip_px[3]), // 字内最左像素
+        F_preview_pix(S_awb_gd[71:48], S_ovl_sel[8:6],  S_m2_tip_px[2]),
+        F_preview_pix(S_awb_gd[47:24], S_ovl_sel[5:3],  S_m2_tip_px[1]),
+        F_preview_pix(S_awb_gd[23:0],  S_ovl_sel[2:0],  S_m2_tip_px[0])
     };
 
     wire S_preawbview = (DIAG_MODE_SEL != 0) && (S_dbg_mode == 4'd3);
@@ -388,6 +392,7 @@ module isp_top #(
         .O_track_y       (O_track_y),
         .O_track_locked  (O_track_locked),
         .O_ovl_sel       (S_ovl_sel),
+        .O_m2_tip_px     (S_m2_tip_px),
         .O_bg_px         (S_bg_px),
         .O_teach_flash   (S_teach_flash)
     );
