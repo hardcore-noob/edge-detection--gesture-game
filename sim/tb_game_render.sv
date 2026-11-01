@@ -7,6 +7,8 @@ module tb_game_render;
     reg [11:0] x_nxt;
     reg [11:0] y_nxt;
     reg [3:0] display_mode;
+    reg basket_en;
+    reg [11:0] basket_center;
     reg [287:0] obj;
     reg [11:0] tip_x;
     reg [11:0] tip_y;
@@ -35,6 +37,8 @@ module tb_game_render;
         .I_x_nxt(x_nxt),
         .I_y_nxt(y_nxt),
         .I_display_mode(display_mode),
+        .I_basket_en(basket_en),
+        .I_basket_center(basket_center),
         .I_obj(obj),
         .I_tip_x(tip_x),
         .I_tip_y(tip_y),
@@ -86,6 +90,8 @@ module tb_game_render;
         x_nxt = 0;
         y_nxt = 0;
         display_mode = 0;
+        basket_en = 0;
+        basket_center = 640;
         tip_x = 0;
         tip_y = 0;
         trail_off = 0;
@@ -122,6 +128,25 @@ module tb_game_render;
         x_nxt = 12'd80;
         y_nxt = 12'd216;
         check_pixel(1'b0, "life blocks removed");
+
+        // 接果篮：左壁、底边、右壁可见，开口内部透明。
+        basket_en = 1;
+        x_nxt = 12'd510;
+        y_nxt = 12'd650;
+        check_pixel(1'b1, "basket left wall");
+        x_nxt = 12'd640;
+        y_nxt = 12'd650;
+        check_pixel(1'b0, "basket opening");
+        x_nxt = 12'd640;
+        y_nxt = 12'd700;
+        check_pixel(1'b1, "basket bottom");
+        x_nxt = 12'd769;
+        y_nxt = 12'd650;
+        check_pixel(1'b1, "basket right wall");
+        x_nxt = 12'd511;
+        y_nxt = 12'd609;
+        check_pixel(1'b0, "basket above top");
+        basket_en = 0;
 
         // 普通水果粒子仍是 6×6。
         part_en = 8'h01;

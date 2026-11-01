@@ -21,9 +21,11 @@ $sources = @(
     'user_source\hdl_source\game\game_score.v',
     'user_source\hdl_source\game\game_render.v',
     'user_source\hdl_source\game\game_fruit.v',
+    'user_source\hdl_source\game\game_catch.v',
     'sim\tb_game_score.sv',
     'sim\tb_game_render.sv',
-    'sim\tb_game_fruit.sv'
+    'sim\tb_game_fruit.sv',
+    'sim\tb_game_catch.sv'
 ) | ForEach-Object { Join-Path $root $_ }
 
 $vlogArgs = @('-sv', '-work', $lib) + $sources
@@ -32,7 +34,7 @@ if($LASTEXITCODE -ne 0) { throw 'ModelSim 编译失败' }
 
 Push-Location $work
 try {
-    foreach($tb in @('tb_game_score', 'tb_game_render', 'tb_game_fruit')) {
+    foreach($tb in @('tb_game_score', 'tb_game_render', 'tb_game_fruit', 'tb_game_catch')) {
         $output = & vsim -c -work $lib $tb -do 'run -all; quit -f' 2>&1
         $output
         if($LASTEXITCODE -ne 0 -or -not ($output -match 'PASS:'))

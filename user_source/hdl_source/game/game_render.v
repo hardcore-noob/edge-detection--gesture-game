@@ -30,6 +30,10 @@ module game_render (
     input  wire [11:0] I_y_nxt,
     input  wire [3:0]  I_display_mode, // bit0：0 = RAW 皮肤 / 1 = EDGE 皮肤（配色二选一）
 
+    // ---- 接果篮球框（仅接果篮游戏打开；大矩形不占对象表槽位）----------------
+    input  wire        I_basket_en,
+    input  wire [11:0] I_basket_center,
+
     // ---- 对象表：6 槽 × 48 位（见规划 §5.3）--------------------------------
     // 每槽：{type[1:0], x[11:0], y[11:0], w[4:0], h[4:0], color[7:0], pal[3:0]}
     input  wire [287:0] I_obj,
@@ -67,12 +71,15 @@ module game_render (
     localparam [23:0] COLOR_PART_RAW   = 24'hFFF200;
     localparam [23:0] COLOR_PART_EDGE  = 24'hFFC800;
     localparam [23:0] COLOR_BOMB        = 24'hFF5000;
+    localparam [23:0] COLOR_BASKET_RAW  = 24'h00E6FF;
+    localparam [23:0] COLOR_BASKET_EDGE = 24'hFFFFFF;
     localparam [23:0] COLOR_SCORE_RAW  = 24'h00E6FF;
     localparam [23:0] COLOR_SCORE_EDGE = 24'hFFFFFF;
 
     wire [23:0] S_col_trail = I_display_mode[0] ? COLOR_TRAIL_EDGE : COLOR_TRAIL_RAW;
     wire [23:0] S_col_part  = I_part_bomb ? COLOR_BOMB :
                               (I_display_mode[0] ? COLOR_PART_EDGE : COLOR_PART_RAW);
+    wire [23:0] S_col_basket= I_display_mode[0] ? COLOR_BASKET_EDGE : COLOR_BASKET_RAW;
     wire [23:0] S_col_text  = I_display_mode[0] ? COLOR_SCORE_EDGE : COLOR_SCORE_RAW;
 
     // RGB332 → RGB888（位复制，不做乘法）
@@ -314,15 +321,36 @@ module game_render (
                        ((I_x_nxt == 12'd106)  && (I_y_nxt == 12'd127))  |
                        ((I_x_nxt == 12'd152)  && (I_y_nxt == 12'd34)));
 
+    // ---- 接果篮球框：260×96 开口框，只画左、右、底三边 ---------------------
+    localparam [11:0] BASKET_LEFT_MIN = 12'd130;
+    localparam [11:0] BASKET_Y0       = 12'd610;
+    localparam [11:0] BASKET_W        = 12'd260;
+    localparam [11:0] BASKET_WALL     = 12'd12;
+    localparam [11:0] BASKET_H        = 12'd96;
+
+    wire [11:0] S_basket_left  = I_basket_center - BASKET_LEFT_MIN;
+    wire [11:0] S_basket_right = S_basket_left + BASKET_W;
+    wire S_in_basket_x = (I_x_nxt >= S_basket_left) &&
+                         (I_x_nxt <  S_basket_right);
+    wire S_in_basket_y = (I_y_nxt >= BASKET_Y0) &&
+                         (I_y_nxt <  (BASKET_Y0 + BASKET_H));
+    wire S_basket_side = (I_x_nxt < (S_basket_left + BASKET_WALL)) ||
+                         (I_x_nxt >= (S_basket_right - BASKET_WALL));
+    wire S_basket_bottom = I_y_nxt >= (BASKET_Y0 + BASKET_H - BASKET_WALL);
+    wire S_hit_basket = I_basket_en && S_in_basket_x && S_in_basket_y &&
+                        (S_basket_side || S_basket_bottom);
+
     // ---- 图层优先级与输出寄存 ----------------------------------------------
-    wire S_hit_flat = S_hit_mark | S_hit_score | S_hit_trail | S_hit_part;
+    wire S_hit_flat = S_hit_mark | S_hit_score | S_hit_trail |
+                      S_hit_part | S_hit_basket;
     wire S_win_spr  = S_hit_obj & S_obj_spr_win & ~S_hit_flat;
     wire S_win_flat = S_hit_flat | (S_hit_obj & ~S_obj_spr_win);
 
     wire [23:0] S_flat_col = S_hit_mark  ? 24'hFFFFFF  :
                              S_hit_score ? S_col_text  :
                              S_hit_trail ? S_col_trail :
-                             S_hit_part  ? S_col_part  : S_obj_rect_col;
+                             S_hit_part  ? S_col_part  :
+                             S_hit_basket? S_col_basket: S_obj_rect_col;
 
     reg        S_win_flat_d;
     reg        S_win_spr_d;
