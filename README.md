@@ -24,8 +24,8 @@ ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中�
 ### 当前状态
 
 - 当前分支：`feat/occ-gate-25pct`。
-- 当前基线：slices `18166/21216`（85.62%）、LUT6 `16641`、ERAM `80/108`、
-  DSP `8/40`、final Setup `+441 ps`、Hold `+20 ps`，0 违例。
+- 当前基线：slices `18203/21216`（85.80%）、LUT6 `16721`、ERAM `80/108`、
+  DSP `8/40`、final Setup `+234 ps`、Hold `+20 ps`，0 违例。
 - 手部掩码使用全局 7/8 投票和 16×16 全块面积占比门（`OCC_MIN=103/256≈40.2%`）；
   M2 通过 `S_m_pick_d` 共用同一结果。
 - 下一阶段：优先优化资源占用和手势识别算法。
@@ -218,7 +218,7 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 - 手势识别仍需改善下劈稳定性、脸/背景误锁、白/自然光鲁棒性、远距离锁定和坐标抖动；
   当前已恢复行带水平窗和窄行拆带，识别稳定性优先；脸、手臂和背景粘连留给后续
   种子连通域处理。
-- 当前 slices 为 85.62%，新增功能前仍必须先评估资源和 feedthrough。
+- 当前 slices 为 85.80%，新增功能前仍必须先评估资源和 feedthrough。
 - 时序余量对布局落点敏感；同一网表重复 PnR 不会自动改善，必须改逻辑或约束。
 - 链路没有完整 ready/backpressure 闭环；DDR/FIFO 拥塞时可能静默丢数，需监控 `D/E/W/V`。
 - CSI 与 HDMI 像素域是异步组，TD 不检查其间路径；跨域必须使用 toggle 握手、两级同步
@@ -246,13 +246,13 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 
 | 资源 | 用量 | 占比 |
 |---|---:|---:|
-| slices | 18166 / 21216 | 85.62% |
-| LUT6 | 16641 / 21216 | 78.44% |
-| 触发器 | 16198 / 42432 | 38.17% |
+| slices | 18203 / 21216 | 85.80% |
+| LUT6 | 16721 / 21216 | 78.81% |
+| 触发器 | 16234 / 42432 | 38.26% |
 | ERAM | 80 / 108 | 74.07% |
 | DSP | 8 / 40 | 20.00% |
-| feedthrough | 6116 | — |
-| final Setup WNS | +441 ps | 0 违例 |
+| feedthrough | 6127 | — |
+| final Setup WNS | +234 ps | 0 违例 |
 | final Hold WNS | +20 ps | 0 违例 |
 
 ### 11.2 优化方向
@@ -374,7 +374,7 @@ W 85 0001      # 切回手势源
    `pal[3]=A/B侧`、`pal[2]=负x`、`pal[1:0]=水果种类`、`color[6]=切割轴`。
 9. 左侧水果逐渐裁剪到 `x<=-128` 后回收；右侧在 `x>=1280` 回收。
 10. 动态挥手事件与 `game_gesture` 已移除；游戏主路径使用独立的刀锋轨迹判定，`0x95` 已移除。
-11. 当前构建：slices `18166/21216`（85.62%）、LUT6 `16641`、Setup `+441 ps`、
+11. 当前构建：slices `18203/21216`（85.80%）、LUT6 `16721`、Setup `+234 ps`、
    Hold `+20 ps`，0 违例。
 
 | `W 08 000X` | 识别视图 |
