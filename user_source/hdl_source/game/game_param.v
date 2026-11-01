@@ -39,7 +39,7 @@ module game_param #(
     output reg  [15:0] O_rd_data,
 
     // ---- 只读观测（由 game_fruit / game_input 驱动）------------------------
-    input  wire [15:0] I_state_word,   // {state[3:0], lives[3:0], score[7:0]}
+    input  wire [15:0] I_state_word,   // {state[3:0], 3'b0, score_neg, score_bcd[7:0]}
     input  wire [15:0] I_blade_pos,    // {x>>3[7:0], y>>3[7:0]}
     input  wire [15:0] I_fruit_pos,    // 1 号水果 {x>>3[7:0], y>>3[7:0]}
     input  wire [15:0] I_hit_cnt,

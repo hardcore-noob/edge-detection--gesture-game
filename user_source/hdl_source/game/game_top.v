@@ -11,9 +11,10 @@
 // 子模块（都在 `hdl_source/game/`，B 独占）：
 //   game_param       B 段参数寄存器（0x80~0xBF，地址表见 README §12.2.1）
 //   game_input       输入抽象层：假源 / 手势 / 手柄预留 → 刀尖坐标
-//   game_fruit       切水果本体：物理 / 生成 / 判定 / 分数生命 / 拖尾粒子数据
-//   game_sprite_rom  水果精灵 ERAM（4 种 × 32×32 RGB332，2 块 ERAM）
-//   game_render      逐像素判属（分数 > 生命 > 拖尾 > 粒子 > 对象表）与图层 mux
+//   game_fruit       切水果本体：物理 / 生成 / 判定 / 分数 / 拖尾粒子数据
+//   game_score       单帧有符号 BCD 分数结算
+//   game_sprite_rom  水果与炸弹精灵 ERAM（5 种 × 32×32 RGB332）
+//   game_render      逐像素判属（分数 > 拖尾 > 粒子 > 对象表）与图层 mux
 //
 // 与 C 的接线（本轮**未接也能跑**，未驱动输入被 TD 当 0 → 全部走默认值）：
 //   * `I_param_*` / `O_param_rd_data`：param_ctrl 的 B 段转发（需求单 2）；
@@ -30,10 +31,9 @@
 // ============================================================================
 module game_top #(
     parameter integer TRAIL_EN  = 0,   // 1 = 画刀光拖尾
-    parameter integer PART_EN   = 0,   // 1 = 画粒子
+    parameter integer PART_EN   = 1,   // 1 = 画命中粒子/炸弹爆炸
     parameter integer BLADE_CUT_EN = 1, // 1 = 每帧刀锋轨迹连续判定
-    parameter integer CUT_MODE = 0,     // 本轮只实现 0 = 8 历史点 + 16 采样 + AABB
-    parameter integer INF_LIVES = 1    // 1 = 不掉命、不进"结束"态（演示用）
+    parameter integer CUT_MODE = 0      // 本轮只实现 0 = 8 历史点 + 16 采样 + AABB
 ) (
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -119,7 +119,7 @@ module game_top #(
     wire        S_dbg_blade_en, S_dbg_marker_en;
     wire        S_cmd_restart, S_cmd_standby, S_cmd_pause;
     wire [15:0] S_state_word, S_blade_pos, S_hit_cnt, S_miss_cnt;
-    wire [3:0]  S_lives, S_state;
+    wire [3:0]  S_state;
     wire [11:0] S_fruit1_x, S_fruit1_y;
     wire [15:0] S_fruit_pos = {S_fruit1_x[10:3], S_fruit1_y[10:3]};   // {x>>3, y>>3}
 
@@ -206,12 +206,12 @@ module game_top #(
     wire [11:0]  S_burst_x, S_burst_y;
     wire [143:0] S_part_off;
     wire [7:0]   S_part_en;
-    wire [7:0]   S_score;
+    wire         S_part_bomb;
+    wire [8:0]   S_score;
 
     game_fruit #(
         .BLADE_CUT_EN  (BLADE_CUT_EN  ),
-        .CUT_MODE      (CUT_MODE      ),
-        .INF_LIVES     (INF_LIVES     )
+        .CUT_MODE      (CUT_MODE      )
     ) u_game_fruit (
         .I_clk           (I_clk          ),
         .I_rst_n         (I_rst_n        ),
@@ -239,8 +239,8 @@ module game_top #(
         .O_burst_y       (S_burst_y      ),
         .O_part_off      (S_part_off     ),
         .O_part_en       (S_part_en      ),
+        .O_part_bomb     (S_part_bomb    ),
         .O_score         (S_score        ),
-        .O_lives         (S_lives        ),
         .O_state         (S_state        ),
         .O_hit_cnt       (S_hit_cnt      ),
         .O_miss_cnt      (S_miss_cnt     ),
@@ -253,7 +253,7 @@ module game_top #(
     // ------------------------------------------------------------------------
     // 精灵 ROM + 逐像素判属
     // ------------------------------------------------------------------------
-    wire [11:0] S_spr_addr;
+    wire [12:0] S_spr_addr;
     wire [7:0]  S_spr_px;
 
     game_sprite_rom u_game_sprite_rom (
@@ -281,8 +281,8 @@ module game_top #(
         .I_burst_y     (S_burst_y      ),
         .I_part_off    (S_part_off     ),
         .I_part_en     (PART_EN  ? S_part_en  : 8'h00),
+        .I_part_bomb   (S_part_bomb    ),
         .I_score       (S_score        ),
-        .I_lives       (S_lives        ),
         .I_state       (S_state        ),
         .I_marker_en   (S_dbg_marker_en),
         .O_spr_addr    (S_spr_addr     ),

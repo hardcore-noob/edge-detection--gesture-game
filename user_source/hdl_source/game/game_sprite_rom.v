@@ -1,8 +1,8 @@
 // ============================================================================
 // game_sprite_rom —— 水果精灵 ROM（ERAM，单口，读延迟固定 1 拍）
 //
-// 内容：4 种水果 × 32×32 × 8bit（RGB332，`8'h00` = 透明），共 4096 个单元。
-//   地址 = {pal[1:0], dy[4:0], dx[4:0]}（pal 是水果种类，dy/dx 是**源像素**坐标）。
+// 内容：4 种水果 + 1 种炸弹 × 32×32 × 8bit（RGB332，`8'h00` = 透明）。
+//   地址 = {sprite[2:0], dy[4:0], dx[4:0]}（sprite=0..3 水果，4=炸弹）。
 //   上屏 4× 放大由调用方换算（`dx = (x - OBJ_X) >> 2`），ROM 本身不知道缩放。
 //   半片（切开的两半）复用同一块 ROM 的**列窗**：只是把 dx 换成 16..31，
 //   所以"切开两半"零额外 ERAM（见 B 线规划 §3 第 5 步 / §4.4 第 2 条）。
@@ -14,18 +14,18 @@
 // 初始化文件：`game_sprite.dat`（与本文件同目录；TD 的 ERAM 靠文件名在源码目录里找，
 //   不登记进 .al / .prj，与 anlogic_logo_rom.dat 是同一套机制）。
 //   重新生成：`pwsh -NoProfile -File user_source/hdl_source/game/game_sprite_gen.ps1`
-//   （生成脚本与本文件、.dat 放在同一目录，脚本内含 4096 地址穷举校验）。
+//   （生成脚本与本文件、.dat 放在同一目录，脚本内含 8192 地址穷举校验）。
 //
-// 资源：4096 × 8bit = 32 Kbit ≈ **2 块 ERAM20K**（与规划 §7.2 的账一致），
+// 资源：8192 × 8bit = 64 Kbit ≈ **4 块 ERAM20K**，
 //   本模块自身逻辑 ≈ 10 LUT6（只有一块 ERAM 例化），无 DSP。
 // 时钟域：像素域 75 MHz 单时钟，不跨域，不需要 SDC 约束。
 // ============================================================================
 module game_sprite_rom #(
-    parameter integer ADDR_WIDTH = 12,
+    parameter integer ADDR_WIDTH = 13,
     parameter integer DATA_WIDTH = 8
 ) (
     input  wire                    I_clk,
-    input  wire [ADDR_WIDTH-1:0]   I_addr,     // {pal[1:0], dy[4:0], dx[4:0]}
+    input  wire [ADDR_WIDTH-1:0]   I_addr,     // {sprite[2:0], dy[4:0], dx[4:0]}
     output wire [DATA_WIDTH-1:0]   O_pixel     // 下一拍有效；8'h00 = 透明
 );
 

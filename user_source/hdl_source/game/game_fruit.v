@@ -1,7 +1,7 @@
 // ============================================================================
 // game_fruit —— 切水果本体（像素域，vsync 节拍）
 //
-// 职责：水果抛体物理 + 伪随机生成 + 切中判定 + 分数/生命 + 拖尾与粒子数据。
+// 职责：水果/炸弹抛体物理 + 伪随机生成 + 切中判定 + 分数 + 拖尾与粒子数据。
 //   渲染不在这里（在 game_render）；本模块只产出"对象表 + 印章相对偏移"这些数据。
 //
 // 对象槽（规划 §5.3，6 槽 × 48 位）：
@@ -28,8 +28,7 @@
 // ============================================================================
 module game_fruit #(
     parameter integer BLADE_CUT_EN = 1, // 1 = 每帧刀锋轨迹连续判定
-    parameter integer CUT_MODE = 0,     // 本轮只实现 0 = 8 历史点 + 16 采样 + AABB
-    parameter integer INF_LIVES = 0     // 1 = 无限命：漏切不扣命、不进"结束"态
+    parameter integer CUT_MODE = 0      // 本轮只实现 0 = 8 历史点 + 16 采样 + AABB
 ) (
     input  wire        I_clk,
     input  wire        I_rst_n,
@@ -67,16 +66,16 @@ module game_fruit #(
     output wire [11:0]  O_burst_y,
     output wire [143:0] O_part_off,
     output wire [7:0]   O_part_en,
+    output wire         O_part_bomb,     // 当前爆散是否为炸弹爆炸
 
-    // ---- 分数 / 生命 / 状态 ------------------------------------------------
-    output wire [7:0]   O_score,        // BCD：{十位[3:0], 个位[3:0]}
-    output wire [3:0]   O_lives,
-    output wire [3:0]   O_state,        // 0 = 待机、1 = 运行、2 = 结束
+    // ---- 分数 / 状态 --------------------------------------------------------
+    output wire [8:0]   O_score,        // {负号, BCD十位[3:0], BCD个位[3:0]}
+    output wire [3:0]   O_state,        // 0 = 待机、1 = 运行（无生命/结束态）
     output wire [15:0]  O_hit_cnt,
     output wire [15:0]  O_miss_cnt,
     output wire [11:0]  O_fruit1_x,
     output wire [11:0]  O_fruit1_y,
-    output wire [15:0]  O_state_word,   // {state[3:0], lives[3:0], score[7:0]}
+    output wire [15:0]  O_state_word,   // {state[3:0], 3'b0, score_neg, score_bcd[7:0]}
     output wire [15:0]  O_blade_pos     // {x>>3[7:0], y>>3[7:0]}
 );
 
@@ -90,6 +89,7 @@ module game_fruit #(
     reg [15:0] S_vy [0:5];
     reg [1:0]  S_pal [0:5];
     reg [1:0]  S_typ [0:5];      // 0 = 空闲、2 = 水果、3 = 半片
+    reg        S_bomb [0:5];     // 仅 type=2 时有效：1 = 炸弹
     reg        S_half [0:5];     // 半片 A/B 侧（pal[3]）
     reg        S_axis [0:5];     // 0 = 左右半片，1 = 上下半片（color[6]）
     reg [1:0]  S_rowoff [0:5];   // 半片"自旋"：源行偏移，每 4 帧 +1（规划 §3 第 5 步 2）
@@ -109,10 +109,13 @@ module game_fruit #(
     reg [8:0]  S_poy [0:7];
     reg [7:0]  S_part_en;
     reg [7:0]  S_part_age;
+    reg        S_part_bomb;
     reg [11:0] S_burst_x, S_burst_y;
 
     // ---- 标量状态 ----------------------------------------------------------
-    reg [7:0]  S_state, S_lives, S_score;
+    reg [7:0]  S_state, S_score;
+    reg        S_score_neg;
+    reg [1:0]  S_miss_score;
     reg [15:0] S_hit_cnt, S_miss_cnt;
     reg [15:0] S_lfsr;
     reg [7:0]  S_spawn_cnt, S_still_cnt;
@@ -239,26 +242,51 @@ module game_fruit #(
     wire S_pair_ok = (S_typ[S_j_f] == 2'd2) && S_on_screen && !S_far;
 
     // ---- 组合：空闲槽 / 备用槽 --------------------------------------------
+    wire [2:0] S_bomb_active = {(S_typ[2] == 2'd2) && S_bomb[2],
+                                (S_typ[1] == 2'd2) && S_bomb[1],
+                                (S_typ[0] == 2'd2) && S_bomb[0]};
+    wire [2:0] S_bomb_hit_f   = S_hit_f & S_bomb_active;
+    wire [2:0] S_fruit_hit_f  = S_hit_f & ~S_bomb_active;
     wire        S_fruit_free = (S_typ[0] == 2'd0) | (S_typ[1] == 2'd0) | (S_typ[2] == 2'd0);
     wire [1:0]  S_fruit_slot = (S_typ[0] == 2'd0) ? 2'd0 : ((S_typ[1] == 2'd0) ? 2'd1 : 2'd2);
     wire        S_spare_free = (S_typ[3] == 2'd0) | (S_typ[4] == 2'd0) | (S_typ[5] == 2'd0);
     wire [2:0]  S_spare_slot = (S_typ[3] == 2'd0) ? 3'd3 : ((S_typ[4] == 2'd0) ? 3'd4 : 3'd5);
+    // 炸弹最多同时出现一颗；每个生成机会约 2/16 = 12.5% 选为炸弹。
+    wire        S_bomb_on_screen = |S_bomb_active;
+    wire        S_spawn_bomb = (S_lfsr[3:0] < 4'd2) && !S_bomb_on_screen;
 
     // ---- 组合：漏切（下落到场地下边界以下，且正在下行）----------------------
     wire [15:0] S_y_lim = {I_field_y1, 4'b0};
     wire [2:0]  S_miss_mask;
-    // 判据用**水果中心**过"漏切判定线"（I_field_y1），且只记一次
-    assign S_miss_mask[0] = (S_typ[0] == 2'd2) && !S_missed[0] &&
+    // 判据用水果/炸弹中心过"漏切判定线"，且只记一次；炸弹漏掉不扣分。
+    assign S_miss_mask[0] = (S_typ[0] == 2'd2) && !S_bomb[0] && !S_missed[0] &&
                             (({1'b0, S_py[0][15:4]} + 13'd64) > {1'b0, I_field_y1}) &&
                             (S_vy[0][15] == 1'b0);
-    assign S_miss_mask[1] = (S_typ[1] == 2'd2) && !S_missed[1] &&
+    assign S_miss_mask[1] = (S_typ[1] == 2'd2) && !S_bomb[1] && !S_missed[1] &&
                             (({1'b0, S_py[1][15:4]} + 13'd64) > {1'b0, I_field_y1}) &&
                             (S_vy[1][15] == 1'b0);
-    assign S_miss_mask[2] = (S_typ[2] == 2'd2) && !S_missed[2] &&
+    assign S_miss_mask[2] = (S_typ[2] == 2'd2) && !S_bomb[2] && !S_missed[2] &&
                             (({1'b0, S_py[2][15:4]} + 13'd64) > {1'b0, I_field_y1}) &&
                             (S_vy[2][15] == 1'b0);
     wire [1:0]  S_miss_num = {1'b0, S_miss_mask[0]} + {1'b0, S_miss_mask[1]} + {1'b0, S_miss_mask[2]};
-    wire [1:0]  S_hit_num  = {1'b0, S_hit_f[0]} + {1'b0, S_hit_f[1]} + {1'b0, S_hit_f[2]};
+    wire [1:0]  S_fruit_hit_num = {1'b0, S_fruit_hit_f[0]} +
+                                  {1'b0, S_fruit_hit_f[1]} +
+                                  {1'b0, S_fruit_hit_f[2]};
+    wire [1:0]  S_bomb_hit_num  = {1'b0, S_bomb_hit_f[0]} +
+                                  {1'b0, S_bomb_hit_f[1]} +
+                                  {1'b0, S_bomb_hit_f[2]};
+    wire        S_score_event = (S_fruit_hit_num != 2'd0) ||
+                                (S_bomb_hit_num != 2'd0) ||
+                                (S_miss_score != 2'd0);
+    wire [8:0]  S_score_next;
+
+    game_score u_game_score (
+        .I_score          ({S_score_neg, S_score}),
+        .I_miss_num       (S_miss_score),
+        .I_fruit_hit_mask (S_fruit_hit_f),
+        .I_bomb_hit_mask  (S_bomb_hit_f),
+        .O_score          (S_score_next)
+    );
 
     // ---- 组合：完全离开屏幕才回收槽位 --------------------------------------
     wire [5:0] S_gone_mask;
@@ -276,20 +304,6 @@ module game_fruit #(
                                        || S_x_gone );
         end
     endgenerate
-
-    // BCD 加分（一次最多 +3，够用）
-    function [7:0] F_bcd_add;
-        input [7:0] I_s;
-        input [1:0] I_n;
-        reg [4:0] lo;
-        begin
-            lo = {1'b0, I_s[3:0]} + {3'b0, I_n};
-            if(lo >= 5'd10)
-                F_bcd_add = {I_s[7:4] + 4'd1, lo[3:0] - 4'd10};
-            else
-                F_bcd_add = {I_s[7:4], lo[3:0]};
-        end
-    endfunction
 
     // 粒子方向表（8 个方向，固定常量，不占寄存器）
     function signed [9:0] F_pvx;
@@ -351,6 +365,7 @@ module game_fruit #(
                 S_vy[oi]     <= 16'd0;
                 S_pal[oi]    <= 2'd0;
                 S_typ[oi]    <= 2'd0;
+                S_bomb[oi]   <= 1'b0;
                 S_half[oi]   <= 1'b0;
                 S_axis[oi]   <= 1'b0;
                 S_rowoff[oi] <= 2'd0;
@@ -369,11 +384,13 @@ module game_fruit #(
             S_trail_en  <= 16'd0;
             S_part_en   <= 8'd0;
             S_part_age  <= 8'd0;
+            S_part_bomb <= 1'b0;
             S_burst_x   <= 12'd640;
             S_burst_y   <= 12'd400;
             S_state     <= 8'd1;        // 上电即"运行"：game_mode 一开就能玩
-            S_lives     <= 8'd3;
             S_score     <= 8'd0;
+            S_score_neg <= 1'b0;
+            S_miss_score <= 2'd0;
             S_hit_cnt   <= 16'd0;
             S_miss_cnt  <= 16'd0;
             S_lfsr      <= 16'hACE1;
@@ -389,20 +406,25 @@ module game_fruit #(
             // ---- 命令 -----------------------------------------------------
             if(I_restart) begin
                 S_state     <= 8'd1;
-                S_lives     <= 8'd3;
                 S_score     <= 8'd0;
+                S_score_neg <= 1'b0;
+                S_miss_score <= 2'd0;
                 S_hit_cnt   <= 16'd0;
                 S_miss_cnt  <= 16'd0;
                 for(oi = 0; oi < 6; oi = oi + 1) S_typ[oi] <= 2'd0;
+                for(oi = 0; oi < 6; oi = oi + 1) S_bomb[oi] <= 1'b0;
                 for(oi = 0; oi < 6; oi = oi + 1) S_missed[oi] <= 1'b0;
                 S_part_en   <= 8'd0;
+                S_part_bomb <= 1'b0;
                 S_trail_en  <= 16'd0;
             end
             else if(I_standby) begin
                 S_state     <= 8'd0;
                 for(oi = 0; oi < 6; oi = oi + 1) S_typ[oi] <= 2'd0;
+                for(oi = 0; oi < 6; oi = oi + 1) S_bomb[oi] <= 1'b0;
                 for(oi = 0; oi < 6; oi = oi + 1) S_missed[oi] <= 1'b0;
                 S_part_en   <= 8'd0;
+                S_part_bomb <= 1'b0;
                 S_trail_en  <= 16'd0;
             end
 
@@ -431,6 +453,7 @@ module game_fruit #(
                 S_frame_pend <= 1'b0;
                 S_ph         <= PH_PHYS;
                 S_hit_f      <= 3'd0;      // 帧首清命中；PH_JUDGE 再写
+                S_miss_score <= 2'd0;
 
                 // 伪随机
                 S_lfsr <= {S_lfsr[14:0], S_lfsr[15] ^ S_lfsr[13] ^ S_lfsr[12] ^ S_lfsr[10]};
@@ -470,6 +493,7 @@ module game_fruit #(
                     S_spawn_cnt <= 8'd0;
                     S_typ[S_fruit_slot]  <= 2'd2;
                     S_pal[S_fruit_slot]  <= S_lfsr[1:0];
+                    S_bomb[S_fruit_slot] <= S_spawn_bomb;
                     S_half[S_fruit_slot] <= 1'b0;
                     S_axis[S_fruit_slot] <= 1'b0;
                     S_rowoff[S_fruit_slot] <= 2'd0;
@@ -499,28 +523,21 @@ module game_fruit #(
                     end
                 end
 
-                // 漏切扣命：水果中心落到场地下边界以下且在下行 → 扣命（每颗只记一次），
+                // 漏切：水果中心落到场地下边界以下且在下行 → 本帧扣 1 分（每颗只记一次），
                 // **但不在这里删槽位**——让它继续往下掉，等整颗离开屏幕再消失。
                 // （上板反馈：原来一过 704 就把槽清掉，水果还剩 16 px 在屏内就凭空没了）
                 if(S_miss_num != 2'd0) begin
                     S_miss_cnt <= S_miss_cnt + {14'b0, S_miss_num};
+                    S_miss_score <= S_miss_num;
                     for(oi = 0; oi < 3; oi = oi + 1)
                         if(S_miss_mask[oi]) S_missed[oi] <= 1'b1;
-
-                    // INF_LIVES = 0（正常模式）才扣命、才可能进"结束"；
-                    // INF_LIVES = 1（演示模式）只统计 miss_cnt，生命格恒满 3 个。
-                    if(INF_LIVES == 0) begin
-                        S_lives <= (S_lives > {6'b0, S_miss_num}) ? (S_lives - {6'b0, S_miss_num})
-                                                                 : 8'd0;
-                        if(S_lives <= {6'b0, S_miss_num})
-                            S_state <= 8'd2;  // 命数归零 → 停止生成；本轮的果子继续飞完
-                    end
                 end
 
                 // 完全离开屏幕 → 回收槽位
                 for(oi = 0; oi < 6; oi = oi + 1)
                     if(S_gone_mask[oi]) begin
                         S_typ[oi]    <= 2'd0;
+                        S_bomb[oi]   <= 1'b0;
                         S_missed[oi] <= 1'b0;
                     end
 
@@ -595,22 +612,39 @@ module game_fruit #(
             end
             // ----------------------------------------------------------------
             PH_ACT: begin
-                // 命中：计分 + 计数 + 自己变半片 A（左）+ 借备用槽做半片 B（右）
-                if(S_hit_num != 2'd0) begin
-                    S_hit_cnt <= S_hit_cnt + {14'b0, S_hit_num};
-                    S_score   <= F_bcd_add(S_score, S_hit_num);
+                // 本帧分数一次性合并：水果 +1、炸弹 -5、漏掉水果 -1。
+                if(S_score_event) begin
+                    S_score     <= S_score_next[7:0];
+                    S_score_neg <= S_score_next[8];
+                end
+
+                // 命中特效：普通水果使用黄色小粒子；炸弹使用橙红色大粒子。
+                if(|S_hit_f) begin
                     S_part_age<= 8'd0;
                     S_part_en <= 8'hFF;
+                    S_part_bomb <= (S_bomb_hit_num != 2'd0);
                     for(oi = 0; oi < 8; oi = oi + 1) begin
                         S_pox[oi] <= 9'sd0;
                         S_poy[oi] <= 9'sd0;
                     end
-                    // 爆点 = 最低位命中水果的中心
-                    if(S_hit_f[0]) begin
+                    // 同帧同时命中炸弹与水果时，爆点优先取炸弹。
+                    if(S_bomb_hit_f[0]) begin
                         S_burst_x <= S_px[0][15:4] + 12'd64;
                         S_burst_y <= S_py[0][15:4] + 12'd64;
                     end
-                    else if(S_hit_f[1]) begin
+                    else if(S_bomb_hit_f[1]) begin
+                        S_burst_x <= S_px[1][15:4] + 12'd64;
+                        S_burst_y <= S_py[1][15:4] + 12'd64;
+                    end
+                    else if(S_bomb_hit_f[2]) begin
+                        S_burst_x <= S_px[2][15:4] + 12'd64;
+                        S_burst_y <= S_py[2][15:4] + 12'd64;
+                    end
+                    else if(S_fruit_hit_f[0]) begin
+                        S_burst_x <= S_px[0][15:4] + 12'd64;
+                        S_burst_y <= S_py[0][15:4] + 12'd64;
+                    end
+                    else if(S_fruit_hit_f[1]) begin
                         S_burst_x <= S_px[1][15:4] + 12'd64;
                         S_burst_y <= S_py[1][15:4] + 12'd64;
                     end
@@ -618,10 +652,15 @@ module game_fruit #(
                         S_burst_x <= S_px[2][15:4] + 12'd64;
                         S_burst_y <= S_py[2][15:4] + 12'd64;
                     end
+                end
 
+                // 水果：保留原计分粒子/半片；炸弹只消失并触发爆炸，不产生半片。
+                if(S_fruit_hit_num != 2'd0) begin
+                    S_hit_cnt <= S_hit_cnt + {14'b0, S_fruit_hit_num};
                     for(oi = 0; oi < 3; oi = oi + 1) begin
-                        if(S_hit_f[oi]) begin
+                        if(S_fruit_hit_f[oi]) begin
                             S_typ[oi]    <= 2'd3;               // 原地变半片 A
+                            S_bomb[oi]   <= 1'b0;
                             S_half[oi]   <= 1'b0;
                             S_axis[oi]   <= S_split_h;
                             S_rowoff[oi] <= 2'd0;
@@ -640,8 +679,9 @@ module game_fruit #(
 
                     // 半片 B：借第一个空备用槽（槽满时第二片不出，判定与计分不受影响）
                     if(S_spare_free) begin
-                        if(S_hit_f[0]) begin
+                        if(S_fruit_hit_f[0]) begin
                             S_typ[S_spare_slot]   <= 2'd3;
+                            S_bomb[S_spare_slot]  <= 1'b0;
                             S_half[S_spare_slot]  <= 1'b1;
                             S_axis[S_spare_slot]  <= S_split_h;
                             S_rowoff[S_spare_slot]<= 2'd0;
@@ -661,8 +701,9 @@ module game_fruit #(
                                 S_vy[S_spare_slot] <= F_half_vel(S_vy[0]) - 16'd32;
                             end
                         end
-                        else if(S_hit_f[1]) begin
+                        else if(S_fruit_hit_f[1]) begin
                             S_typ[S_spare_slot]   <= 2'd3;
+                            S_bomb[S_spare_slot]  <= 1'b0;
                             S_half[S_spare_slot]  <= 1'b1;
                             S_axis[S_spare_slot]  <= S_split_h;
                             S_rowoff[S_spare_slot]<= 2'd0;
@@ -682,6 +723,7 @@ module game_fruit #(
                         end
                         else begin
                             S_typ[S_spare_slot]   <= 2'd3;
+                            S_bomb[S_spare_slot]  <= 1'b0;
                             S_half[S_spare_slot]  <= 1'b1;
                             S_axis[S_spare_slot]  <= S_split_h;
                             S_rowoff[S_spare_slot]<= 2'd0;
@@ -701,6 +743,12 @@ module game_fruit #(
                         end
                     end
                 end
+                for(oi = 0; oi < 3; oi = oi + 1)
+                    if(S_bomb_hit_f[oi]) begin
+                        S_typ[oi]    <= 2'd0;
+                        S_bomb[oi]   <= 1'b0;
+                        S_missed[oi] <= 1'b0;
+                    end
 
                 S_ph <= PH_END;
             end
@@ -727,9 +775,11 @@ module game_fruit #(
             // color[6] = 切割轴，color[5:4] = 左右半片的行偏移。
             wire [7:0]  W_c = {1'b0, W_axis,
                                ((W_is_h && !W_axis) ? S_rowoff[go] : 2'd0), 4'b0};
-            // pal[3] = A/B 侧，pal[2] = 负 x，pal[1:0] = 水果种类。
+            // pal[3] = 半片 A/B 侧（普通对象则为炸弹标志），pal[2] = 负 x，
+            // pal[1:0] = 水果种类。
             wire        W_x_neg = !W_idle && S_px[go][15];
-            wire [3:0]  W_p = {W_is_h && S_half[go], W_x_neg, S_pal[go]};
+            wire [3:0]  W_p = {W_is_h ? S_half[go] : S_bomb[go],
+                               W_x_neg, S_pal[go]};
 
             assign O_obj[go*48 +: 48] = {W_t, W_x, W_y, W_w, W_h, W_c, W_p};
         end
@@ -753,14 +803,14 @@ module game_fruit #(
     assign O_burst_y = S_burst_y;
     assign O_part_en = S_part_en;
 
-    assign O_score    = S_score;
-    assign O_lives    = S_lives[3:0];
+    assign O_part_bomb= S_part_bomb;
+    assign O_score    = {S_score_neg, S_score};
     assign O_state    = S_state[3:0];
     assign O_hit_cnt  = S_hit_cnt;
     assign O_miss_cnt = S_miss_cnt;
     assign O_fruit1_x = S_px[0][15:4];
     assign O_fruit1_y = S_py[0][15:4];
-    assign O_state_word = {S_state[3:0], S_lives[3:0], S_score};
+    assign O_state_word = {S_state[3:0], 3'b000, S_score_neg, S_score};
     assign O_blade_pos  = {S_tip_x[10:3], S_tip_y[10:3]};
 
 endmodule

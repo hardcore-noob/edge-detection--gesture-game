@@ -2,7 +2,7 @@
 // game_render —— 逐像素判属与图层 mux（像素域，**对外 0 拍**）
 //
 // 判属顺序（上 → 下，先命中者赢）：
-//   分数数字 > 生命块 > 刀光拖尾 > 粒子 > 对象表（水果 / 半片 / 方块）
+//   分数数字/负号 > 刀光拖尾 > 粒子 > 对象表（水果 / 炸弹 / 半片 / 方块）
 // 对象表内部按槽位号优先（0 最高），"一个像素只归一个对象"（规划 §4.4 第 4 条）。
 //
 // **前视一拍（本模块的灵魂，别照抄 hdmi_mixer 的 x_1d 套路）**：
@@ -18,9 +18,7 @@
 //
 // 分数：自写 8×8 点阵数字 ROM，上屏 16×16（2×2 一方块），两位数字画在
 //   x 540..555 / 558..573、y 170..185——避开 Logo（0..160）与右上状态字（x≥1100）。
-// 生命：场地左上角内侧 3 个 16×16 方块，专用小逻辑，不占对象槽（规划 §3 第 5 步 7）。
-//
-// 延迟：判属 1 拍（前视抵消，对外 0 拍）；rect/数字/生命同拍组合。
+// 延迟：判属 1 拍（前视抵消，对外 0 拍）；矩形/数字/负号同拍组合。
 // 时钟域：像素域 75 MHz 单时钟，不跨域，不需要 SDC 约束。
 // 资源：约 400 LUT6 + 60 FF（判属寄存器），无 ERAM（精灵 ERAM 在 game_sprite_rom），无 DSP。
 // ============================================================================
@@ -42,20 +40,20 @@ module game_render (
     input  wire [287:0] I_trail_off,    // 16 × {dy[8:0], dx[8:0]}
     input  wire [15:0]  I_trail_en,
 
-    // ---- 粒子：爆点 + 8 个 6×6 印章（同样存相对偏移）-----------------------
+    // ---- 粒子：爆点 + 8 个印章（水果 6×6，炸弹 12×12）-----------------------
     input  wire [11:0]  I_burst_x,
     input  wire [11:0]  I_burst_y,
     input  wire [143:0] I_part_off,     // 8 × {dy[8:0], dx[8:0]}
     input  wire [7:0]   I_part_en,
+    input  wire         I_part_bomb,
 
-    // ---- 分数 / 生命 -------------------------------------------------------
-    input  wire [7:0]   I_score,        // BCD：{十位[3:0], 个位[3:0]}
-    input  wire [3:0]   I_lives,
+    // ---- 分数 --------------------------------------------------------------
+    input  wire [8:0]   I_score,        // {负号, BCD十位[3:0], BCD个位[3:0]}
     input  wire [3:0]   I_state,
     input  wire         I_marker_en,    // 0xA3：1 像素对齐标记（L1 自检）
 
     // ---- 精灵 ROM 接口（地址本拍给、数据下一拍到）--------------------------
-    output wire [11:0]  O_spr_addr,
+    output wire [12:0]  O_spr_addr,
     input  wire [7:0]   I_spr_px,
 
     // ---- 叠加结果（与下一拍的 I_pixel_in 同拍）-----------------------------
@@ -68,11 +66,13 @@ module game_render (
     localparam [23:0] COLOR_TRAIL_EDGE = 24'h00FF00;
     localparam [23:0] COLOR_PART_RAW   = 24'hFFF200;
     localparam [23:0] COLOR_PART_EDGE  = 24'hFFC800;
+    localparam [23:0] COLOR_BOMB        = 24'hFF5000;
     localparam [23:0] COLOR_SCORE_RAW  = 24'h00E6FF;
     localparam [23:0] COLOR_SCORE_EDGE = 24'hFFFFFF;
 
     wire [23:0] S_col_trail = I_display_mode[0] ? COLOR_TRAIL_EDGE : COLOR_TRAIL_RAW;
-    wire [23:0] S_col_part  = I_display_mode[0] ? COLOR_PART_EDGE  : COLOR_PART_RAW;
+    wire [23:0] S_col_part  = I_part_bomb ? COLOR_BOMB :
+                              (I_display_mode[0] ? COLOR_PART_EDGE : COLOR_PART_RAW);
     wire [23:0] S_col_text  = I_display_mode[0] ? COLOR_SCORE_EDGE : COLOR_SCORE_RAW;
 
     // RGB332 → RGB888（位复制，不做乘法）
@@ -91,7 +91,7 @@ module game_render (
 
     // ---- 对象表解码 + 命中（6 槽）------------------------------------------
     wire [5:0]   S_obj_hit;
-    wire [71:0]  S_obj_addr_flat;    // 6 × 12
+    wire [77:0]  S_obj_addr_flat;    // 6 × 13
     wire [5:0]   S_obj_is_spr;
     wire [143:0] S_obj_rect_flat;    // 6 × 24
 
@@ -128,6 +128,9 @@ module game_render (
             wire W_is_piece = (W_type == 2'd3);
             wire W_axis     = W_is_piece && W_c[6];
             wire W_side     = W_pal[3];
+            // type=2 时 pal[3] 是炸弹标志；type=3 时是半片 A/B 侧。
+            wire [2:0] W_spr_kind = W_is_piece ? {1'b0, W_pal[1:0]}
+                                               : {W_pal[3], W_pal[1:0]};
             wire [1:0] W_rowsft = (W_is_piece && !W_axis) ? W_c[5:4] : 2'b00;
             // 左右切割：B 取源列 16..31；上下切割：B 取源行 16..31。
             wire [5:0] W_dx_src_ext =
@@ -142,7 +145,7 @@ module game_render (
 
             assign S_obj_hit[gi] = W_win;
             assign S_obj_is_spr[gi] = W_is_spr;
-            assign S_obj_addr_flat[gi*12 +: 12] = {2'b0, W_pal[1:0], W_dy_src, W_dx_src};
+            assign S_obj_addr_flat[gi*13 +: 13] = {W_spr_kind, W_dy_src, W_dx_src};
             assign S_obj_rect_flat[gi*24 +: 24] = F_rgb332(W_c);
         end
     endgenerate
@@ -155,13 +158,13 @@ module game_render (
     wire S_sel4 = S_obj_hit[4] & ~|S_obj_hit[3:0];
     wire S_sel5 = S_obj_hit[5] & ~|S_obj_hit[4:0];
 
-    wire [11:0] S_spr_addr =
-          ({12{S_sel0}} & S_obj_addr_flat[ 0*12 +: 12])
-        | ({12{S_sel1}} & S_obj_addr_flat[ 1*12 +: 12])
-        | ({12{S_sel2}} & S_obj_addr_flat[ 2*12 +: 12])
-        | ({12{S_sel3}} & S_obj_addr_flat[ 3*12 +: 12])
-        | ({12{S_sel4}} & S_obj_addr_flat[ 4*12 +: 12])
-        | ({12{S_sel5}} & S_obj_addr_flat[ 5*12 +: 12]);
+    wire [12:0] S_spr_addr =
+          ({13{S_sel0}} & S_obj_addr_flat[ 0*13 +: 13])
+        | ({13{S_sel1}} & S_obj_addr_flat[ 1*13 +: 13])
+        | ({13{S_sel2}} & S_obj_addr_flat[ 2*13 +: 13])
+        | ({13{S_sel3}} & S_obj_addr_flat[ 3*13 +: 13])
+        | ({13{S_sel4}} & S_obj_addr_flat[ 4*13 +: 13])
+        | ({13{S_sel5}} & S_obj_addr_flat[ 5*13 +: 13]);
 
     wire S_obj_spr_win = (S_sel0 & S_obj_is_spr[0]) | (S_sel1 & S_obj_is_spr[1])
                        | (S_sel2 & S_obj_is_spr[2]) | (S_sel3 & S_obj_is_spr[3])
@@ -199,7 +202,7 @@ module game_render (
 
     wire S_hit_trail = |S_trail_hit;
 
-    // ---- 粒子：8 个 6×6 印章 -------------------------------------------------
+    // ---- 粒子：8 个方形印章 ---------------------------------------------------
     wire [11:0] S_dx_bst = I_x_nxt - I_burst_x;
     wire [11:0] S_dy_bst = I_y_nxt - I_burst_y;
 
@@ -211,7 +214,8 @@ module game_render (
             wire signed [8:0] W_oy = I_part_off[gp*18 + 9 +: 9];
             wire [11:0] W_ex = S_dx_bst - {{3{W_ox[8]}}, W_ox};
             wire [11:0] W_ey = S_dy_bst - {{3{W_oy[8]}}, W_oy};
-            assign S_part_hit[gp] = I_part_en[gp] & (W_ex < 12'd6) & (W_ey < 12'd6);
+            wire [11:0] W_sz = I_part_bomb ? 12'd12 : 12'd6;
+            assign S_part_hit[gp] = I_part_en[gp] & (W_ex < W_sz) & (W_ey < W_sz);
         end
     endgenerate
 
@@ -220,6 +224,7 @@ module game_render (
     // ---- 分数：8×8 数字点阵 ROM，上屏 16×16 --------------------------------
     localparam [11:0] SCORE_TENS_X = 12'd540;
     localparam [11:0] SCORE_ONES_X = 12'd558;
+    localparam [11:0] SCORE_MINUS_X= 12'd522;
     localparam [11:0] SCORE_Y0     = 12'd170;
 
     function [7:0] F_digit_row;
@@ -283,6 +288,8 @@ module game_render (
     endfunction
 
     wire S_in_score_y = (I_y_nxt >= SCORE_Y0) && (I_y_nxt < (SCORE_Y0 + 12'd16));
+    wire S_in_minus   = (I_x_nxt >= SCORE_MINUS_X) &&
+                        (I_x_nxt < (SCORE_MINUS_X + 12'd16));
     wire S_in_tens    = (I_x_nxt >= SCORE_TENS_X) && (I_x_nxt < (SCORE_TENS_X + 12'd16));
     wire S_in_ones    = (I_x_nxt >= SCORE_ONES_X) && (I_x_nxt < (SCORE_ONES_X + 12'd16));
 
@@ -291,16 +298,10 @@ module game_render (
     wire [3:0]  S_digit  = S_in_ones ? I_score[3:0] : I_score[7:4];
     wire [7:0]  S_font_row = F_digit_row(S_digit, S_ly_12[3:1]);
     wire        S_font_px  = S_font_row[3'd7 - S_lx_12[3:1]];
-    wire        S_hit_score = S_in_score_y && (S_in_tens || S_in_ones) && S_font_px;
-
-    // ---- 生命：场地左上角内侧 3 个 16×16 方块 ------------------------------
-    wire S_life_y = (I_y_nxt >= 12'd216) && (I_y_nxt < 12'd232);
-    wire S_life0  = (I_x_nxt >= 12'd80)  && (I_x_nxt < 12'd96);
-    wire S_life1  = (I_x_nxt >= 12'd104) && (I_x_nxt < 12'd120);
-    wire S_life2  = (I_x_nxt >= 12'd128) && (I_x_nxt < 12'd144);
-    wire S_hit_life = S_life_y & ((S_life0 & (I_lives > 4'd0)) |
-                                  (S_life1 & (I_lives > 4'd1)) |
-                                  (S_life2 & (I_lives > 4'd2)));
+    wire        S_minus_px = (S_ly_12 >= 12'd6) && (S_ly_12 < 12'd10);
+    wire        S_hit_score = S_in_score_y &&
+                              (((S_in_tens || S_in_ones) && S_font_px) ||
+                               (I_score[8] && S_in_minus && S_minus_px));
 
     // ---- 1 像素对齐标记（L1 自检，规划 §3 第 1 步 / §8.1）------------------
     // 5 个白点：(0,0)、(1279,719) 在 Logo 之外，肉眼直接看；
@@ -314,13 +315,12 @@ module game_render (
                        ((I_x_nxt == 12'd152)  && (I_y_nxt == 12'd34)));
 
     // ---- 图层优先级与输出寄存 ----------------------------------------------
-    wire S_hit_flat = S_hit_mark | S_hit_score | S_hit_life | S_hit_trail | S_hit_part;
+    wire S_hit_flat = S_hit_mark | S_hit_score | S_hit_trail | S_hit_part;
     wire S_win_spr  = S_hit_obj & S_obj_spr_win & ~S_hit_flat;
     wire S_win_flat = S_hit_flat | (S_hit_obj & ~S_obj_spr_win);
 
     wire [23:0] S_flat_col = S_hit_mark  ? 24'hFFFFFF  :
                              S_hit_score ? S_col_text  :
-                             S_hit_life  ? S_col_text  :
                              S_hit_trail ? S_col_trail :
                              S_hit_part  ? S_col_part  : S_obj_rect_col;
 
