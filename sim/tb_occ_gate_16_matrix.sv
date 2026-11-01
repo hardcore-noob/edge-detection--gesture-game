@@ -30,7 +30,7 @@ module tb_occ_gate_16_matrix;
     reg mismatch_flags [0:BLOCK_ROWS-1][0:BLOCK_COLS-1];
 
     occ_gate_16 #(
-        .OCC_MIN(9'd64),
+        .OCC_MIN(9'd103),
         .IMG_H(FRAME_H)
     ) dut (
         .I_clk(clk),
@@ -78,12 +78,16 @@ module tb_occ_gate_16_matrix;
             if ((row == 0) && (col == 0))
                 group_mask = 4'b1111;                 // dense
             else if ((row == 0) && (col == 1))
-                group_mask = (block_y <= 3) ?
-                             4'b1111 : 4'b0000;        // exactly 64/256
+                group_mask = (block_y <= 5) ? 4'b1111 :
+                             ((block_y == 6) && (block_x == 0)) ? 4'b1111 :
+                             ((block_y == 6) && (block_x == 1)) ? 4'b0011 :
+                             ((block_y == 6) && (block_x == 2)) ? 4'b0001 :
+                             4'b0000;                    // exactly 103/256
             else if ((row == 0) && (col == 2))
-                group_mask = ((block_y <= 2) ||
-                              ((block_y == 3) && (block_x < 3))) ?
-                             4'b1111 : 4'b0000;        // 60/256, must drop
+                group_mask = (block_y <= 5) ? 4'b1111 :
+                             ((block_y == 6) && (block_x == 0)) ? 4'b1111 :
+                             ((block_y == 6) && (block_x == 1)) ? 4'b0011 :
+                             4'b0000;                    // 102/256, must drop
             else if ((row == 0) && (col == 3))
                 group_mask = (((block_y >= 1) && (block_y <= 3)) ||
                               ((block_y == 4) && (block_x < 2))) ?
