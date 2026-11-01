@@ -27,12 +27,16 @@ module hdmi_mixer #(
 
     reg        S_video_vsync_1d;
     reg        S_video_vsync_2d;
+    reg        S_video_vsync_3d;
     reg        S_video_hsync_1d;
     reg        S_video_hsync_2d;
+    reg        S_video_hsync_3d;
     reg        S_video_de_1d;
     reg        S_video_de_2d;
+    reg        S_video_de_3d;
     reg [23:0] S_video_data_1d;
     reg [23:0] S_video_data_2d;
+    reg [23:0] S_video_data_3d;
     reg [11:0] S_x;
     reg [11:0] S_y;
     reg [11:0] S_x_1d;
@@ -42,6 +46,8 @@ module hdmi_mixer #(
 
     reg        S_osd_hit;
     reg [23:0] S_osd_color;
+    reg        S_osd_hit_1d;
+    reg [23:0] S_osd_color_1d;
     reg [11:0] S_logo_x;
     reg [11:0] S_logo_y;
     reg [3:0]  S_char_idx;
@@ -929,10 +935,13 @@ module hdmi_mixer #(
         if(!I_rst_n) begin
             S_video_vsync_1d <= 1'b0;
             S_video_vsync_2d <= 1'b0;
+            S_video_vsync_3d <= 1'b0;
             S_video_hsync_1d <= 1'b0;
             S_video_hsync_2d <= 1'b0;
+            S_video_hsync_3d <= 1'b0;
             S_video_de_1d    <= 1'b0;
             S_video_de_2d    <= 1'b0;
+            S_video_de_3d    <= 1'b0;
             O_hdmi_vsync     <= 1'b0;
             O_hdmi_hsync     <= 1'b0;
             O_hdmi_de        <= 1'b0;
@@ -941,20 +950,26 @@ module hdmi_mixer #(
         else begin
             S_video_vsync_1d <= I_video_vsync;
             S_video_vsync_2d <= S_video_vsync_1d;
-            O_hdmi_vsync     <= S_video_vsync_2d;
+            S_video_vsync_3d <= S_video_vsync_2d;
+            O_hdmi_vsync     <= S_video_vsync_3d;
 
             S_video_hsync_1d <= I_video_hsync;
             S_video_hsync_2d <= S_video_hsync_1d;
-            O_hdmi_hsync     <= S_video_hsync_2d;
+            S_video_hsync_3d <= S_video_hsync_2d;
+            O_hdmi_hsync     <= S_video_hsync_3d;
 
             S_video_de_1d    <= I_video_de;
             S_video_de_2d    <= S_video_de_1d;
-            O_hdmi_de        <= S_video_de_2d;
+            S_video_de_3d    <= S_video_de_2d;
+            O_hdmi_de        <= S_video_de_3d;
             S_video_data_1d  <= I_video_rd_data;
             S_video_data_2d  <= S_video_data_1d;
+            S_video_data_3d  <= S_video_data_2d;
+            S_osd_hit_1d     <= S_osd_hit;
+            S_osd_color_1d   <= S_osd_color;
 
             if(DEBUG_MODE == 1) begin
-                if(S_video_de_2d) begin
+                if(S_video_de_3d) begin
                     if(S_x < 12'd128)
                         O_hdmi_data <= 24'hff0000;
                     else if(S_x < 12'd256)
@@ -977,7 +992,7 @@ module hdmi_mixer #(
                 end
             end
             else if(DEBUG_MODE == 2) begin
-                if(S_video_de_2d) begin
+                if(S_video_de_3d) begin
                     case (I_debug_status)
                         4'b0000: O_hdmi_data <= 24'h000000;
                         4'b0001: O_hdmi_data <= 24'hff0000;
@@ -992,7 +1007,7 @@ module hdmi_mixer #(
                 end
             end
             else if(DEBUG_MODE == 3) begin
-                if(S_video_de_2d) begin
+                if(S_video_de_3d) begin
                     if(S_x < 12'd256)
                         O_hdmi_data <= I_debug_status[0] ? 24'hff8000 : 24'h201000;
                     else if(S_x < 12'd512)
@@ -1007,10 +1022,10 @@ module hdmi_mixer #(
                 end
             end
             else begin
-                if(S_osd_hit)
-                    O_hdmi_data <= S_osd_color;
+                if(S_osd_hit_1d)
+                    O_hdmi_data <= S_osd_color_1d;
                 else
-                    O_hdmi_data <= S_video_data_2d;
+                    O_hdmi_data <= S_video_data_3d;
             end
         end
     end

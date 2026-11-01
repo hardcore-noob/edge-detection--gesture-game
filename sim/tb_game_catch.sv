@@ -161,6 +161,7 @@ module tb_game_catch;
         force_crossing(0, FRUIT_X_AT_CENTER, 1'b0,
                        CATCH_Y - 64 - 3);
         frame_tick;
+        frame_tick;
         expect_score(0, 8'h01, "fruit catch +1");
         if(dut.S_typ[0] !== 2'd0 || part_en === 8'h00 || part_bomb !== 1'b0) begin
             errors = errors + 1;
@@ -178,6 +179,7 @@ module tb_game_catch;
         force_crossing(0, FRUIT_X_AT_CENTER, 1'b1,
                        CATCH_Y - 64 - 3);
         frame_tick;
+        frame_tick;
         expect_score(1, 8'h05, "bomb catch -5");
         if(part_en === 8'h00 || part_bomb !== 1'b1) begin
             errors = errors + 1;
@@ -188,6 +190,7 @@ module tb_game_catch;
         restart_game;
         clear_objects;
         force_crossing(0, 12'd60, 1'b0, CATCH_Y - 64 - 3);
+        frame_tick;
         frame_tick;
         expect_score(1, 8'h01, "fruit miss -1");
         if(dut.S_typ[0] !== 2'd2 || dut.S_resolved[0] !== 1'b1 ||
@@ -201,12 +204,14 @@ module tb_game_catch;
         @(negedge clk);
         dut.S_py[0] = 12'd539;
         frame_tick;
+        frame_tick;
         expect_score(1, 8'h01, "fruit miss only once");
 
         // 炸弹漏掉不扣分。
         restart_game;
         clear_objects;
         force_crossing(0, 12'd60, 1'b1, CATCH_Y - 64 - 3);
+        frame_tick;
         frame_tick;
         expect_score(0, 8'h00, "bomb miss no penalty");
         if(dut.S_typ[0] !== 2'd2 || dut.S_resolved[0] !== 1'b1) begin
@@ -220,6 +225,7 @@ module tb_game_catch;
         clear_objects;
         pause = 1'b1;
         force_crossing(0, FRUIT_X_AT_CENTER, 1'b0, CATCH_Y - 64 - 3);
+        frame_tick;
         frame_tick;
         expect_score(0, 8'h00, "paused no score");
         if(dut.S_py[0] !== CATCH_Y - 64 - 3) begin

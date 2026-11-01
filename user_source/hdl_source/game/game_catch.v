@@ -91,6 +91,9 @@ module game_catch #(
     // ---- 分数 / 统计 --------------------------------------------------------
     reg [7:0]  S_score;
     reg        S_score_neg;
+    reg [2:0]  S_score_hit_f;
+    reg [2:0]  S_score_bomb_f;
+    reg [2:0]  S_score_miss_f;
     reg [3:0]  S_state;
     reg [15:0] S_hit_cnt;
     reg [15:0] S_miss_cnt;
@@ -147,14 +150,15 @@ module game_catch #(
         end
     endgenerate
 
-    wire S_score_event = (|S_hit_fruit) || (|S_hit_bomb) || (|S_miss_fruit);
+    wire S_score_event = (|S_score_hit_f) || (|S_score_bomb_f) ||
+                         (|S_score_miss_f);
     wire [8:0] S_score_next;
 
     game_score u_game_score (
         .I_score          ({S_score_neg, S_score}),
-        .I_miss_num       ({1'b0, |S_miss_fruit}),
-        .I_fruit_hit_mask (S_hit_fruit),
-        .I_bomb_hit_mask  (S_hit_bomb),
+        .I_miss_num       ({1'b0, |S_score_miss_f}),
+        .I_fruit_hit_mask (S_score_hit_f),
+        .I_bomb_hit_mask  (S_score_bomb_f),
         .O_score          (S_score_next)
     );
 
@@ -188,6 +192,9 @@ module game_catch #(
                 : IDLE_OBJ;
         end
     endgenerate
+    assign O_obj[3*48 +: 48] = IDLE_OBJ;
+    assign O_obj[4*48 +: 48] = IDLE_OBJ;
+    assign O_obj[5*48 +: 48] = IDLE_OBJ;
 
     // ---- 爆散：固定八方向，12 帧后关闭 --------------------------------------
     function [8:0] F_part_dx;
@@ -262,6 +269,9 @@ module game_catch #(
             S_state      <= 4'd1;
             S_score      <= 8'd0;
             S_score_neg  <= 1'b0;
+            S_score_hit_f  <= 3'd0;
+            S_score_bomb_f <= 3'd0;
+            S_score_miss_f <= 3'd0;
             S_hit_cnt    <= 16'd0;
             S_miss_cnt   <= 16'd0;
             S_speed      <= 8'd3;
@@ -288,6 +298,9 @@ module game_catch #(
                 S_state      <= 4'd1;
                 S_score      <= 8'd0;
                 S_score_neg  <= 1'b0;
+                S_score_hit_f  <= 3'd0;
+                S_score_bomb_f <= 3'd0;
+                S_score_miss_f <= 3'd0;
                 S_hit_cnt    <= 16'd0;
                 S_miss_cnt   <= 16'd0;
                 S_speed      <= W_start_speed;
@@ -327,18 +340,24 @@ module game_catch #(
                     S_score_neg <= S_score_next[8];
                 end
 
-                if(|S_hit_fruit) begin
+                if(|S_score_hit_f) begin
                     S_hit_cnt <= S_hit_cnt +
-                                 {14'b0, S_hit_fruit[0]} +
-                                 {14'b0, S_hit_fruit[1]} +
-                                 {14'b0, S_hit_fruit[2]};
+                                 {14'b0, S_score_hit_f[0]} +
+                                 {14'b0, S_score_hit_f[1]} +
+                                 {14'b0, S_score_hit_f[2]};
                 end
-                if(|S_miss_fruit) begin
+                if(|S_score_miss_f) begin
                     S_miss_cnt <= S_miss_cnt +
-                                  {14'b0, S_miss_fruit[0]} +
-                                  {14'b0, S_miss_fruit[1]} +
-                                  {14'b0, S_miss_fruit[2]};
+                                  {14'b0, S_score_miss_f[0]} +
+                                  {14'b0, S_score_miss_f[1]} +
+                                  {14'b0, S_score_miss_f[2]};
                 end
+
+                // 判定仍在本帧发生；分数另寄存一帧，切断刀锋坐标到 BCD
+                // 换算再回写分数寄存器的长组合路径。
+                S_score_hit_f  <= S_hit_fruit;
+                S_score_bomb_f <= S_hit_bomb;
+                S_score_miss_f <= S_miss_fruit;
 
                 for(oi = 0; oi < 3; oi = oi + 1) begin
                     if(S_hit_fruit[oi] || S_hit_bomb[oi]) begin

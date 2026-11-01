@@ -16,6 +16,9 @@
 //   fruit_grav[15:0] : 重力，单位 **1/256 上屏像素 / 帧²**（默认 0x40 = 0.25 px/帧²）
 //   fruit_v0[15:0]   : {垂直发射速度[7:0], 水平散布[7:0]}；垂直速度单位 1/2 上屏像素/帧
 //                      （默认 0x0600 → 6×2 = 12 px/帧 向上），水平散布按 ±N px/帧 随机取
+//   catch_spawn      : 接果篮生成间隔（帧，默认 72）
+//   catch_cfg[15:8]  : 接果篮初始下落速度（1..9 px/帧）
+//   catch_cfg[7:0]   : 每 N×16 帧加速一次（0 = 不加速，默认 0x32 = 800 帧）
 //   trail_cfg[15:0]  : {历史点数[7:0], 静止寿命帧[7:0]}（默认 {8,10}）
 //   particle_cfg     : {粒子数[7:0], 寿命帧[7:0]}（默认 {8,20}）
 //
@@ -46,7 +49,7 @@ module game_param #(
     input  wire [15:0] I_miss_cnt,
 
     // ---- 参数输出 ---------------------------------------------------------
-    output reg  [3:0]  O_game_sel,
+    output reg  [3:0]  O_game_sel,     // 0x80 兼容字段；当前游戏路由以 game_mode 为准
     output reg         O_restart,      // 0x81 bit0：单拍脉冲
     output reg         O_standby,      // 0x81 bit1/bit2：单拍脉冲（回待机）
     output reg         O_pause,        // 0x81 bit3：电平
@@ -57,6 +60,8 @@ module game_param #(
     output reg  [7:0]  O_fruit_spawn,
     output reg  [15:0] O_fruit_grav,
     output reg  [15:0] O_fruit_v0,
+    output reg  [7:0]  O_catch_spawn,
+    output reg  [15:0] O_catch_cfg,
     output reg  [15:0] O_trail_cfg,
     output reg  [15:0] O_particle_cfg,
     output reg  [11:0] O_field_y0,
@@ -86,6 +91,8 @@ module game_param #(
             O_fruit_spawn   <= 8'd48;
             O_fruit_grav    <= 16'h0040;
             O_fruit_v0      <= 16'h0900;    // 垂直初速 9×2 = 18 px/帧 → 水果上侧顶点约 y=193
+            O_catch_spawn   <= 8'd72;
+            O_catch_cfg     <= 16'h0332;    // 3 px/帧起步，每 800 帧 +1
             O_trail_cfg     <= 16'h080A;
             O_particle_cfg  <= 16'h0814;
             O_field_y0      <= 12'd200;
@@ -118,6 +125,8 @@ module game_param #(
                     6'h09: O_fruit_spawn  <= I_wdata[7:0];
                     6'h0A: O_fruit_grav   <= I_wdata;
                     6'h0B: O_fruit_v0     <= I_wdata;
+                    6'h15: O_catch_spawn  <= I_wdata[7:0];
+                    6'h16: O_catch_cfg    <= I_wdata;
                     6'h0C: O_trail_cfg    <= I_wdata;
                     6'h0D: O_particle_cfg <= I_wdata;
                     6'h0E: O_field_y0     <= I_wdata[11:0];
@@ -154,6 +163,8 @@ module game_param #(
             8'h89:   O_rd_data = {8'b0, O_fruit_spawn};
             8'h8A:   O_rd_data = O_fruit_grav;
             8'h8B:   O_rd_data = O_fruit_v0;
+            8'h95:   O_rd_data = {8'b0, O_catch_spawn};
+            8'h96:   O_rd_data = O_catch_cfg;
             8'h8C:   O_rd_data = O_trail_cfg;
             8'h8D:   O_rd_data = O_particle_cfg;
             8'h8E:   O_rd_data = {4'b0, O_field_y0};

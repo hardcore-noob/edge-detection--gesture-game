@@ -603,7 +603,7 @@ module design_top_wrapper (
     // bit1 = **已提交的** game_mode（显示 GES）。用提交值而不是请求值，理由同上。
     // 屏幕上真正在放的那一路——2026-09-14 位序取反那次，字样变了画面没变，正是这两者
     // 不一致造成的误导。
-    assign S_hdmi_debug_status = {2'b00, S_committed_game[0], S_committed_display[0]};
+    assign S_hdmi_debug_status = {2'b00, |S_committed_game, S_committed_display[0]};
 
     assign S_debug_status_bus = {
         S_dbg_mc_init_seen_sync[1],
@@ -795,7 +795,7 @@ module design_top_wrapper (
   // ===========================================================================
   // KEY1（D5）：短按切 RAW/EDGE——M0 起也走模式寄存器，与 KEY4 同一条路，
   //   于是切换在相机帧首生效（README 第 5 节记的"切换瞬间短暂撕裂"随之消失）。
-  // KEY4（C7）：短按开关游戏层，长按发一次一键示教请求。
+  // KEY4（C7）：短按循环 切水果 → 接果篮 → 退出，长按发一次一键示教请求。
   // KEY1 只需要短按：HAS_LONG=0 让长按计数器整块不生成（省 27 FF 与比较器）
   key_event #(.CLK_HZ(75000000), .DEBOUNCE_MS(20), .LONG_MS(1000), .HAS_LONG(0)) u_key1_event (
       .I_clk  ( S_hdmi_pixel_clk ),

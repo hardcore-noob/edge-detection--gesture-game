@@ -12,9 +12,12 @@
 //   game_param       B 段参数寄存器（0x80~0xBF，地址表见 README §12.2.1）
 //   game_input       输入抽象层：假源 / 手势 / 手柄预留 → 刀尖坐标
 //   game_fruit       切水果本体：物理 / 生成 / 判定 / 分数 / 拖尾粒子数据
+//   game_catch       接果篮本体：下落对象 / 开口跨线判定 / 难度 / 分数
 //   game_score       单帧有符号 BCD 分数结算
 //   game_sprite_rom  水果与炸弹精灵 ERAM（5 种 × 32×32 RGB332）
 //   game_render      逐像素判属（分数 > 拖尾 > 粒子 > 对象表）与图层 mux
+//
+// 游戏选择：I_game_mode = 0 关层，1 切水果，2 接果篮。每次编号变化都重开当前游戏。
 //
 // 与 C 的接线（本轮**未接也能跑**，未驱动输入被 TD 当 0 → 全部走默认值）：
 //   * `I_param_*` / `O_param_rd_data`：param_ctrl 的 B 段转发（需求单 2）；
@@ -27,7 +30,7 @@
 //
 // 延迟：对外 0 拍（内部判属 1 拍，被"前视一拍"抵消）。
 // 时钟域：像素域 75 MHz 单时钟，不跨域，不需要 SDC 约束。
-// 资源：见各子模块头注释；本模块自身约 60 LUT6 + 40 FF。
+// 资源：见各子模块头注释；两款游戏共享输入、参数、精灵 ROM、渲染和分数显示。
 // ============================================================================
 module game_top #(
     parameter integer TRAIL_EN  = 0,   // 1 = 画刀光拖尾
@@ -109,11 +112,12 @@ module game_top #(
     // ------------------------------------------------------------------------
     // B 段参数寄存器
     // ------------------------------------------------------------------------
-    wire [3:0]  S_game_sel;
     wire [3:0]  S_input_src;
     wire [15:0] S_input_cfg, S_input_gain, S_input_offset;
     wire [7:0]  S_fruit_spawn;
+    wire [7:0]  S_catch_spawn;
     wire [15:0] S_fruit_grav, S_fruit_v0, S_trail_cfg, S_part_cfg;
+    wire [15:0] S_catch_cfg;
     wire [11:0] S_field_y0, S_field_y1;
     wire [11:0] S_dbg_blade_x, S_dbg_blade_y;
     wire        S_dbg_blade_en, S_dbg_marker_en;
@@ -121,16 +125,18 @@ module game_top #(
     wire [15:0] S_state_word, S_blade_pos, S_hit_cnt, S_miss_cnt;
     wire [3:0]  S_state;
     wire [11:0] S_fruit1_x, S_fruit1_y;
-    wire [15:0] S_fruit_pos = {S_fruit1_x[10:3], S_fruit1_y[10:3]};   // {x>>3, y>>3}
+    wire [15:0] S_fruit_pos = {S_fruit1_x[10:3], S_fruit1_y[10:3]};
 
-    // KEY4 把游戏层打开的**那一帧**顺便重开本局（现在 B 段还没接通，0x81 重开命令
-    // 写不进来，这条是现场唯一能重开的路子）：进来就是新一局，不会停在"结束"态。
-    reg  S_game_mode_d;
+    // game_mode：0 = 关，1 = 切水果，2 = 接果篮。每次模式变化都重开新局，
+    // 包括 1→2 的直接切换；否则旧分数和对象会带到另一款游戏。
+    reg [3:0] S_game_mode_d;
     always @(posedge I_clk or negedge I_rst_n) begin
-        if(!I_rst_n) S_game_mode_d <= 1'b0;
-        else         S_game_mode_d <= I_game_mode[0];
+        if(!I_rst_n) S_game_mode_d <= 4'd0;
+        else         S_game_mode_d <= I_game_mode;
     end
-    wire S_layer_rise = I_game_mode[0] & ~S_game_mode_d;
+    wire S_game_changed = (I_game_mode != S_game_mode_d);
+    wire S_is_fruit = (I_game_mode == 4'd1);
+    wire S_is_catch = (I_game_mode == 4'd2);
 
     game_param u_game_param (
         .I_clk          (I_clk            ),
@@ -156,6 +162,8 @@ module game_top #(
         .O_fruit_spawn  (S_fruit_spawn    ),
         .O_fruit_grav   (S_fruit_grav     ),
         .O_fruit_v0     (S_fruit_v0       ),
+        .O_catch_spawn  (S_catch_spawn    ),
+        .O_catch_cfg    (S_catch_cfg      ),
         .O_trail_cfg    (S_trail_cfg      ),
         .O_particle_cfg (S_part_cfg       ),
         .O_field_y0     (S_field_y0       ),
@@ -197,17 +205,44 @@ module game_top #(
     );
 
     // ------------------------------------------------------------------------
-    // 切水果本体
+    // 两款游戏共用的输出接口：game_top 在下面按 game_mode 做 mux。
     // ------------------------------------------------------------------------
-    wire [287:0] S_obj;
-    wire [11:0]  S_tip_x, S_tip_y;
-    wire [287:0] S_trail_off;
-    wire [15:0]  S_trail_en;
-    wire [11:0]  S_burst_x, S_burst_y;
-    wire [143:0] S_part_off;
-    wire [7:0]   S_part_en;
-    wire         S_part_bomb;
-    wire [8:0]   S_score;
+    wire [287:0] S_fruit_obj, S_catch_obj;
+    wire [287:0] S_obj = S_is_catch ? S_catch_obj : S_fruit_obj;
+    wire [11:0]  S_fruit_tip_x, S_fruit_tip_y;
+    wire [11:0]  S_tip_x = S_fruit_tip_x;
+    wire [11:0]  S_tip_y = S_fruit_tip_y;
+    wire [287:0] S_fruit_trail_off;
+    wire [287:0] S_trail_off = S_fruit_trail_off;
+    wire [15:0]  S_fruit_trail_en;
+    wire [15:0]  S_trail_en = S_is_catch ? 16'h0000 : S_fruit_trail_en;
+    wire [11:0]  S_fruit_burst_x, S_fruit_burst_y;
+    wire [11:0]  S_catch_burst_x, S_catch_burst_y;
+    wire [11:0]  S_burst_x = S_is_catch ? S_catch_burst_x : S_fruit_burst_x;
+    wire [11:0]  S_burst_y = S_is_catch ? S_catch_burst_y : S_fruit_burst_y;
+    wire [143:0] S_fruit_part_off, S_catch_part_off;
+    wire [143:0] S_part_off = S_is_catch ? S_catch_part_off : S_fruit_part_off;
+    wire [7:0]   S_fruit_part_en, S_catch_part_en;
+    wire [7:0]   S_part_en = S_is_catch ? S_catch_part_en : S_fruit_part_en;
+    wire         S_fruit_part_bomb, S_catch_part_bomb;
+    wire         S_part_bomb = S_is_catch ? S_catch_part_bomb : S_fruit_part_bomb;
+    wire [8:0]   S_fruit_score, S_catch_score;
+    wire [8:0]   S_score = S_is_catch ? S_catch_score : S_fruit_score;
+    wire [3:0]   S_fruit_state, S_catch_state;
+    wire [3:0]   S_state = S_is_catch ? S_catch_state : S_fruit_state;
+    wire [15:0]  S_fruit_hit_cnt, S_catch_hit_cnt;
+    wire [15:0]  S_hit_cnt = S_is_catch ? S_catch_hit_cnt : S_fruit_hit_cnt;
+    wire [15:0]  S_fruit_miss_cnt, S_catch_miss_cnt;
+    wire [15:0]  S_miss_cnt = S_is_catch ? S_catch_miss_cnt : S_fruit_miss_cnt;
+    wire [11:0]  S_fruit_game1_x, S_fruit_game1_y;
+    wire [11:0]  S_catch_game1_x, S_catch_game1_y;
+    wire [11:0]  S_fruit1_x = S_is_catch ? S_catch_game1_x : S_fruit_game1_x;
+    wire [11:0]  S_fruit1_y = S_is_catch ? S_catch_game1_y : S_fruit_game1_y;
+    wire [15:0]  S_fruit_state_word, S_catch_state_word;
+    wire [15:0]  S_state_word = S_is_catch ? S_catch_state_word : S_fruit_state_word;
+    assign S_blade_pos = {S_blade_x[10:3], S_blade_y[10:3]};
+    wire [11:0]  S_catch_basket_center;
+    wire [7:0]   S_catch_speed;
 
     game_fruit #(
         .BLADE_CUT_EN  (BLADE_CUT_EN  ),
@@ -222,32 +257,62 @@ module game_top #(
         .I_trail_cfg     (S_trail_cfg    ),
         .I_part_cfg      (S_part_cfg     ),
         .I_field_y1      (S_field_y1     ),
-        .I_restart       (S_cmd_restart | S_layer_rise),
+        .I_restart       (S_cmd_restart | S_game_changed),
         .I_standby       (S_cmd_standby  ),
-        .I_pause         (S_cmd_pause    ),
+        .I_pause         (S_cmd_pause | ~S_is_fruit),
         .I_blade_x       (S_blade_x      ),
         .I_blade_y       (S_blade_y      ),
         .I_blade_valid   (S_blade_valid  ),
         .I_track_locked  (I_ctrl_valid   ),
         .I_cut_src_ok    (S_input_src == 4'd1),
-        .O_obj           (S_obj          ),
-        .O_tip_x         (S_tip_x        ),
-        .O_tip_y         (S_tip_y        ),
-        .O_trail_off     (S_trail_off    ),
-        .O_trail_en      (S_trail_en     ),
-        .O_burst_x       (S_burst_x      ),
-        .O_burst_y       (S_burst_y      ),
-        .O_part_off      (S_part_off     ),
-        .O_part_en       (S_part_en      ),
-        .O_part_bomb     (S_part_bomb    ),
-        .O_score         (S_score        ),
-        .O_state         (S_state        ),
-        .O_hit_cnt       (S_hit_cnt      ),
-        .O_miss_cnt      (S_miss_cnt     ),
-        .O_fruit1_x      (S_fruit1_x     ),
-        .O_fruit1_y      (S_fruit1_y     ),
-        .O_state_word    (S_state_word   ),
-        .O_blade_pos     (S_blade_pos    )
+        .O_obj           (S_fruit_obj        ),
+        .O_tip_x         (S_fruit_tip_x      ),
+        .O_tip_y         (S_fruit_tip_y      ),
+        .O_trail_off     (S_fruit_trail_off  ),
+        .O_trail_en      (S_fruit_trail_en   ),
+        .O_burst_x       (S_fruit_burst_x    ),
+        .O_burst_y       (S_fruit_burst_y    ),
+        .O_part_off      (S_fruit_part_off   ),
+        .O_part_en       (S_fruit_part_en    ),
+        .O_part_bomb     (S_fruit_part_bomb  ),
+        .O_score         (S_fruit_score      ),
+        .O_state         (S_fruit_state      ),
+        .O_hit_cnt       (S_fruit_hit_cnt    ),
+        .O_miss_cnt      (S_fruit_miss_cnt   ),
+        .O_fruit1_x      (S_fruit_game1_x    ),
+        .O_fruit1_y      (S_fruit_game1_y    ),
+        .O_state_word    (S_fruit_state_word ),
+        .O_blade_pos     (                   )
+    );
+
+    // ------------------------------------------------------------------------
+    // 接果篮本体
+    // ------------------------------------------------------------------------
+    game_catch u_game_catch (
+        .I_clk           (I_clk            ),
+        .I_rst_n         (I_rst_n          ),
+        .I_vsync         (I_vsync          ),
+        .I_spawn_interval(S_catch_spawn    ),
+        .I_catch_cfg     (S_catch_cfg      ),
+        .I_restart       (S_cmd_restart | S_game_changed),
+        .I_standby       (S_cmd_standby    ),
+        .I_pause         (S_cmd_pause | ~S_is_catch),
+        .I_blade_x       (S_blade_x        ),
+        .O_obj           (S_catch_obj      ),
+        .O_burst_x       (S_catch_burst_x  ),
+        .O_burst_y       (S_catch_burst_y  ),
+        .O_part_off      (S_catch_part_off ),
+        .O_part_en       (S_catch_part_en  ),
+        .O_part_bomb     (S_catch_part_bomb),
+        .O_score         (S_catch_score    ),
+        .O_state         (S_catch_state    ),
+        .O_hit_cnt       (S_catch_hit_cnt  ),
+        .O_miss_cnt      (S_catch_miss_cnt ),
+        .O_fruit1_x      (S_catch_game1_x  ),
+        .O_fruit1_y      (S_catch_game1_y  ),
+        .O_state_word    (S_catch_state_word),
+        .O_basket_center (S_catch_basket_center),
+        .O_speed         (S_catch_speed    )
     );
 
     // ------------------------------------------------------------------------
@@ -272,6 +337,8 @@ module game_top #(
         .I_x_nxt       (S_x_nxt        ),
         .I_y_nxt       (S_y_nxt        ),
         .I_display_mode(I_display_mode ),
+        .I_basket_en   (S_is_catch     ),
+        .I_basket_center(S_catch_basket_center),
         .I_obj         (S_obj          ),
         .I_tip_x       (S_tip_x        ),
         .I_tip_y       (S_tip_y        ),

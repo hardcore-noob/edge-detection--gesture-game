@@ -7,7 +7,7 @@
 //
 // M0 地址表（0x40~0x7F A 段、0x80~0xBF B 段、0xC0~0xFF C 段留给后续里程碑）：
 //   0x00 display_mode[3:0]  R/W  0=RAW, 1=EDGE
-//   0x01 game_mode[3:0]     R/W  0=关
+//   0x01 game_mode[3:0]     R/W  0=关 / 1=切水果 / 2=接果篮
 //   0x02 edge_th_sel[3:0]   R/W  EDGE 门限档位：TH = 16 + 4×sel
 //   0x03 teach_req          W1P  写 1 触发一次示教请求（M1 消费）
 //   0x04 teach_cnt[15:0]    RO   示教请求累计次数
@@ -15,7 +15,7 @@
 //   0x06 param_wr_cnt[15:0] RO   成功写入次数（UART 命令是否真的落地，看这个）
 //   0x07 mode_commit_cnt    RO   模式在相机帧首提交的次数
 //   0x08 recog_algo[3:0]    R/W  0 = 识别停 / 1 = 手势识别（M1 消费）
-//                               KEY4 短按进 game_mode 时自动置 1、退出置 0
+//                               KEY4 短按循环 0→1→2→0，进入任一游戏置 1、退出置 0
 //
 // 0x80~0xBF（B 段）不在本模块解析，而是用 O_b_we/O_b_addr/O_b_wdata 原样转发给
 // game_top 的 game_param；读回由 I_b_rd_data 按段选通（M4a 接通，2026-10-13）。
@@ -126,6 +126,11 @@ module param_ctrl #(
     reg [15:0] S_wdata;
     reg        S_we;
 
+    // 0 -> 切水果 -> 接果篮 -> 退出。game_mode 不再是布尔量。
+    wire [3:0] S_key4_game_next =
+        (O_game_mode == 4'd0) ? 4'd1 :
+        (O_game_mode == 4'd1) ? 4'd2 : 4'd0;
+
     always @(*) begin
         S_we    = 1'b1;
         S_addr  = 8'h00;
@@ -139,9 +144,9 @@ module param_ctrl #(
             S_addr  = 8'h03;
             S_wdata = 16'h0001;
         end
-        else if(I_key4_short) begin              // 游戏层开 / 关
+        else if(I_key4_short) begin              // 切水果 / 接果篮 / 退出
             S_addr  = 8'h01;
-            S_wdata = {12'b0, ~O_game_mode[0]};
+            S_wdata = {12'b0, S_key4_game_next};
         end
         else if(I_key1_short) begin              // RAW / EDGE
             S_addr  = 8'h00;
@@ -215,7 +220,7 @@ module param_ctrl #(
             // KEY4 短按：进 game_mode 就用默认手势算法（1），退出就停识别（0，省功耗）。
             // 同一拍 UART 显式写 0x08 时不覆盖——UART 优先级最高。
             if(I_key4_short && !(I_ext_we && (I_ext_addr == 8'h08)))
-                O_recog_algo <= O_game_mode[0] ? 4'd0 : 4'd1;
+                O_recog_algo <= (S_key4_game_next != 4'd0) ? 4'd1 : 4'd0;
 
             if(I_key4_short)
                 O_key4_evt[3:0] <= O_key4_evt[3:0] + 1'b1;
