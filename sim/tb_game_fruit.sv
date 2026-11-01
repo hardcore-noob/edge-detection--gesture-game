@@ -42,6 +42,9 @@ module tb_game_fruit;
     wire [15:0] blade_pos;
 
     integer errors;
+    integer i;
+    integer expected_x [0:7];
+    integer expected_y [0:7];
 
     game_fruit dut (
         .I_clk(clk),
@@ -110,6 +113,20 @@ module tb_game_fruit;
         end
     endtask
 
+    task check_particle_offsets(input [255:0] name);
+        begin
+            for(i = 0; i < 8; i = i + 1) begin
+                if($signed(dut.S_pox[i]) !== expected_x[i] ||
+                   $signed(dut.S_poy[i]) !== expected_y[i]) begin
+                    errors = errors + 1;
+                    $display("FAIL %0s particle[%0d]=(%0d,%0d) expected=(%0d,%0d)",
+                             name, i, $signed(dut.S_pox[i]), $signed(dut.S_poy[i]),
+                             expected_x[i], expected_y[i]);
+                end
+            end
+        end
+    endtask
+
     initial begin
         clk = 0;
         rst_n = 0;
@@ -152,6 +169,11 @@ module tb_game_fruit;
             $display("FAIL fruit effect type=%0d part_en=%h bomb=%b",
                      dut.S_typ[0], part_en, part_bomb);
         end
+        for(i = 0; i < 8; i = i + 1) begin
+            expected_x[i] = -3;
+            expected_y[i] = -3;
+        end
+        check_particle_offsets("fruit initial centered");
 
         // 炸弹 -5，不产生半片，触发橙红色爆炸。
         clear_frame_events;
@@ -171,6 +193,35 @@ module tb_game_fruit;
             $display("FAIL bomb effect type=%0d bomb=%b part_en=%h part_bomb=%b",
                      dut.S_typ[0], dut.S_bomb[0], part_en, part_bomb);
         end
+        for(i = 0; i < 8; i = i + 1) begin
+            expected_x[i] = -6;
+            expected_y[i] = -6;
+        end
+        check_particle_offsets("bomb initial centered");
+
+        // 第一次物理更新必须保持八个方向向外扩散，不能把负坐标当正数。
+        run_phase(PH_PHYS);
+        expected_x[0] = -2; expected_y[0] = -10;
+        expected_x[1] =  0; expected_y[1] =  -6;
+        expected_x[2] = -2; expected_y[2] =  -2;
+        expected_x[3] = -6; expected_y[3] =   0;
+        expected_x[4] =-10; expected_y[4] =  -2;
+        expected_x[5] =-12; expected_y[5] =  -6;
+        expected_x[6] =-10; expected_y[6] = -10;
+        expected_x[7] = -6; expected_y[7] = -12;
+        check_particle_offsets("bomb first radial step");
+
+        // 第二次更新继续向外；修复前这里会出现 +255 的符号扩展错误。
+        run_phase(PH_PHYS);
+        expected_x[0] =  2; expected_y[0] = -14;
+        expected_x[1] =  6; expected_y[1] =  -6;
+        expected_x[2] =  2; expected_y[2] =   2;
+        expected_x[3] = -6; expected_y[3] =   6;
+        expected_x[4] =-14; expected_y[4] =   2;
+        expected_x[5] =-18; expected_y[5] =  -6;
+        expected_x[6] =-14; expected_y[6] = -14;
+        expected_x[7] = -6; expected_y[7] = -18;
+        check_particle_offsets("bomb second radial step");
 
         // 同帧水果 + 炸弹：+1-5 = -4；水果成片，炸弹删除，爆炸优先。
         clear_frame_events;
@@ -274,7 +325,7 @@ module tb_game_fruit;
         end
 
         if(errors == 0)
-            $display("PASS: fruit/bomb score, miss, effects, spawn limit, no-life state");
+            $display("PASS: fruit/bomb score, miss, centered radial particles, spawn limit, no-life state");
         else
             $display("FAIL: fruit integration errors=%0d", errors);
         $finish;

@@ -546,8 +546,10 @@ module game_fruit #(
                     S_part_age <= S_part_age + 8'd1;
                     S_part_en  <= 8'hFF;
                     for(oi = 0; oi < 8; oi = oi + 1) begin
-                        S_pox[oi] <= F_pclamp($signed({1'b0, S_pox[oi]}) + F_pvx(oi[2:0]));
-                        S_poy[oi] <= F_pclamp($signed({1'b0, S_poy[oi]}) + F_pvy(oi[2:0]));
+                        S_pox[oi] <= F_pclamp($signed({S_pox[oi][8], S_pox[oi]}) +
+                                              F_pvx(oi[2:0]));
+                        S_poy[oi] <= F_pclamp($signed({S_poy[oi][8], S_poy[oi]}) +
+                                              F_pvy(oi[2:0]));
                     end
                 end
                 else
@@ -624,8 +626,9 @@ module game_fruit #(
                     S_part_en <= 8'hFF;
                     S_part_bomb <= (S_bomb_hit_num != 2'd0);
                     for(oi = 0; oi < 8; oi = oi + 1) begin
-                        S_pox[oi] <= 9'sd0;
-                        S_poy[oi] <= 9'sd0;
+                        // 爆点表示对象中心；印章坐标是左上角，所以先回退半个印章。
+                        S_pox[oi] <= (S_bomb_hit_num != 2'd0) ? -9'sd6 : -9'sd3;
+                        S_poy[oi] <= (S_bomb_hit_num != 2'd0) ? -9'sd6 : -9'sd3;
                     end
                     // 同帧同时命中炸弹与水果时，爆点优先取炸弹。
                     if(S_bomb_hit_f[0]) begin

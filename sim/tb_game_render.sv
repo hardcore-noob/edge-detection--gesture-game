@@ -26,6 +26,7 @@ module tb_game_render;
     wire hit;
     wire [23:0] color;
     integer errors;
+    integer pi;
 
     game_render dut (
         .I_clk(clk),
@@ -145,6 +146,18 @@ module tb_game_render;
         end
         x_nxt = 12'd113;
         check_pixel(1'b0, "bomb particle outside 12x12");
+
+        // 初始 -6 偏移时，12×12 印章应恰好以爆点为中心。
+        part_off = 0;
+        for(pi = 0; pi < 8; pi = pi + 1) begin
+            part_off[pi*18 +: 9] = -9'sd6;
+            part_off[pi*18 + 9 +: 9] = -9'sd6;
+        end
+        x_nxt = 12'd94;
+        y_nxt = 12'd94;
+        check_pixel(1'b1, "centered bomb particle first pixel");
+        x_nxt = 12'd93;
+        check_pixel(1'b0, "centered bomb particle left of anchor");
         part_en = 0;
         part_bomb = 0;
 
