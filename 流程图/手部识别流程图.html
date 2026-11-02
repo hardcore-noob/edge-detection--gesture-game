@@ -5296,12 +5296,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="luma" data-edge-to="motion" data-edge-label="灰度" data-edge-key="4" data-edge-id="luma-to-motion" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="312.4,119;510.4,119;510.4,217" d="M 312.4 119 L 502.4 119 Q 510.4 119 510.4 127 L 510.4 217" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="luma" data-edge-to="skin" data-edge-label="Y / d1 / d2" data-edge-key="5" data-edge-id="luma-to-skin" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="266.4,145;266.4,166;386.4,166;386.4,217" d="M 266.4 145 L 266.4 158 Q 266.4 166 274.4 166 L 378.4 166 Q 386.4 166 386.4 174 L 386.4 217" class="a-emphasis" data-animate="edge" style="--step:1" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="morph" data-edge-to="band" data-edge-label="净化 mask" data-edge-key="6" data-edge-id="morph-to-band" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="658.8,393;658.8,465" d="M 658.8 393 L 658.8 465" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="motion" data-edge-to="morph" data-edge-label="运动候选融合" data-edge-key="7" data-edge-id="motion-to-morph" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="556.4,243;658.8,243;658.8,341" d="M 556.4 243 L 650.8 243 Q 658.8 243 658.8 251 L 658.8 341" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="motion" data-edge-to="occ" data-edge-label="候选融合" data-edge-key="7" data-edge-id="motion-to-occ" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="510.4,269;510.4,341" d="M 510.4 269 L 510.4 341" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="occ" data-edge-to="morph" data-edge-label="整块保留" data-edge-key="8" data-edge-id="occ-to-morph" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="556.4,367;612.8,367" d="M 556.4 367 L 612.8 367" class="a-emphasis" data-animate="edge" style="--step:3" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="skin" data-edge-to="occ" data-edge-label="肤色像素" data-edge-key="9" data-edge-id="skin-to-occ" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="386.4,269;386.4,367;464.4,367" d="M 386.4 269 L 386.4 359 Q 386.4 367 394.4 367 L 464.4 367" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="tap" data-edge-to="luma" data-edge-label="96-bit / 4 px" data-edge-key="10" data-edge-id="tap-to-luma" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="140,119;220.39999999999998,119" d="M 140 119 L 220.39999999999998 119" class="a-emphasis" data-animate="edge" style="--step:0" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="tip" data-edge-to="tracker" data-edge-label="指尖观测" data-edge-key="11" data-edge-id="tip-to-tracker" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="821.5999999999999,517;821.5999999999999,589" d="M 821.5999999999999 517 L 821.5999999999999 589" class="a-emphasis" data-animate="edge" style="--step:6" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="tracker" data-edge-to="bridge" data-edge-label="位置 + 锁定" data-edge-key="12" data-edge-id="tracker-to-bridge" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="821.5999999999999,641;821.5999999999999,713" d="M 821.5999999999999 641 L 821.5999999999999 713" class="a-emphasis" data-animate="edge" style="--step:7" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="morph" data-edge-to="centroid" data-edge-label="帧锁存统计" data-edge-key="13" data-edge-id="morph-to-centroid" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="658.8,341;658.8,333;540,333;540,615;612.8,615" d="M 658.8 341 L 658.8 333 Q 658.8 325 650.8 325 L 548 325 Q 540 325 540 333 L 540 607 Q 540 615 548 615 L 604.8 615" class="a-dashed" data-animate="edge" style="--step:13" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- Nodes -->
         <g id="node-tap" data-node-id="tap" data-node-label="RAW 彩色抽头" tabindex="0" role="button" aria-label="聚焦RAW 彩色抽头，RAW/EDGE Mux 之前, RAW 视频输入 › VIDEO_TAP" aria-pressed="false" data-node-kind="external" data-node-sublabel="RAW/EDGE Mux 之前" data-node-context="RAW 视频输入 › VIDEO_TAP">
@@ -5364,16 +5365,16 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="510.4" y="264.5" class="t-muted" font-size="6.6" text-anchor="middle">80×45 块背景 · 可选档</text>
         </g>
 
-        <g id="node-occ" data-node-id="occ" data-node-label="16×16 占比门" tabindex="0" role="button" aria-label="聚焦16×16 占比门，≥ 103/256 · 双 Bank, 掩码净化 › 去噪与定框" aria-pressed="false" data-node-kind="database" data-node-sublabel="≥ 103/256 · 双 Bank" data-node-context="掩码净化 › 去噪与定框">
-          <title>16×16 占比门 · ≥ 103/256 · 双 Bank · 掩码净化 › 去噪与定框</title>
+        <g id="node-occ" data-node-id="occ" data-node-label="掩码融合与占比门" tabindex="0" role="button" aria-label="聚焦掩码融合与占比门，16×16 · ≥103/256, 掩码净化 › 去噪与定框" aria-pressed="false" data-node-kind="database" data-node-sublabel="16×16 · ≥103/256" data-node-context="掩码净化 › 去噪与定框">
+          <title>掩码融合与占比门 · 16×16 · ≥103/256 · 掩码净化 › 去噪与定框</title>
           <rect x="464.4" y="341" width="92" height="52" rx="8" class="c-mask"/>
           <rect x="464.4" y="341" width="92" height="52" rx="8" class="c-database" data-animate="node" style="--step:3" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(470.4 347) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="510.4" y="373" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">16×16 占比门</text>
-          <text data-detail="context" x="510.4" y="384.6" class="t-muted" font-size="7.3" text-anchor="middle">≥ 103/256 · 双 Bank</text>
+          <text data-node-label="" data-detail-anchor="" x="510.4" y="373" class="t-primary" font-size="9.7" font-weight="600" text-anchor="middle">掩码融合与占比门</text>
+          <text data-detail="context" x="510.4" y="384.6" class="t-muted" font-size="7.3" text-anchor="middle">16×16 · ≥103/256</text>
         </g>
 
         <g id="node-morph" data-node-id="morph" data-node-label="形态学与投票" tabindex="0" role="button" aria-label="聚焦形态学与投票，闭运算 · 开运算 · 7/8, 掩码净化 › 去噪与定框" aria-pressed="false" data-node-kind="backend" data-node-sublabel="闭运算 · 开运算 · 7/8" data-node-context="掩码净化 › 去噪与定框">
@@ -5487,9 +5488,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="632.1999999999999" y="419" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
           <text x="658.8" y="429" class="t-edge-emphasis" font-size="8" text-anchor="middle">净化 mask</text>
         </g>
-        <g data-detail="context" data-edge-from="motion" data-edge-to="morph" data-edge-label="运动候选融合" data-edge-key="7" data-edge-id="motion-to-morph">
-          <rect x="573.8" y="223" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="607.5999999999999" y="233" class="t-edge-dashed" font-size="8" text-anchor="middle">运动候选融合</text>
+        <g data-detail="context" data-edge-from="motion" data-edge-to="occ" data-edge-label="候选融合" data-edge-key="7" data-edge-id="motion-to-occ">
+          <rect x="477.3999999999999" y="299" width="66" height="14" rx="3" class="c-mask"/>
+          <text x="510.4" y="309" class="t-edge-dashed" font-size="8" text-anchor="middle">候选融合</text>
         </g>
         <g data-detail="context" data-edge-from="occ" data-edge-to="morph" data-edge-label="整块保留" data-edge-key="8" data-edge-id="occ-to-morph">
           <rect x="560.3999999999999" y="347" width="48.4" height="14" rx="3" class="c-mask"/>
@@ -5510,6 +5511,10 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <g data-detail="context" data-edge-from="tracker" data-edge-to="bridge" data-edge-label="位置 + 锁定" data-edge-key="12" data-edge-id="tracker-to-bridge">
           <rect x="790.1999999999999" y="667" width="62.8" height="14" rx="3" class="c-mask"/>
           <text x="821.5999999999999" y="677" class="t-edge-emphasis" font-size="8" text-anchor="middle">位置 + 锁定</text>
+        </g>
+        <g data-detail="context" data-edge-from="morph" data-edge-to="centroid" data-edge-label="帧锁存统计" data-edge-key="13" data-edge-id="morph-to-centroid">
+          <rect x="503.5" y="477" width="73" height="14" rx="3" class="c-mask"/>
+          <text x="540" y="487" class="t-edge-dashed" font-size="8" text-anchor="middle">帧锁存统计</text>
         </g>
 
         <!-- Legend -->

@@ -5291,7 +5291,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="luma" data-edge-to="window" data-edge-label="4 px / 拍" data-edge-key="4" data-edge-id="luma-to-window" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="396,243;457.2,243" d="M 396 243 L 457.2 243" class="a-emphasis" data-animate="edge" style="--step:2" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="mode" data-edge-to="gradient_out" data-edge-label="运行时 TH" data-edge-key="5" data-edge-id="mode-to-gradient" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="274,491;809.6,491;809.6,269" d="M 274 491 L 801.6 491 Q 809.6 491 809.6 483 L 809.6 269" class="a-security" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <path data-edge-from="mode" data-edge-to="mux" data-edge-label="display_mode" data-edge-key="6" data-edge-id="mode-to-mux" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="228,517;228,622;787.6,622" d="M 228 517 L 228 614 Q 228 622 236 622 L 787.6 622" class="a-security" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="mux" data-edge-to="display" data-edge-label="96-bit 像素流" data-edge-key="7" data-edge-id="mux-to-display" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="833.6,641;833.6,713" d="M 833.6 641 L 833.6 713" class="a-emphasis" data-animate="edge" style="--step:6" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="mux" data-edge-to="display" data-edge-label="96→128 bit" data-edge-key="7" data-edge-id="mux-to-display" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="833.6,641;833.6,713" d="M 833.6 641 L 833.6 713" class="a-emphasis" data-animate="edge" style="--step:6" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="raw_bypass" data-edge-to="mux" data-edge-label="display_mode = 0" data-edge-key="8" data-edge-id="raw-to-mux" data-composition-routing="workflow-v2-auto" data-edge-role="branch" data-composition-points="685.2,393;685.2,409;20,409;20,657;809.6,657;809.6,641" d="M 685.2 393 L 685.2 401 Q 685.2 409 677.2 409 L 28 409 Q 20 409 20 417 L 20 649 Q 20 657 28 657 L 801.6 657 Q 809.6 657 809.6 649 L 809.6 641" class="a-dashed" data-animate="edge" style="--step:12" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="sobel" data-edge-to="gradient_out" data-edge-label="4 路幅值" data-edge-key="9" data-edge-id="sobel-to-gradient" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="731.2,243;787.6,243" d="M 731.2 243 L 787.6 243" class="a-emphasis" data-animate="edge" style="--step:4" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="window" data-edge-to="sobel" data-edge-label="top / mid / cur" data-edge-key="10" data-edge-id="window-to-sobel" data-composition-routing="workflow-v2-auto" data-edge-role="main" data-composition-points="549.2,243;639.2,243" d="M 549.2 243 L 639.2 243" class="a-emphasis" data-animate="edge" style="--step:3" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
@@ -5403,8 +5403,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="833.6" y="636.6" class="t-muted" font-size="8" text-anchor="middle">逐帧单一算法</text>
         </g>
 
-        <g id="node-display" data-node-id="display" data-node-label="DDR → HDMI" tabindex="0" role="button" aria-label="聚焦DDR → HDMI，1280×720 @ 60, 显示输出 › 梯度与输出" aria-pressed="false" data-node-kind="external" data-node-sublabel="1280×720 @ 60" data-node-context="显示输出 › 梯度与输出">
-          <title>DDR → HDMI · 1280×720 @ 60 · 显示输出 › 梯度与输出</title>
+        <g id="node-display" data-node-id="display" data-node-label="DDR → HDMI" tabindex="0" role="button" aria-label="聚焦DDR → HDMI，128-bit · 720P60, 显示输出 › 梯度与输出" aria-pressed="false" data-node-kind="external" data-node-sublabel="128-bit · 720P60" data-node-context="显示输出 › 梯度与输出">
+          <title>DDR → HDMI · 128-bit · 720P60 · 显示输出 › 梯度与输出</title>
           <rect x="787.6" y="713" width="92" height="52" rx="8" class="c-mask"/>
           <rect x="787.6" y="713" width="92" height="52" rx="8" class="c-external" data-animate="node" style="--step:7" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(793.6 719) scale(0.6875)">
@@ -5412,7 +5412,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="833.6" y="745" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DDR → HDMI</text>
-          <text data-detail="context" x="833.6" y="757.3" class="t-muted" font-size="8" text-anchor="middle">1280×720 @ 60</text>
+          <text data-detail="context" x="833.6" y="757.3" class="t-muted" font-size="8" text-anchor="middle">128-bit · 720P60</text>
         </g>
 
         <!-- Edge labels -->
@@ -5444,9 +5444,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="474" y="602" width="67.6" height="14" rx="3" class="c-mask"/>
           <text x="507.8" y="612" class="t-edge-security" font-size="8" text-anchor="middle">display_mode</text>
         </g>
-        <g data-detail="context" data-edge-from="mux" data-edge-to="display" data-edge-label="96-bit 像素流" data-edge-key="7" data-edge-id="mux-to-display">
-          <rect x="797.4" y="667" width="72.4" height="14" rx="3" class="c-mask"/>
-          <text x="833.6" y="677" class="t-edge-emphasis" font-size="8" text-anchor="middle">96-bit 像素流</text>
+        <g data-detail="context" data-edge-from="mux" data-edge-to="display" data-edge-label="96→128 bit" data-edge-key="7" data-edge-id="mux-to-display">
+          <rect x="802.6" y="667" width="62" height="14" rx="3" class="c-mask"/>
+          <text x="833.6" y="677" class="t-edge-emphasis" font-size="8" text-anchor="middle">96→128 bit</text>
         </g>
         <g data-detail="context" data-edge-from="raw_bypass" data-edge-to="mux" data-edge-label="display_mode = 0" data-edge-key="8" data-edge-id="raw-to-mux">
           <rect x="371.40000000000003" y="637" width="86.8" height="14" rx="3" class="c-mask"/>
