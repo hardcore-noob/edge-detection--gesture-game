@@ -33,3 +33,6 @@ sim/
 official_example/
 graphify-out/
 流程图/
+
+# Local development history
+docs/CHANGELOG.md

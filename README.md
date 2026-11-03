@@ -242,7 +242,6 @@ td_project/camera_to_dsi_display_Runs/phy_1/camera_to_dsi_display_compress.bit
 
 ## 技术资料
 
-- [实现历史与构建记录](docs/CHANGELOG.md)
 - [手势识别与游戏接口](docs/gesture-game-interface.md)
 - [串口调试字段](docs/debug-uart.md)
 - [资源预算与验收方法](docs/resource-budget.md)
