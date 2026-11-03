@@ -29,6 +29,8 @@ tmp/
 temp/
 
 # Local reference, simulation, and generated analysis material
+参考资料/
+output/
 sim/
 official_example/
 graphify-out/
