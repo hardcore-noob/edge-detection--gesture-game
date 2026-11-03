@@ -24,6 +24,12 @@ Thumbs.db
 *.area
 debug_uart.log
 
-# Local scratch / diagnostics directory (see README section 0)
+# Local scratch / diagnostics directories
 tmp/
 temp/
+
+# Local reference, simulation, and generated analysis material
+sim/
+official_example/
+graphify-out/
+流程图/

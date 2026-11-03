@@ -3,41 +3,22 @@
 FPGA 竞赛安路赛道赛题二工程：基于 PH1P35/HX1P35A 开发板，把 MIPI 摄像头采集、
 ISP、边缘检测、OSD 叠加和 HDMI 显示整合到同一个 bitstream 中。
 
-## 0. AI 会话入口（新会话先读）
+## 项目状态
 
-新会话先阅读以下资料，再改代码：
-
-1. `参考资料/赛题解析二-整理.md`：赛题目标和交付要求。
-2. 本 README 第 1～3 节：工程概览、数据流和按键。
-3. [`docs/手势游戏实现路线规划.md`](docs/手势游戏实现路线规划.md)：里程碑、模块职责和资源预算。
-4. [`docs/手势识别待修复问题-20261023.md`](docs/手势识别待修复问题-20261023.md)：识别问题、复现条件和待验证方案。
-5. [`docs/gesture-game-interface.md`](docs/gesture-game-interface.md)：插座、完整寄存器、玩法和测试清单。
-6. 查串口字段时读 [`docs/debug-uart.md`](docs/debug-uart.md)。
-7. 查资源、面积表和布局参数时读 [`docs/resource-budget.md`](docs/resource-budget.md)。
-8. 查历史实现、实验过程和旧构建结论时读 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
-9. 实现手部二维种子连通域前读
-   [`docs/手势种子连通域实现计划.md`](docs/手势种子连通域实现计划.md)。
-
-硬件参考资料位于 `参考资料/`。Markdown 是整理版，若与 PDF/PPTX 或硬件手册冲突，
-以原始资料为准。
-
-### 当前状态
-
-- 当前分支：`feat/ges-white-tip-clean-mask`。
 - 当前基线：slices `18678/21216`（88.04%）、LUT6 `17358`、ERAM `80/108`、
   DSP `8/40`、final Setup `+550 ps`、Hold `+20 ps`，0 违例。
 - 手部掩码使用全局 7/8 投票和 16×16 全块面积占比门（`OCC_MIN=103/256≈40.2%`）；
   M2 通过 `S_m_pick_d` 共用同一结果。
-- 下一阶段：优先优化资源占用和手势识别算法。
+- 当前交付包含 RAW/EDGE、手势识别、切水果和接果篮；GES 干净视图与掩码调试视图
+  由 `recog_algo=6/1` 切换。
 - 构建门禁：slices <95%、Setup ≥ `+200 ps`、Hold 0 违例、一次 PnR 通过。
 
-### 工作规则
+### 工程约定
 
-- 开工先执行 `git status`，不要覆盖或提交会话外产生的改动。
+- 修改前先执行 `git status`，不要覆盖已有的本地改动。
 - RTL 或约束改动后运行 `pwsh -NoProfile -File tools/build_td.ps1`；只改文档不构建。
 - 新克隆或新 worktree 先运行 `pwsh -NoProfile -File tools/new_worktree_runs.ps1`。
-- 无用户明确要求时，不执行 `git push`、改写历史或合并外部改动。
-- `tmp/`、TD Run 目录、bitstream 和日志均不纳入版本库。
+- `tmp/`、`temp/`、TD Run 目录、bitstream 和日志均不纳入版本库。
 
 ## 1. 工程概览
 
@@ -201,15 +182,11 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 - 默认分支：`main`
 - 构建产物、TD Run 目录、bitstream 和本地日志不纳入版本库。
 
-长期保留的文档只有：
+随源码保留的专题文档：
 
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md)：实现历史、构建数字、实验和上板结论。
-- [`docs/手势游戏实现路线规划.md`](docs/手势游戏实现路线规划.md)：里程碑、模块所有权、接口和资源预算。
-- [`docs/手势识别待修复问题-20261023.md`](docs/手势识别待修复问题-20261023.md)：识别问题清单和复现条件。
 - [`docs/debug-uart.md`](docs/debug-uart.md)：完整 DBG 字段、复用规则和读取方法。
 - [`docs/resource-budget.md`](docs/resource-budget.md)：当前资源、门禁、面积表和布局参数。
-- [`docs/resource-optimization-backlog.md`](docs/resource-optimization-backlog.md)：
-  资源优化候选、优先级和已完成实验结果。
 - [`docs/gesture-game-interface.md`](docs/gesture-game-interface.md)：插座、参数地址、玩法和测试清单。
 
 边缘算法原理和调参过程以 CHANGELOG 为准，不再另建平行文档。
@@ -217,9 +194,8 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 ## 9. 当前已知风险
 
 - 手势识别仍需改善下劈稳定性、脸/背景误锁、白/自然光鲁棒性、远距离锁定和坐标抖动；
-  当前已恢复行带水平窗和窄行拆带，识别稳定性优先；脸、手臂和背景粘连留给后续
-  种子连通域处理。
-- 当前 slices 为 88.56%，新增功能前仍必须先评估资源和 feedthrough。
+  当前已恢复行带水平窗和窄行拆带，识别稳定性优先；脸、手臂和背景粘连仍需后续处理。
+- 当前 slices 为 88.04%，新增功能前仍必须先评估资源和 feedthrough。
 - 时序余量对布局落点敏感；同一网表重复 PnR 不会自动改善，必须改逻辑或约束。
 - 链路没有完整 ready/backpressure 闭环；DDR/FIFO 拥塞时可能静默丢数，需监控 `D/E/W/V`。
 - CSI 与 HDMI 像素域是异步组，TD 不检查其间路径；跨域必须使用 toggle 握手、两级同步
@@ -258,8 +234,7 @@ DBG:F=xxxx A=xxxx G=xxxx T=xxxxxx N=xxxxx B=xxxxx C=xxxxx M=xxx L=xx D=xxxx E=xx
 
 ### 11.2 优化方向
 
-1. 按 [`docs/resource-optimization-backlog.md`](docs/resource-optimization-backlog.md)
-   的顺序继续裁剪 `recog_top` 调试档和 `game_fruit` 状态/物理通路。
+1. 继续裁剪 `recog_top` 调试档和 `game_fruit` 状态/物理通路，并逐项核对层次面积。
 2. 清理已完成功能留下的死代码、重复 mux 和未使用寄存器。
 3. 优先复用已有 ERAM/DSP 和共享数据通路，不为单一功能复制整套组合逻辑。
 
@@ -410,7 +385,7 @@ W 85 0001      # 切回手势源
 
 ## 13. README 更新准则
 
-README 面向项目介绍、快速上手和新会话交接。更新时按以下规则放置内容：
+README 面向项目介绍、快速上手和开发维护。更新时按以下规则放置内容：
 
 | 内容 | 放置位置 |
 |---|---|
@@ -419,14 +394,12 @@ README 面向项目介绍、快速上手和新会话交接。更新时按以下�
 | 资源表、门禁、面积表方法和布局参数 | `docs/resource-budget.md` |
 | 插座、完整参数地址、玩法与测试清单 | `docs/gesture-game-interface.md` |
 | 历史实现、实验过程、构建演化和旧结论 | `docs/CHANGELOG.md` |
-| 里程碑、模块所有权和资源分配 | `docs/手势游戏实现路线规划.md` |
-| 当前识别问题、复现条件和待验证方案 | `docs/手势识别待修复问题-20261023.md` |
 
 执行规则：
 
 1. README 只写当前有效事实；同一事实只在最合适的位置维护，其他位置用链接。
 2. 详细参考超过约 10 行时，优先写入专题文档，README 保留摘要和触发条件明确的链接。
-3. 更新资源数字时同步检查第 0、11、12.5 节；完整资源方法只维护在
+3. 更新资源数字时同步检查项目状态、第 11、12.5 节；完整资源方法只维护在
    `docs/resource-budget.md`。
 4. 更新 DBG 字段或字段复用时同步检查 `debug_uart_logger.v`、读取脚本、
    `docs/debug-uart.md` 和 README 第 7 节。

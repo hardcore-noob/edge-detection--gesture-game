@@ -1,1 +1,0 @@
-{"nodes": [{"id": "$graphify-root$_user_source_hdl_source_mipi_dphy_rx_channel_aligner_wrapper_enc_sv", "label": "channel_aligner_wrapper.enc.sv", "file_type": "code", "source_file": "user_source/hdl_source/mipi_dphy_rx/channel_aligner_wrapper.enc.sv", "source_location": "L1", "confidence_score": 1.0}], "edges": []}
